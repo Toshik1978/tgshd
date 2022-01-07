@@ -1,0 +1,117 @@
+run:
+  concurrency: 4
+  deadline: 2m
+
+linters-settings:
+  funlen:
+    lines: 60
+    statements: 40
+
+  govet:
+    check-shadowing: true
+    enable-all: true
+    disable:
+    - fieldalignment
+
+  revive:
+    min-confidence: 0.8
+    rules:
+      - name: unexported-return
+        disabled: true
+
+  gofmt:
+    simplify: true
+
+  goimports:
+    local-prefixes: github.com/Toshik1978
+
+  gocyclo:
+    min-complexity: 10
+
+  maligned:
+    suggest-new: true
+
+  dupl:
+    threshold: 100
+
+  lll:
+    line-length: 140
+
+  unused:
+    check-exported: true
+
+  nakedret:
+    max-func-lines: 30
+
+  prealloc:
+    simple: true
+    range-loops: true # Report preallocation suggestions on range loops, true by default
+    for-loops: false # Report preallocation suggestions on for loops, false by default
+
+  gocritic:
+    enabled-tags:
+      - diagnostic
+      - style
+      - performance
+      - experimental
+      - opinionated
+    disabled-checks:
+      - hugeParam
+      - whyNoLint
+      - unnamedResult
+
+  staticcheck:
+    go: "1.15"
+
+  stylecheck:
+    go: "1.15"
+
+linters:
+  disable-all: true
+  enable:
+    - bodyclose
+    - deadcode
+    - depguard
+    - dogsled
+    - dupl
+    - errcheck
+    - funlen
+    - gochecknoinits
+    - goconst
+    - gocritic
+    - gocyclo
+    - godot
+    - gofmt
+    - goimports
+    - revive
+    - gosec
+    - gosimple
+    - govet
+    - ineffassign
+    - lll
+    - misspell
+    - nakedret
+    - exportloopref
+    - staticcheck
+    - structcheck
+    - stylecheck
+    - typecheck
+    - unconvert
+    - unparam
+    - varcheck
+    - whitespace
+
+issues:
+  exclude-rules:
+    - path: _test\.go
+      linters:
+        - unused
+        - gocyclo
+        - errcheck
+        - dupl
+        - gosec
+        - lll
+        - funlen
+    - linters:
+        - lll
+      source: "^//go:generate "

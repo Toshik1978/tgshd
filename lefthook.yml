@@ -1,0 +1,18 @@
+skip_output:
+  - meta
+  - success
+
+pre-commit:
+  parallel: true
+  commands:
+    Run linter:
+      run: make quality.lint
+    Run unit tests:
+      run: make quality.tests
+    Build application:
+      run: make app.build
+
+commit-msg:
+  commands:
+    Run commitlint:
+      run: npx commitlint --edit
