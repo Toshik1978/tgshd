@@ -9,8 +9,8 @@ import (
 
 // Callback define callback for command handler.
 type Callback interface {
-	// On handles command.
-	On(ctx context.Context, telegramID int64, command, args string) error
+	// OnCommand handles command.
+	OnCommand(ctx context.Context, senderID int64, command string) error
 }
 
 // Consumer declare telegram consumer.
@@ -63,11 +63,7 @@ func (c *consumer) handleCommands() {
 
 func (c *consumer) handleCommand(message *tgbotapi.Message) {
 	command := message.Command()
-	args := message.CommandArguments()
-
-	logger := c.logger.
-		With(zap.String("command", command)).
-		With(zap.String("args", args))
+	logger := c.logger.With(zap.String("command", command))
 
 	var senderID int64
 	switch {
@@ -89,7 +85,7 @@ func (c *consumer) handleCommand(message *tgbotapi.Message) {
 		}
 	}()
 
-	err := c.cb.On(context.Background(), senderID, command, args)
+	err := c.cb.OnCommand(context.Background(), senderID, command)
 	if err != nil {
 		logger.
 			With(zap.Error(err)).

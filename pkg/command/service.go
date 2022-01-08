@@ -15,10 +15,7 @@ type service struct {
 }
 
 // NewService instantiate new command service.
-func NewService(
-	logger *zap.Logger,
-	handlers []Handler,
-) *service {
+func NewService(logger *zap.Logger, handlers []Handler) *service {
 	logger.
 		With(zap.Int("commands_count", len(handlers))).
 		Info("Creation of CommandService")
@@ -37,7 +34,7 @@ func prepareHandlers(handlers []Handler) map[string]Handler {
 	return mapping
 }
 
-func (s *service) On(ctx context.Context, telegramID int64, cmd, args string) error {
+func (s *service) OnCommand(ctx context.Context, telegramID int64, cmd string) error {
 	handler := s.handlers[strings.ToLower(cmd)]
 	if handler == nil {
 		return fmt.Errorf("unsupported command received: %s", cmd)

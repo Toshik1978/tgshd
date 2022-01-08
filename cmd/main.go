@@ -4,8 +4,10 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"net/http"
 
 	"github.com/caarlos0/env/v6"
+	"github.com/go-playground/webhooks/v6/gitlab"
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	_ "github.com/joho/godotenv/autoload"
 	"go.uber.org/fx"
@@ -16,6 +18,7 @@ import (
 	"github.com/Toshik1978/server-bot/cmd/app"
 	"github.com/Toshik1978/server-bot/pkg/command"
 	"github.com/Toshik1978/server-bot/pkg/telegram"
+	"github.com/Toshik1978/server-bot/pkg/webhook"
 )
 
 // Build-time constants.
@@ -28,6 +31,7 @@ func main() {
 	fxApp := fx.New(
 		configuration(),
 		commandHandlers(),
+		webhookHandlers(),
 		fx.Provide(newApplication),
 		fx.Invoke(register),
 		fx.ErrorHook(&errorHandler{}),
@@ -48,20 +52,7 @@ func configuration() fx.Option {
 		fx.Provide(
 			newTelegramBot,
 			fx.Annotate(telegram.NewConsumer, fx.As(new(telegram.Consumer))),
-			fx.Annotate(telegram.NewPublisher, fx.As(new(command.Publisher))),
-		),
-	)
-}
-
-// commandHandlers provides telegram commands information for fx.
-func commandHandlers() fx.Option {
-	return fx.Options(
-		fx.Provide(
-			newCommands,
-			fx.Annotate(
-				command.NewService,
-				fx.As(new(telegram.Callback)),
-			),
+			fx.Annotate(telegram.NewPublisher, fx.As(new(command.Publisher)), fx.As(new(webhook.Publisher))),
 		),
 	)
 }
@@ -105,18 +96,58 @@ func newTelegramBot(cfg *config) (*tgbotapi.BotAPI, error) {
 	return tgbotapi.NewBotAPI(cfg.TelegramToken)
 }
 
-// newCommands initializes commands.
-func newCommands(logger *zap.Logger, publisher command.Publisher, cfg *config) []command.Handler {
-	return []command.Handler{
-		command.NewPingCommand(logger, publisher, cfg.PingHosts),
-		command.NewPowerCommand(logger, publisher, cfg.NutIP, cfg.NutName, cfg.NutUser, cfg.NutPassword),
-		command.NewSpeedCommand(logger, publisher),
-	}
+// commandHandlers provides telegram commands information for fx.
+func commandHandlers() fx.Option {
+	return fx.Options(
+		fx.Provide(
+			fx.Annotate(
+				command.NewService,
+				fx.As(new(telegram.Callback)),
+				fx.ParamTags(``, `group:"command_handler"`),
+			),
+		),
+		fx.Provide(
+			fx.Annotate(
+				func(logger *zap.Logger, publisher command.Publisher, cfg *config) command.Handler {
+					return command.NewPingCommand(logger, publisher, cfg.PingHosts)
+				},
+				fx.ResultTags(`group:"command_handler"`),
+			),
+			fx.Annotate(
+				func(logger *zap.Logger, publisher command.Publisher, cfg *config) command.Handler {
+					return command.NewPowerCommand(logger, publisher, cfg.NutIP, cfg.NutName, cfg.NutUser, cfg.NutPassword)
+				},
+				fx.ResultTags(`group:"command_handler"`),
+			),
+			fx.Annotate(
+				command.NewSpeedCommand,
+				fx.As(new(command.Handler)),
+				fx.ResultTags(`group:"command_handler"`),
+			),
+		),
+	)
+}
+
+// webhookHandlers provides webhook-specific information for fx.
+func webhookHandlers() fx.Option {
+	return fx.Options(
+		fx.Provide(
+			func(cfg *config) (*gitlab.Webhook, error) {
+				return gitlab.New(gitlab.Options.Secret(cfg.GitlabToken))
+			},
+			func(logger *zap.Logger, hook *gitlab.Webhook, publisher webhook.Publisher, cfg *config) webhook.Service {
+				return webhook.NewService(logger, hook, publisher, cfg.GitlabChatID)
+			},
+			func(service webhook.Service) http.Handler {
+				return service.Handler()
+			},
+		),
+	)
 }
 
 // newApplication initializes application.
-func newApplication(lc fx.Lifecycle, p app.ApplicationParams, _ *config) *app.Application {
-	a := app.NewApplication(p, Commit, Buildstamp)
+func newApplication(lc fx.Lifecycle, p app.ApplicationParams, cfg *config) *app.Application {
+	a := app.NewApplication(p, cfg.GitlabWebhookAddress, Commit, Buildstamp)
 	cancelCtx, cancel := context.WithCancel(context.Background())
 
 	lc.Append(fx.Hook{
@@ -131,8 +162,8 @@ func newApplication(lc fx.Lifecycle, p app.ApplicationParams, _ *config) *app.Ap
 }
 
 // register bootstrap application.
-func register(application *app.Application) {
-	application.Bootstrap()
+func register(application *app.Application, handler http.Handler) {
+	application.Register(handler)
 }
 
 // errorHandler is an error handler for fx.

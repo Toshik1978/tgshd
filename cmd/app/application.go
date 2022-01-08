@@ -3,7 +3,9 @@ package app
 import (
 	"context"
 	"fmt"
+	"net/http"
 
+	"github.com/gorilla/mux"
 	"go.uber.org/fx"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -23,15 +25,24 @@ type ApplicationParams struct {
 type Application struct {
 	logger     *zap.Logger
 	tlg        telegram.Consumer
+	router     *mux.Router
+	server     *http.Server
 	commit     string
 	buildstamp string
 }
 
 // NewApplication creates new instance of application.
-func NewApplication(p ApplicationParams, commit, buildstamp string) *Application {
+func NewApplication(p ApplicationParams, httpAddress, commit, buildstamp string) *Application {
+	router := mux.NewRouter()
+	server := &http.Server{
+		Addr:    httpAddress,
+		Handler: router,
+	}
 	return &Application{
 		logger:     p.Logger,
 		tlg:        p.Telegram,
+		router:     router,
+		server:     server,
 		commit:     commit,
 		buildstamp: buildstamp,
 	}
@@ -52,6 +63,10 @@ func (a *Application) OnStart(ctx context.Context) error {
 }
 
 func (a *Application) onStart(ctx context.Context) error {
+	go func() {
+		a.logger.Info("HTTP Server Starting")
+		_ = a.server.ListenAndServe()
+	}()
 	if err := a.tlg.Start(ctx); err != nil {
 		return fmt.Errorf("failed to start telegram handler: %w", err)
 	}
@@ -79,9 +94,11 @@ func (a *Application) OnStop(ctx context.Context, cancel context.CancelFunc) err
 
 func (a *Application) onStop(ctx context.Context) error {
 	grp, grpCtx := errgroup.WithContext(ctx)
+	grp.Go(func() error { return a.server.Shutdown(ctx) })
 	grp.Go(func() error { return a.tlg.Stop(grpCtx) })
 	return grp.Wait()
 }
 
-func (a *Application) Bootstrap() {
+func (a *Application) Register(handler http.Handler) {
+	a.router.PathPrefix("/webhook").Handler(handler).Methods("POST")
 }
