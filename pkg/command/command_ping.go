@@ -7,20 +7,18 @@ import (
 
 	"github.com/go-ping/ping"
 	"go.uber.org/zap"
-
-	"github.com/Toshik1978/server-bot/pkg/telegram"
 )
 
 type pingCommand struct {
 	logger    *zap.Logger
-	publisher telegram.Publisher
+	publisher Publisher
 	hosts     []string
 }
 
 // NewPingCommand creates new handler for ping command.
 func NewPingCommand(
 	logger *zap.Logger,
-	publisher telegram.Publisher,
+	publisher Publisher,
 	hosts []string,
 ) *pingCommand {
 	logger.Info("Ping command created")
@@ -35,7 +33,7 @@ func (c *pingCommand) Name() string {
 	return "ping"
 }
 
-func (c *pingCommand) Handle(ctx context.Context, telegramID int64, _ string) error {
+func (c *pingCommand) Handle(ctx context.Context, senderID int64) error {
 	text := "PONG\n\n"
 	for _, host := range c.hosts {
 		pinger, err := ping.NewPinger(host)
@@ -57,7 +55,7 @@ func (c *pingCommand) Handle(ctx context.Context, telegramID int64, _ string) er
 		}
 	}
 
-	if _, err := c.publisher.Publish(ctx, telegramID, telegram.Message{Text: text}); err != nil {
+	if err := c.publisher.Publish(ctx, senderID, text); err != nil {
 		return fmt.Errorf("failed to publish reply: %w", err)
 	}
 	return nil

@@ -48,7 +48,7 @@ func configuration() fx.Option {
 		fx.Provide(
 			newTelegramBot,
 			fx.Annotate(telegram.NewConsumer, fx.As(new(telegram.Consumer))),
-			fx.Annotate(telegram.NewPublisher, fx.As(new(telegram.Publisher))),
+			fx.Annotate(telegram.NewPublisher, fx.As(new(command.Publisher))),
 		),
 	)
 }
@@ -57,14 +57,11 @@ func configuration() fx.Option {
 func commandHandlers() fx.Option {
 	return fx.Options(
 		fx.Provide(
+			newCommands,
 			fx.Annotate(
 				command.NewService,
 				fx.As(new(telegram.Callback)),
-				fx.ParamTags(``, ``, `group:"command_handler"`),
 			),
-		),
-		fx.Provide(
-			fx.Annotate(newPingCommand, fx.ResultTags(`group:"command_handler"`)),
 		),
 	)
 }
@@ -82,9 +79,16 @@ func newLogger(cfg *config) (*zap.Logger, error) {
 }
 
 type config struct {
-	AppEnv        string   `env:"APP_ENV"`
-	TelegramToken string   `env:"TELEGRAM_BOT_TOKEN"`
-	PingHosts     []string `env:"PING_HOSTS" envSeparator:","`
+	AppEnv               string   `env:"APP_ENV"`
+	TelegramToken        string   `env:"TELEGRAM_TOKEN"`
+	PingHosts            []string `env:"BOT_PING_HOSTS" envSeparator:","`
+	NutIP                string   `env:"BOT_NUT_IP"`
+	NutName              string   `env:"BOT_NUT_NAME"`
+	NutUser              string   `env:"BOT_NUT_USER"`
+	NutPassword          string   `env:"BOT_NUT_PASS"`
+	GitlabChatID         int64    `env:"TELEGRAM_GITLAB_CHAT_ID"`
+	GitlabWebhookAddress string   `env:"GITLAB_WEBHOOK_ADDR"`
+	GitlabToken          string   `env:"GITLAB_TOKEN"`
 }
 
 // newConfig initializes configuration.
@@ -101,9 +105,13 @@ func newTelegramBot(cfg *config) (*tgbotapi.BotAPI, error) {
 	return tgbotapi.NewBotAPI(cfg.TelegramToken)
 }
 
-// newPingCommand initializes new ping command.
-func newPingCommand(logger *zap.Logger, publisher telegram.Publisher, cfg *config) command.Handler {
-	return command.NewPingCommand(logger, publisher, cfg.PingHosts)
+// newCommands initializes commands.
+func newCommands(logger *zap.Logger, publisher command.Publisher, cfg *config) []command.Handler {
+	return []command.Handler{
+		command.NewPingCommand(logger, publisher, cfg.PingHosts),
+		command.NewPowerCommand(logger, publisher, cfg.NutIP, cfg.NutName, cfg.NutUser, cfg.NutPassword),
+		command.NewSpeedCommand(logger, publisher),
+	}
 }
 
 // newApplication initializes application.

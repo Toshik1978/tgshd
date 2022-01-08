@@ -6,21 +6,17 @@ import (
 	"strings"
 
 	"go.uber.org/zap"
-
-	"github.com/Toshik1978/server-bot/pkg/telegram"
 )
 
 // service declare command service.
 type service struct {
-	logger    *zap.Logger
-	publisher telegram.Publisher
-	handlers  map[string]Handler
+	logger   *zap.Logger
+	handlers map[string]Handler
 }
 
 // NewService instantiate new command service.
 func NewService(
 	logger *zap.Logger,
-	publisher telegram.Publisher,
 	handlers []Handler,
 ) *service {
 	logger.
@@ -28,9 +24,8 @@ func NewService(
 		Info("Creation of CommandService")
 
 	return &service{
-		logger:    logger,
-		publisher: publisher,
-		handlers:  prepareHandlers(handlers),
+		logger:   logger,
+		handlers: prepareHandlers(handlers),
 	}
 }
 
@@ -48,7 +43,7 @@ func (s *service) On(ctx context.Context, telegramID int64, cmd, args string) er
 		return fmt.Errorf("unsupported command received: %s", cmd)
 	}
 
-	if err := handler.Handle(ctx, telegramID, args); err != nil {
+	if err := handler.Handle(ctx, telegramID); err != nil {
 		return fmt.Errorf("failed to handle command: %w", err)
 	}
 	return nil
