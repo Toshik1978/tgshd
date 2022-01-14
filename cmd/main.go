@@ -17,6 +17,9 @@ import (
 
 	"github.com/Toshik1978/server-bot/cmd/app"
 	"github.com/Toshik1978/server-bot/pkg/command"
+	"github.com/Toshik1978/server-bot/pkg/ping"
+	"github.com/Toshik1978/server-bot/pkg/power"
+	"github.com/Toshik1978/server-bot/pkg/speedtest"
 	"github.com/Toshik1978/server-bot/pkg/telegram"
 	"github.com/Toshik1978/server-bot/pkg/webhook"
 )
@@ -65,6 +68,8 @@ func newLogger(cfg *config) (*zap.Logger, error) {
 		config.EncoderConfig.EncodeLevel = zapcore.CapitalColorLevelEncoder
 	} else {
 		config = zap.NewProductionConfig()
+		config.Encoding = "console"
+		config.EncoderConfig.EncodeLevel = zapcore.CapitalLevelEncoder
 	}
 	return config.Build()
 }
@@ -72,11 +77,14 @@ func newLogger(cfg *config) (*zap.Logger, error) {
 type config struct {
 	AppEnv               string   `env:"APP_ENV"`
 	TelegramToken        string   `env:"TELEGRAM_TOKEN"`
+	InternetHosts        []string `env:"BOT_INTERNET_CHECK_HOSTS" envSeparator:","`
 	PingHosts            []string `env:"BOT_PING_HOSTS" envSeparator:","`
 	NutIP                string   `env:"BOT_NUT_IP"`
 	NutName              string   `env:"BOT_NUT_NAME"`
 	NutUser              string   `env:"BOT_NUT_USER"`
 	NutPassword          string   `env:"BOT_NUT_PASS"`
+	NutWarning           float64  `env:"BOT_NUT_WARN"`
+	NutError             float64  `env:"BOT_NUT_ERR"`
 	GitlabChatID         int64    `env:"TELEGRAM_GITLAB_CHAT_ID"`
 	GitlabWebhookAddress string   `env:"GITLAB_WEBHOOK_ADDR"`
 	GitlabToken          string   `env:"GITLAB_TOKEN"`
@@ -101,6 +109,15 @@ func commandHandlers() fx.Option {
 	return fx.Options(
 		fx.Provide(
 			fx.Annotate(
+				func(logger *zap.Logger, cfg *config) command.Power {
+					return power.New(logger, cfg.NutIP, cfg.NutName, cfg.NutUser, cfg.NutPassword)
+				},
+			),
+			fx.Annotate(speedtest.New, fx.As(new(command.Speedtest))),
+			fx.Annotate(ping.New, fx.As(new(command.Pinger))),
+		),
+		fx.Provide(
+			fx.Annotate(
 				command.NewService,
 				fx.As(new(telegram.Callback)),
 				fx.ParamTags(``, `group:"command_handler"`),
@@ -108,15 +125,14 @@ func commandHandlers() fx.Option {
 		),
 		fx.Provide(
 			fx.Annotate(
-				func(logger *zap.Logger, publisher command.Publisher, cfg *config) command.Handler {
-					return command.NewPingCommand(logger, publisher, cfg.PingHosts)
+				func(logger *zap.Logger, publisher command.Publisher, pinger command.Pinger, cfg *config) command.Handler {
+					return command.NewPingCommand(logger, publisher, pinger, cfg.PingHosts)
 				},
 				fx.ResultTags(`group:"command_handler"`),
 			),
 			fx.Annotate(
-				func(logger *zap.Logger, publisher command.Publisher, cfg *config) command.Handler {
-					return command.NewPowerCommand(logger, publisher, cfg.NutIP, cfg.NutName, cfg.NutUser, cfg.NutPassword)
-				},
+				command.NewPowerCommand,
+				fx.As(new(command.Handler)),
 				fx.ResultTags(`group:"command_handler"`),
 			),
 			fx.Annotate(
