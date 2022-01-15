@@ -4,11 +4,15 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"math/rand"
 	"net/http"
+	"time"
 
 	"github.com/caarlos0/env/v6"
 	"github.com/go-playground/webhooks/v6/gitlab"
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	_ "github.com/jackc/pgx/v4/stdlib"
+	"github.com/jmoiron/sqlx"
 	_ "github.com/joho/godotenv/autoload"
 	"go.uber.org/fx"
 	"go.uber.org/fx/fxevent"
@@ -31,6 +35,8 @@ var (
 )
 
 func main() {
+	rand.Seed(time.Now().UTC().UnixNano())
+
 	fxApp := fx.New(
 		configuration(),
 		commandHandlers(),
@@ -51,6 +57,7 @@ func configuration() fx.Option {
 		fx.Provide(
 			newLogger,
 			newConfig,
+			newDB,
 		),
 		fx.Provide(
 			newTelegramBot,
@@ -77,6 +84,7 @@ func newLogger(cfg *config) (*zap.Logger, error) {
 type config struct {
 	AppEnv               string   `env:"APP_ENV"`
 	TelegramToken        string   `env:"TELEGRAM_TOKEN"`
+	AlertChatID          int64    `env:"ALERT_CHAT_ID"`
 	InternetHosts        []string `env:"BOT_INTERNET_CHECK_HOSTS" envSeparator:","`
 	PingHosts            []string `env:"BOT_PING_HOSTS" envSeparator:","`
 	NutIP                string   `env:"BOT_NUT_IP"`
@@ -85,6 +93,7 @@ type config struct {
 	NutPassword          string   `env:"BOT_NUT_PASS"`
 	NutWarning           float64  `env:"BOT_NUT_WARN"`
 	NutError             float64  `env:"BOT_NUT_ERR"`
+	GammuDBConnection    string   `env:"GAMMU_DB_CONNECTION"`
 	GitlabChatID         int64    `env:"TELEGRAM_GITLAB_CHAT_ID"`
 	GitlabWebhookAddress string   `env:"GITLAB_WEBHOOK_ADDR"`
 	GitlabToken          string   `env:"GITLAB_TOKEN"`
@@ -97,6 +106,11 @@ func newConfig() (*config, error) {
 		return nil, fmt.Errorf("failed to parse environment: %w", err)
 	}
 	return &cfg, nil
+}
+
+// newDB initializes DB.
+func newDB(cfg *config) (*sqlx.DB, error) {
+	return sqlx.Open("pgx", cfg.GammuDBConnection)
 }
 
 // newTelegramBot initializes new telegram bot.
