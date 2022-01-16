@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log"
 	"math/rand"
-	"net/http"
 	"time"
 
 	"github.com/caarlos0/env/v6"
@@ -23,6 +22,7 @@ import (
 	"github.com/Toshik1978/server-bot/pkg/command"
 	"github.com/Toshik1978/server-bot/pkg/ping"
 	"github.com/Toshik1978/server-bot/pkg/power"
+	"github.com/Toshik1978/server-bot/pkg/sms"
 	"github.com/Toshik1978/server-bot/pkg/speedtest"
 	"github.com/Toshik1978/server-bot/pkg/telegram"
 	"github.com/Toshik1978/server-bot/pkg/webhook"
@@ -40,7 +40,7 @@ func main() {
 	fxApp := fx.New(
 		configuration(),
 		commandHandlers(),
-		webhookHandlers(),
+		webHandlers(),
 		fx.Provide(newApplication),
 		fx.Invoke(register),
 		fx.ErrorHook(&errorHandler{}),
@@ -82,21 +82,21 @@ func newLogger(cfg *config) (*zap.Logger, error) {
 }
 
 type config struct {
-	AppEnv               string   `env:"APP_ENV"`
-	TelegramToken        string   `env:"TELEGRAM_TOKEN"`
-	AlertChatID          int64    `env:"ALERT_CHAT_ID"`
-	InternetHosts        []string `env:"BOT_INTERNET_CHECK_HOSTS" envSeparator:","`
-	PingHosts            []string `env:"BOT_PING_HOSTS" envSeparator:","`
-	NutIP                string   `env:"BOT_NUT_IP"`
-	NutName              string   `env:"BOT_NUT_NAME"`
-	NutUser              string   `env:"BOT_NUT_USER"`
-	NutPassword          string   `env:"BOT_NUT_PASS"`
-	NutWarning           float64  `env:"BOT_NUT_WARN"`
-	NutError             float64  `env:"BOT_NUT_ERR"`
-	GammuDBConnection    string   `env:"GAMMU_DB_CONNECTION"`
-	GitlabChatID         int64    `env:"TELEGRAM_GITLAB_CHAT_ID"`
-	GitlabWebhookAddress string   `env:"GITLAB_WEBHOOK_ADDR"`
-	GitlabToken          string   `env:"GITLAB_TOKEN"`
+	AppEnv            string   `env:"APP_ENV"`
+	TelegramToken     string   `env:"TELEGRAM_TOKEN"`
+	AlertChatID       int64    `env:"ALERT_CHAT_ID"`
+	InternetHosts     []string `env:"BOT_INTERNET_CHECK_HOSTS" envSeparator:","`
+	PingHosts         []string `env:"BOT_PING_HOSTS" envSeparator:","`
+	NutIP             string   `env:"BOT_NUT_IP"`
+	NutName           string   `env:"BOT_NUT_NAME"`
+	NutUser           string   `env:"BOT_NUT_USER"`
+	NutPassword       string   `env:"BOT_NUT_PASS"`
+	NutWarning        float64  `env:"BOT_NUT_WARN"`
+	NutError          float64  `env:"BOT_NUT_ERR"`
+	GammuDBConnection string   `env:"GAMMU_DB_CONNECTION"`
+	WebAddress        string   `env:"WEB_ADDR"`
+	GitlabChatID      int64    `env:"TELEGRAM_GITLAB_CHAT_ID"`
+	GitlabToken       string   `env:"GITLAB_TOKEN"`
 }
 
 // newConfig initializes configuration.
@@ -158,26 +158,30 @@ func commandHandlers() fx.Option {
 	)
 }
 
-// webhookHandlers provides webhook-specific information for fx.
-func webhookHandlers() fx.Option {
+// webHandlers provides web handlers information for fx.
+func webHandlers() fx.Option {
 	return fx.Options(
 		fx.Provide(
 			func(cfg *config) (*gitlab.Webhook, error) {
 				return gitlab.New(gitlab.Options.Secret(cfg.GitlabToken))
 			},
-			func(logger *zap.Logger, hook *gitlab.Webhook, publisher webhook.Publisher, cfg *config) webhook.Service {
-				return webhook.NewService(logger, hook, publisher, cfg.GitlabChatID)
-			},
-			func(service webhook.Service) http.Handler {
-				return service.Handler()
-			},
+			fx.Annotate(
+				func(logger *zap.Logger, hook *gitlab.Webhook, publisher webhook.Publisher, cfg *config) app.WebHandler {
+					return webhook.NewService(logger, hook, publisher, cfg.GitlabChatID)
+				},
+				fx.ResultTags(`group:"web_handler"`),
+			),
+		),
+		fx.Provide(
+			fx.Annotate(sms.NewGammu, fx.As(new(sms.Publisher))),
+			fx.Annotate(sms.NewService, fx.As(new(app.WebHandler)), fx.ResultTags(`group:"web_handler"`)),
 		),
 	)
 }
 
 // newApplication initializes application.
 func newApplication(lc fx.Lifecycle, p app.ApplicationParams, cfg *config) *app.Application {
-	a := app.NewApplication(p, cfg.GitlabWebhookAddress, Commit, Buildstamp)
+	a := app.NewApplication(p, cfg.WebAddress, Commit, Buildstamp)
 	cancelCtx, cancel := context.WithCancel(context.Background())
 
 	lc.Append(fx.Hook{
@@ -191,9 +195,16 @@ func newApplication(lc fx.Lifecycle, p app.ApplicationParams, cfg *config) *app.
 	return a
 }
 
+type registerParams struct {
+	fx.In
+
+	App      *app.Application
+	Handlers []app.WebHandler `group:"web_handler"`
+}
+
 // register bootstrap application.
-func register(application *app.Application, handler http.Handler) {
-	application.Register(handler)
+func register(params registerParams) {
+	params.App.Register(params.Handlers)
 }
 
 // errorHandler is an error handler for fx.

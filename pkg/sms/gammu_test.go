@@ -40,7 +40,7 @@ func (s *gammuTestSuite) TestBuild1() {
 
 	parts := g.build("Test string")
 	s.Len(parts, 1)
-	s.Equal("0101", parts[0].UDH[8:])
+	s.Equal("", parts[0].UDH)
 	s.Equal(defaultEncoding, parts[0].Coding)
 	s.Equal("Test string", parts[0].Text)
 
@@ -53,7 +53,7 @@ func (s *gammuTestSuite) TestBuild2() {
 
 	parts := g.build("Тестовая строка")
 	s.Len(parts, 1)
-	s.Equal("0101", parts[0].UDH[8:])
+	s.Equal("", parts[0].UDH)
 	s.Equal(ucs2Encoding, parts[0].Coding)
 	s.Equal("Тестовая строка", parts[0].Text)
 

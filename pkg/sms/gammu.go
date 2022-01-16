@@ -2,6 +2,7 @@ package sms
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"math/rand"
 
@@ -12,10 +13,15 @@ import (
 
 const (
 	multipartSms    = int64(0x050003) // sign of multipart message
+	sourceID        = "Server Bot 1.0"
 	defaultEncoding = "Default_No_Compression"
 	ucs2Encoding    = "Unicode_No_Compression"
 	defaultLength   = 160
 	ucs2Length      = 67
+)
+
+var (
+	errBadRequest = errors.New("phone and message can't be empty")
 )
 
 type gammu struct {
@@ -34,7 +40,17 @@ func NewGammu(logger *zap.Logger, db *sqlx.DB) *gammu {
 
 // Publish prepare message for Gammu and publish it via DB.
 func (g *gammu) Publish(ctx context.Context, phone, msg string) error {
-	return nil
+	if phone == "" || msg == "" {
+		return errBadRequest
+	}
+	g.logger.With(zap.String("phone", phone)).Info("Publish SMS")
+
+	parts := g.build(msg)
+	if len(parts) == 1 {
+		return g.buildOutbox(ctx, phone, parts[0])
+	} else {
+		return g.buildMultipartOutbox(ctx, phone, parts)
+	}
 }
 
 type gammuPart struct {
@@ -63,7 +79,10 @@ func (g *gammu) build(msg string) []gammuPart {
 		parts = append(parts, gammuPart{Text: s.Slice(i, j), Coding: coding})
 		i = j
 	}
-	return g.updateUDH(parts)
+	if len(parts) > 1 {
+		return g.updateUDH(parts)
+	}
+	return parts
 }
 
 func (g *gammu) updateUDH(parts []gammuPart) []gammuPart {

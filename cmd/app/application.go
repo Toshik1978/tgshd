@@ -13,6 +13,16 @@ import (
 	"github.com/Toshik1978/server-bot/pkg/telegram"
 )
 
+// WebHandler declare http service.
+type WebHandler interface {
+	// Path return path prefix for handler.
+	Path() string
+	// Methods return methods, supported by handler.
+	Methods() []string
+	// Handler return http handler.
+	Handler() http.Handler
+}
+
 // ApplicationParams declare parameters to run application.
 type ApplicationParams struct {
 	fx.In
@@ -99,6 +109,8 @@ func (a *Application) onStop(ctx context.Context) error {
 	return grp.Wait()
 }
 
-func (a *Application) Register(handler http.Handler) {
-	a.router.PathPrefix("/webhook").Handler(handler).Methods("POST")
+func (a *Application) Register(handlers []WebHandler) {
+	for _, handler := range handlers {
+		a.router.PathPrefix("/" + handler.Path()).Handler(handler.Handler()).Methods(handler.Methods()...)
+	}
 }

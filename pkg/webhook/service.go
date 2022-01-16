@@ -30,6 +30,14 @@ func NewService(logger *zap.Logger, hook *gitlab.Webhook, publisher Publisher, r
 	}
 }
 
+func (s *service) Path() string {
+	return "webhook"
+}
+
+func (s *service) Methods() []string {
+	return []string{"POST"}
+}
+
 func (s *service) Handler() http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		payload, err := s.hook.Parse(r, gitlab.PipelineEvents)
