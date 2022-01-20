@@ -43,7 +43,7 @@ func (s *service) Handler() http.Handler {
 		payload, err := s.hook.Parse(r, gitlab.PipelineEvents)
 		if err != nil {
 			if err != gitlab.ErrEventNotFound {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
+				http.Error(w, err.Error(), http.StatusInternalServerError) //nolint: gocritic
 			}
 			return
 		}

@@ -23,6 +23,7 @@ import (
 	"github.com/Toshik1978/server-bot/pkg/ping"
 	"github.com/Toshik1978/server-bot/pkg/power"
 	"github.com/Toshik1978/server-bot/pkg/sms"
+	"github.com/Toshik1978/server-bot/pkg/sms/gammu"
 	"github.com/Toshik1978/server-bot/pkg/speedtest"
 	"github.com/Toshik1978/server-bot/pkg/telegram"
 	"github.com/Toshik1978/server-bot/pkg/webhook"
@@ -84,7 +85,7 @@ func newLogger(cfg *config) (*zap.Logger, error) {
 type config struct {
 	AppEnv            string   `env:"APP_ENV"`
 	TelegramToken     string   `env:"TELEGRAM_TOKEN"`
-	AlertChatID       int64    `env:"ALERT_CHAT_ID"`
+	AlertChatID       int64    `env:"TELEGRAM_CHAT_ID"`
 	InternetHosts     []string `env:"BOT_INTERNET_CHECK_HOSTS" envSeparator:","`
 	PingHosts         []string `env:"BOT_PING_HOSTS" envSeparator:","`
 	NutIP             string   `env:"BOT_NUT_IP"`
@@ -173,7 +174,7 @@ func webHandlers() fx.Option {
 			),
 		),
 		fx.Provide(
-			fx.Annotate(sms.NewGammu, fx.As(new(sms.Publisher))),
+			fx.Annotate(gammu.NewSQLBackend, fx.As(new(sms.Publisher))),
 			fx.Annotate(sms.NewService, fx.As(new(app.WebHandler)), fx.ResultTags(`group:"web_handler"`)),
 		),
 	)
