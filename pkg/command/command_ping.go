@@ -33,6 +33,10 @@ func (c *pingCommand) Name() string {
 	return "ping"
 }
 
+func (c *pingCommand) Enabled() bool {
+	return len(c.hosts) > 0
+}
+
 func (c *pingCommand) Handle(ctx context.Context, senderID int64) error {
 	resp, err := c.pinger.Ping(ctx, c.hosts)
 	if err != nil {

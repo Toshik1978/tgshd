@@ -8,6 +8,7 @@ import (
 )
 
 type Power interface {
+	Valid() bool
 	Voltage(ctx context.Context) (float64, error)
 }
 
@@ -29,6 +30,10 @@ func NewPowerCommand(logger *zap.Logger, publisher Publisher, power Power) *powe
 
 func (c *powerCommand) Name() string {
 	return "power"
+}
+
+func (c *powerCommand) Enabled() bool {
+	return c.power.Valid()
 }
 
 func (c *powerCommand) Handle(ctx context.Context, senderID int64) error {

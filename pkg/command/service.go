@@ -39,6 +39,10 @@ func (s *service) OnCommand(ctx context.Context, telegramID int64, cmd string) e
 	if handler == nil {
 		return fmt.Errorf("unsupported command received: %s", cmd)
 	}
+	if !handler.Enabled() {
+		// Ignore command.
+		return nil
+	}
 
 	if err := handler.Handle(ctx, telegramID); err != nil {
 		return fmt.Errorf("failed to handle command: %w", err)

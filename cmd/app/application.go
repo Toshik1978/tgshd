@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"time"
 
 	"github.com/gorilla/mux"
 	"go.uber.org/fx"
@@ -45,8 +46,9 @@ type Application struct {
 func NewApplication(p ApplicationParams, httpAddress, commit, buildstamp string) *Application {
 	router := mux.NewRouter()
 	server := &http.Server{
-		Addr:    httpAddress,
-		Handler: router,
+		Addr:              httpAddress,
+		Handler:           router,
+		ReadHeaderTimeout: 10 * time.Second,
 	}
 	return &Application{
 		logger:     p.Logger,
