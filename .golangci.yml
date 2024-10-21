@@ -1,6 +1,7 @@
 run:
   concurrency: 4
-  deadline: 2m
+  timeout: 2m
+  go: "1.23"
 
 linters-settings:
   funlen:
@@ -8,13 +9,12 @@ linters-settings:
     statements: 40
 
   govet:
-    check-shadowing: true
     enable-all: true
     disable:
     - fieldalignment
 
   revive:
-    min-confidence: 0.8
+    confidence: 0.8
     rules:
       - name: unexported-return
         disabled: true
@@ -28,17 +28,11 @@ linters-settings:
   gocyclo:
     min-complexity: 10
 
-  maligned:
-    suggest-new: true
-
   dupl:
     threshold: 100
 
   lll:
-    line-length: 140
-
-  unused:
-    check-exported: true
+    line-length: 120
 
   nakedret:
     max-func-lines: 30
@@ -60,11 +54,12 @@ linters-settings:
       - whyNoLint
       - unnamedResult
 
-  staticcheck:
-    go: "1.15"
-
-  stylecheck:
-    go: "1.15"
+  depguard:
+    rules:
+      main:
+        allow:
+          - $gostd
+          - github.com
 
 linters:
   disable-all: true
@@ -90,13 +85,12 @@ linters:
     - lll
     - misspell
     - nakedret
-    - exportloopref
+    - copyloopvar
     - staticcheck
     - stylecheck
     - typecheck
     - unconvert
     - unparam
-    - unused
     - whitespace
 
 issues:

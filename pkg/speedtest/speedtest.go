@@ -27,28 +27,25 @@ func (s *speedtest) Speedtest(ctx context.Context) (float64, float64, error) {
 		return 0, 0, fmt.Errorf("failed to get best server for testing: %w", err)
 	}
 
-	if err := server.DownloadTestContext(ctx, true); err != nil {
+	if err := server.DownloadTestContext(ctx); err != nil {
 		return 0, 0, fmt.Errorf("failed to do download test: %w", err)
 	}
-	if err := server.UploadTestContext(ctx, true); err != nil {
+	if err := server.UploadTestContext(ctx); err != nil {
 		return 0, 0, fmt.Errorf("failed to do upload test: %w", err)
 	}
 
-	return server.DLSpeed, server.ULSpeed, nil
+	return server.DLSpeed.Mbps(), server.ULSpeed.Mbps(), nil
 }
 
 func (s *speedtest) findServer(ctx context.Context) (*st.Server, error) {
-	user, err := st.FetchUserInfoContext(ctx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to fetch user info: %w", err)
-	}
-	servers, err := st.FetchServerListContext(ctx, user)
+	client := st.New()
+	servers, err := client.FetchServerListContext(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to fetch servers list: %w", err)
 	}
 	targets, err := servers.FindServer([]int{})
 	if err != nil {
-		return nil, fmt.Errorf("failed to get server for testing: %w", err)
+		return nil, fmt.Errorf("failed to get servers for testing: %w", err)
 	}
 	if len(targets) != 1 {
 		return nil, fmt.Errorf("failed to get server for testing: %w", err)

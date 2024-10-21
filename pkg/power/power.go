@@ -30,7 +30,7 @@ func New(logger *zap.Logger, ip, name, user, password string) *power {
 
 // Valid return true if module is able to detect power.
 func (p *power) Valid() bool {
-	return len(p.ip) > 0 && len(p.name) > 0 && len(p.user) > 0 && len(p.password) > 0
+	return p.ip != "" && p.name != "" && p.user != "" && p.password != ""
 }
 
 // Voltage retrieve current UPS voltage.

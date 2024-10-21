@@ -28,7 +28,6 @@ func (p *ping) Ping(ctx context.Context, hosts []string) (map[string]bool, error
 	grp, _ := errgroup.WithContext(ctx)
 	ch := make(chan string, len(hosts))
 	for _, host := range hosts {
-		host := host
 		grp.Go(func() error {
 			pinger, err := pingtool.NewPinger(host)
 			if err != nil {

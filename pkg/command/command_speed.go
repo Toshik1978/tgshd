@@ -36,6 +36,8 @@ func (c *speedCommand) Enabled() bool {
 }
 
 func (c *speedCommand) Handle(ctx context.Context, senderID int64) error {
+	c.logger.Debug("Speed command received")
+
 	dl, ul, err := c.speedtest.Speedtest(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to do speedtest: %w", err)

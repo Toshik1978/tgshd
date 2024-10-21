@@ -4,17 +4,17 @@ import (
 	"context"
 	"fmt"
 
-	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"go.uber.org/zap"
+	"gopkg.in/telebot.v4"
 )
 
 type publisher struct {
 	logger *zap.Logger
-	bot    *tgbotapi.BotAPI
+	bot    *telebot.Bot
 }
 
 // NewPublisher initializes new publisher for telegram messages.
-func NewPublisher(logger *zap.Logger, bot *tgbotapi.BotAPI) *publisher {
+func NewPublisher(logger *zap.Logger, bot *telebot.Bot) *publisher {
 	logger.Info("Creation of TelegramPublisher")
 	return &publisher{
 		logger: logger,
@@ -23,11 +23,11 @@ func NewPublisher(logger *zap.Logger, bot *tgbotapi.BotAPI) *publisher {
 }
 
 func (p *publisher) Publish(_ context.Context, recipientID int64, msg string) error {
-	p.logger.Info("Send telegram message")
-	message := tgbotapi.NewMessage(recipientID, msg)
-	message.ParseMode = tgbotapi.ModeHTML
-
-	if _, err := p.bot.Send(message); err != nil {
+	p.logger.Debug("Send telegram message")
+	_, err := p.bot.Send(&telebot.User{ID: recipientID}, msg, &telebot.SendOptions{
+		ParseMode: telebot.ModeHTML,
+	})
+	if err != nil {
 		return fmt.Errorf("failed to send telegram message: %w", err)
 	}
 	return nil

@@ -37,6 +37,8 @@ func (c *powerCommand) Enabled() bool {
 }
 
 func (c *powerCommand) Handle(ctx context.Context, senderID int64) error {
+	c.logger.Debug("Power command received")
+
 	voltage, err := c.power.Voltage(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to get voltage: %w", err)

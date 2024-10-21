@@ -38,6 +38,8 @@ func (c *pingCommand) Enabled() bool {
 }
 
 func (c *pingCommand) Handle(ctx context.Context, senderID int64) error {
+	c.logger.Debug("Ping command received")
+
 	resp, err := c.pinger.Ping(ctx, c.hosts)
 	if err != nil {
 		return fmt.Errorf("failed to ping: %w", err)

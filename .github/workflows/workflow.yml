@@ -2,49 +2,42 @@ name: Build and Test
 on:
   push:
     branches:
-      - master
+      - main
   pull_request:
 
 jobs:
   lint:
-    name: Lint
+    name: lint
     runs-on: ubuntu-latest
     steps:
-      - name: Check out code
-        uses: actions/checkout@v2
-
-      - name: Run linter
-        uses: golangci/golangci-lint-action@v2
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
         with:
-          version: v1.50.1
+          go-version: '1.23'
+      - name: linter
+        uses: golangci/golangci-lint-action@v6
+        with:
+          version: v1.61
 
   test:
-    name: Test
+    name: test
     runs-on: ubuntu-latest
     steps:
-      - name: Set up Golang
-        uses: actions/setup-go@v2
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
         with:
-          go-version: 1.19
-
-      - name: Check out code
-        uses: actions/checkout@v2
-
-      - name: Run Unit tests.
+          go-version: '1.23'
+      - name: unit tests
         run: make quality.tests
 
   build:
-    name: Build
+    name: build
     runs-on: ubuntu-latest
     needs: [lint, test]
     steps:
-      - name: Set up Golang
-        uses: actions/setup-go@v2
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
         with:
-          go-version: 1.19
-
-      - name: Check out code
-        uses: actions/checkout@v2
-
-      - name: Build
+          go-version: '1.23'
+      - name: build
         run: make app.build

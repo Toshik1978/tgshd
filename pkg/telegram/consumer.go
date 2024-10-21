@@ -2,15 +2,20 @@ package telegram
 
 import (
 	"context"
+	"fmt"
 
-	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"go.uber.org/zap"
+	"gopkg.in/telebot.v4"
 )
 
-// Callback define callback for command handler.
-type Callback interface {
-	// OnCommand handles command.
-	OnCommand(ctx context.Context, senderID int64, command string) error
+// Handler define handler for specific command.
+type Handler interface {
+	// Name returns name of command to handle.
+	Name() string
+	// Enabled return true if command is enabled.
+	Enabled() bool
+	// Handle handles command.
+	Handle(ctx context.Context, senderID int64) error
 }
 
 // Consumer declare telegram consumer.
@@ -23,61 +28,69 @@ type Consumer interface {
 
 type consumer struct {
 	logger          *zap.Logger
-	bot             *tgbotapi.BotAPI
-	cb              Callback
+	bot             *telebot.Bot
+	handlers        []Handler
 	shutdownChannel chan interface{}
 }
 
 // NewConsumer initializes new consumer for telegram messages.
-func NewConsumer(logger *zap.Logger, bot *tgbotapi.BotAPI, cb Callback) *consumer {
+func NewConsumer(logger *zap.Logger, bot *telebot.Bot, handlers []Handler) *consumer {
 	logger.Info("Creation of TelegramConsumer")
 	return &consumer{
 		logger:          logger,
 		bot:             bot,
-		cb:              cb,
+		handlers:        handlers,
 		shutdownChannel: make(chan interface{}),
 	}
 }
 
-func (c *consumer) Start(ctx context.Context) error {
+func (c *consumer) Start(_ context.Context) error {
 	c.logger.Info("Telegram bot started")
 
-	go func() {
-		c.handleCommands()
-		close(c.shutdownChannel)
-		c.logger.Info("Telegram bot stopped")
-	}()
+	// Add commands.
+	enabled := make(map[string]Handler)
+	for _, handler := range c.handlers {
+		if handler.Enabled() {
+			c.logger.With(zap.String("command", handler.Name())).Info("Telegram command added")
+			c.bot.Handle("/"+handler.Name(), func(ctx telebot.Context) error {
+				return c.handleCommand(handler, ctx)
+			})
+			enabled["/"+handler.Name()] = handler
+		}
+	}
+	// Add generic handler in case we are in the channel.
+	c.bot.Handle(telebot.OnChannelPost, func(ctx telebot.Context) error {
+		return c.handleCommands(enabled, ctx)
+	})
+
+	go c.bot.Start()
 	return nil
 }
 
-func (c *consumer) handleCommands() {
-	updates := c.bot.GetUpdatesChan(tgbotapi.NewUpdate(0))
-	for update := range updates {
-		if update.Message != nil {
-			c.handleCommand(update.Message)
-		} else if update.ChannelPost != nil {
-			c.handleCommand(update.ChannelPost)
-		}
+func (c *consumer) handleCommands(handlers map[string]Handler, ctx telebot.Context) error {
+	if handler, ok := handlers[ctx.Text()]; ok {
+		return c.handleCommand(handler, ctx)
 	}
+	return nil
 }
 
-func (c *consumer) handleCommand(message *tgbotapi.Message) {
-	command := message.Command()
-	logger := c.logger.With(zap.String("command", command))
+func (c *consumer) handleCommand(handler Handler, ctx telebot.Context) error {
+	logger := c.logger.With(zap.String("command", handler.Name()))
+	message := ctx.Message()
 
 	var senderID int64
 	switch {
-	case message.From != nil:
-		senderID = message.From.ID
+	case message.Sender != nil:
+		senderID = message.Sender.ID
 	case message.Chat != nil:
 		senderID = message.Chat.ID
 	default:
 		logger.Error("Failed to get sender ID")
-		return
+		return fmt.Errorf("failed to get sender ID")
 	}
 
 	logger = logger.With(zap.Int64("sender_id", senderID))
-	logger.Info("Handle command")
+	logger.Debug("Handle command")
 
 	defer func() {
 		if p := recover(); p != nil {
@@ -85,20 +98,26 @@ func (c *consumer) handleCommand(message *tgbotapi.Message) {
 		}
 	}()
 
-	err := c.cb.OnCommand(context.Background(), senderID, command)
+	err := handler.Handle(context.Background(), senderID)
 	if err != nil {
 		logger.
 			With(zap.Error(err)).
 			Error("Error in message handler")
-		return
+		return fmt.Errorf("failed to handle command: %w", err)
 	}
+	return nil
 }
 
 func (c *consumer) Stop(ctx context.Context) error {
-	c.bot.StopReceivingUpdates()
+	shutdownChannel := make(chan interface{})
+	go func() {
+		c.bot.Stop()
+		close(shutdownChannel)
+		c.logger.Info("Telegram bot gracefully stopped")
+	}()
 
 	select {
-	case <-c.shutdownChannel:
+	case <-shutdownChannel:
 	case <-ctx.Done():
 		return context.DeadlineExceeded
 	}
