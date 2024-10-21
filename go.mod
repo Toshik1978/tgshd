@@ -7,6 +7,7 @@ toolchain go1.23.2
 require (
 	github.com/caarlos0/env/v11 v11.2.2
 	github.com/go-ping/ping v1.1.0
+	github.com/go-resty/resty/v2 v2.15.3
 	github.com/joho/godotenv v1.5.1
 	github.com/robbiet480/go.nut v0.0.0-20240622015809-60e196249c53
 	github.com/showwin/speedtest-go v1.7.9

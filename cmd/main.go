@@ -20,6 +20,7 @@ import (
 	"github.com/Toshik1978/server-bot/pkg/power"
 	"github.com/Toshik1978/server-bot/pkg/speedtest"
 	"github.com/Toshik1978/server-bot/pkg/telegram"
+	"github.com/Toshik1978/server-bot/pkg/zte"
 )
 
 // Build-time constants.
@@ -48,6 +49,7 @@ func configuration() fx.Option {
 		fx.Provide(
 			newLogger,
 			newConfig,
+			newZTEConnection,
 		),
 		fx.Provide(
 			newTelegramBot,
@@ -86,6 +88,8 @@ type config struct {
 	NutPassword   string   `env:"BOT_NUT_PASS"`
 	NutWarning    float64  `env:"BOT_NUT_WARN"`
 	NutError      float64  `env:"BOT_NUT_ERR"`
+	ZTEHost       string   `env:"BOT_ZTE_HOST"`
+	ZTEPassword   string   `env:"BOT_ZTE_PASS"`
 }
 
 // newConfig initializes configuration.
@@ -104,6 +108,11 @@ func newTelegramBot(cfg *config) (*telebot.Bot, error) {
 		Poller: &telebot.LongPoller{Timeout: 5 * time.Second},
 	}
 	return telebot.NewBot(pref)
+}
+
+// newZTEConnection initializes new ZTE connection.
+func newZTEConnection(logger *zap.Logger, cfg *config) command.ZTE {
+	return zte.NewConnection(logger, cfg.ZTEHost, cfg.ZTEPassword)
 }
 
 // commandHandlers provides telegram commands information for fx.
@@ -132,6 +141,11 @@ func commandHandlers() fx.Option {
 			),
 			fx.Annotate(
 				command.NewSpeedCommand,
+				fx.As(new(telegram.Handler)),
+				fx.ResultTags(`group:"command_handler"`),
+			),
+			fx.Annotate(
+				command.NewNetworkCommand,
 				fx.As(new(telegram.Handler)),
 				fx.ResultTags(`group:"command_handler"`),
 			),
