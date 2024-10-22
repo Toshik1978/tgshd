@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net/http"
+	"strconv"
 	"strings"
 
 	"github.com/go-resty/resty/v2"
@@ -12,9 +13,9 @@ import (
 )
 
 const (
-	APIBase = "/goform/"
-	GetCmd  = "goform_get_cmd_process"
-	SetCmd  = "goform_set_cmd_process"
+	GetCmd  = "/goform/goform_get_cmd_process"
+	SetCmd  = "/goform/goform_set_cmd_process"
+	Success = "success"
 )
 
 // Connection manages a ZTE MC888 device connection.
@@ -33,7 +34,7 @@ type Connection struct {
 func NewConnection(logger *zap.Logger, host, password string) *Connection {
 	return &Connection{
 		logger:   logger,
-		client:   resty.New().SetBaseURL("http://" + host),
+		client:   resty.New().SetBaseURL("http://" + host).SetLogger(newLogger(logger)),
 		referer:  "http://" + host + "/",
 		password: password,
 	}
@@ -44,7 +45,7 @@ func (c *Connection) Login() error {
 	if err := c.parseDeviceVersion(); err != nil {
 		return fmt.Errorf("failed to login: %w", err)
 	}
-	ld, err := c.getLD()
+	ld, err := c.ld()
 	if err != nil {
 		return fmt.Errorf("failed to login: %w", err)
 	}
@@ -58,31 +59,34 @@ func (c *Connection) Login() error {
 
 // Logout logs out from the ZTE device.
 func (c *Connection) Logout() error {
-	rd, err := c.getRD()
+	ad, err := c.ad()
 	if err != nil {
 		return fmt.Errorf("failed to logout: %w", err)
 	}
-	return c.logoutRequest(c.calculateAD(rd))
+	return c.logoutRequest(ad)
+}
+
+// SetBearer sets the bearer preferences for the network.
+func (c *Connection) SetBearer(pref Bearer) error {
+	ad, err := c.ad()
+	if err != nil {
+		return fmt.Errorf("failed to set bearer: %w", err)
+	}
+	return c.bearerRequest(pref, ad)
 }
 
 // parseDeviceVersion parses the ZTE device version.
 func (c *Connection) parseDeviceVersion() error {
 	deviceVersion := &DeviceVersionResponse{}
-	resp, err := c.client.R().
-		SetHeader("Referer", c.referer).
+	r, err := c.request(false).
 		SetQueryParams(map[string]string{
-			"isTest":     "false",
 			"cmd":        "Language,cr_version,wa_inner_version",
 			"multi_data": "1",
 		}).
 		SetResult(deviceVersion).
-		ForceContentType("application/json").
-		Get(APIBase + GetCmd)
-	if err != nil {
-		return fmt.Errorf("get device version failed: %w", err)
-	}
-	if resp.StatusCode() != http.StatusOK {
-		return fmt.Errorf("get device version failed: %s", resp.Status())
+		Get(GetCmd)
+	if err1 := c.checkError(err, r, "get device version"); err1 != nil {
+		return err1
 	}
 
 	c.crVersion = deviceVersion.CrVersion
@@ -90,42 +94,46 @@ func (c *Connection) parseDeviceVersion() error {
 	return nil
 }
 
-// getLD retrieves the LD value from the ZTE device.
-func (c *Connection) getLD() (string, error) {
+// ad calculates the current AD value.
+func (c *Connection) ad() (string, error) {
+	if c.crVersion == "" && c.waInnerVersion == "" {
+		return "", fmt.Errorf("not logged in")
+	}
+	rd, err := c.rd()
+	if err != nil {
+		return "", fmt.Errorf("failed to get RD value: %w", err)
+	}
+	return c.calculateAD(rd), nil
+}
+
+// ld retrieves the LD value from the ZTE device.
+func (c *Connection) ld() (string, error) {
 	ld := &LDResponse{}
-	if err := c.getXD(ld, "LD"); err != nil {
+	if err := c.xd(ld, "LD"); err != nil {
 		return "", fmt.Errorf("get LD failed: %w", err)
 	}
 	return ld.LD, nil
 }
 
-// getXD is a generic logic to get LD or RD.
-func (c *Connection) getXD(result interface{}, cmd string) error {
-	resp, err := c.client.R().
-		SetHeader("Referer", c.referer).
-		SetQueryParams(map[string]string{
-			"isTest": "false",
-			"cmd":    cmd,
-		}).
-		SetResult(result).
-		ForceContentType("application/json").
-		Get(APIBase + GetCmd)
-	if err != nil {
-		return fmt.Errorf("get %s failed: %w", cmd, err)
-	}
-	if resp.StatusCode() != http.StatusOK {
-		return fmt.Errorf("get %s failed: %s", cmd, resp.Status())
-	}
-	return nil
-}
-
-// getRD retrieves the RD value from the ZTE device.
-func (c *Connection) getRD() (string, error) {
+// rd retrieves the RD value from the ZTE device.
+func (c *Connection) rd() (string, error) {
 	rd := &RDResponse{}
-	if err := c.getXD(rd, "RD"); err != nil {
+	if err := c.xd(rd, "RD"); err != nil {
 		return "", fmt.Errorf("get RD failed: %w", err)
 	}
 	return rd.RD, nil
+}
+
+// xd is a generic logic to get LD or RD.
+func (c *Connection) xd(result interface{}, cmd string) error {
+	r, err := c.request(false).
+		SetQueryParam("cmd", cmd).
+		SetResult(result).
+		Get(GetCmd)
+	if err1 := c.checkError(err, r, fmt.Sprintf("get %s", cmd)); err1 != nil {
+		return err1
+	}
+	return nil
 }
 
 // calculatePassword generates the password hash based on the LD value.
@@ -136,7 +144,7 @@ func (c *Connection) calculatePassword(ld string) string {
 	return strings.ToUpper(hex.EncodeToString(finalHash[:]))
 }
 
-// calculateAD generates the AD hash for login.
+// calculateAD generates the AD hash for API based on the RD value.
 func (c *Connection) calculateAD(rd string) string {
 	prefixHash := sha256.Sum256([]byte(c.waInnerVersion + c.crVersion))
 	prefixHashHex := strings.ToUpper(hex.EncodeToString(prefixHash[:]))
@@ -145,33 +153,24 @@ func (c *Connection) calculateAD(rd string) string {
 }
 
 // loginRequest sends a login request to the ZTE device.
-func (c *Connection) loginRequest(password string) (*http.Cookie, error) {
+func (c *Connection) loginRequest(hash string) (*http.Cookie, error) {
 	result := &Response{}
-	resp, err := c.client.R().
-		SetHeaders(map[string]string{
-			"Origin":  c.referer,
-			"Referer": c.referer,
-		}).
+	r, err := c.request(true).
 		SetFormData(map[string]string{
-			"isTest":   "false",
 			"goformId": "LOGIN",
-			"password": password,
+			"password": hash,
 		}).
 		SetResult(result).
-		ForceContentType("application/json").
-		Post(APIBase + SetCmd)
-	if err != nil {
-		return nil, fmt.Errorf("login failed: %w", err)
-	}
-	if resp.StatusCode() != http.StatusOK {
-		return nil, fmt.Errorf("login failed: %s", resp.Status())
+		Post(SetCmd)
+	if err1 := c.checkError(err, r, "login"); err1 != nil {
+		return nil, err1
 	}
 	if result.Result != "0" {
 		return nil, fmt.Errorf("login failed: %s", result.Result)
 	}
 
 	// Get auth cookie.
-	for _, cookie := range resp.Cookies() {
+	for _, cookie := range r.Cookies() {
 		if cookie.Name == "stok" {
 			return cookie, nil
 		}
@@ -182,28 +181,135 @@ func (c *Connection) loginRequest(password string) (*http.Cookie, error) {
 // logoutRequest sends a logout request to the ZTE device.
 func (c *Connection) logoutRequest(ad string) error {
 	result := &Response{}
-	resp, err := c.client.R().
-		SetHeaders(map[string]string{
-			"Origin":  c.referer,
-			"Referer": c.referer,
-		}).
-		SetCookie(c.cookie).
+	r, err := c.request(true).
 		SetFormData(map[string]string{
-			"isTest":   "false",
 			"goformId": "LOGOUT",
 			"AD":       ad,
 		}).
 		SetResult(result).
-		ForceContentType("application/json").
-		Post(APIBase + SetCmd)
-	if err != nil {
-		return fmt.Errorf("logout failed: %w", err)
+		Post(SetCmd)
+	if err1 := c.checkError(err, r, "logout"); err1 != nil {
+		return err1
 	}
-	if resp.StatusCode() != http.StatusOK {
-		return fmt.Errorf("logout failed: %s", resp.Status())
-	}
-	if result.Result != "success" {
+	if result.Result != Success {
 		return fmt.Errorf("logout failed: %s", result.Result)
+	}
+	return nil
+}
+
+// bearerRequest sends a bearer request to the ZTE device.
+func (c *Connection) bearerRequest(pref Bearer, ad string) error {
+	result := &Response{}
+	r, err := c.request(true).
+		SetFormData(map[string]string{
+			"goformId":         "SET_BEARER_PREFERENCE",
+			"BearerPreference": string(pref),
+			"AD":               ad,
+		}).
+		SetResult(result).
+		Post(SetCmd)
+	if err1 := c.checkError(err, r, "bearer"); err1 != nil {
+		return err1
+	}
+	if result.Result != Success {
+		return fmt.Errorf("bearer failed: %s", result.Result)
+	}
+	return nil
+}
+
+// smsRequest gets all SMSs.
+func (c *Connection) smsRequest(page, size int) (*SmsList, error) {
+	result := &SmsList{}
+	r, err := c.request(false).
+		SetQueryParam("cmd", "sms_data_total").
+		SetQueryParam("page", strconv.Itoa(page)).
+		SetQueryParam("data_per_page", strconv.Itoa(size)).
+		SetQueryParam("mem_store", "1").
+		SetQueryParam("tags", "10").
+		SetQueryParam("order_by", "order+by+id+desc").
+		SetResult(result).
+		Get(GetCmd)
+	if err1 := c.checkError(err, r, "get sms list"); err1 != nil {
+		return nil, err1
+	}
+	return result, nil
+}
+
+// smsReadRequest marks SMSs as READ.
+func (c *Connection) smsReadRequest(ids []string, ad string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+
+	result := &Response{}
+	r, err := c.request(true).
+		SetFormData(map[string]string{
+			"goformId": "SET_MSG_READ",
+			"msg_id":   strings.Join(ids, ";") + ";",
+			"tag":      "0",
+			"AD":       ad,
+		}).
+		SetResult(result).
+		Post(SetCmd)
+	if err1 := c.checkError(err, r, "read sms"); err1 != nil {
+		return err1
+	}
+	if result.Result != Success {
+		return fmt.Errorf("read sms failed: %s", result.Result)
+	}
+	return nil
+}
+
+// smsDeleteRequest delete SMSs.
+func (c *Connection) smsDeleteRequest(ids []string, ad string) error {
+	if len(ids) == 0 {
+		return nil
+	}
+
+	result := &Response{}
+	r, err := c.request(true).
+		SetFormData(map[string]string{
+			"goformId": "DELETE_SMS",
+			"msg_id":   strings.Join(ids, ";") + ";",
+			"AD":       ad,
+		}).
+		SetResult(result).
+		Post(SetCmd)
+	if err1 := c.checkError(err, r, "delete sms"); err1 != nil {
+		return err1
+	}
+	if result.Result != Success {
+		return fmt.Errorf("delete sms failed: %s", result.Result)
+	}
+	return nil
+}
+
+// request generates the basic resty request object.
+func (c *Connection) request(post bool) *resty.Request {
+	r := c.client.R().
+		ForceContentType("application/json").
+		SetHeader("Origin", c.referer).
+		SetHeader("Referer", c.referer)
+
+	if post {
+		r = r.SetFormData(map[string]string{"isTest": "false"})
+	} else {
+		r = r.SetQueryParam("isTest", "false")
+	}
+
+	if c.cookie != nil {
+		r = r.SetCookie(c.cookie)
+	}
+
+	return r
+}
+
+func (c *Connection) checkError(err error, r *resty.Response, prefix string) error {
+	if err != nil {
+		return fmt.Errorf("%s failed: %w", prefix, err)
+	}
+	if r.StatusCode() != http.StatusOK {
+		return fmt.Errorf("%s failed: %s", prefix, r.Status())
 	}
 	return nil
 }
