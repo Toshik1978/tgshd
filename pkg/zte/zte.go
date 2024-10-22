@@ -75,6 +75,59 @@ func (c *Connection) SetBearer(pref Bearer) error {
 	return c.bearerRequest(pref, ad)
 }
 
+// AllSms gets all SMS on the device.
+func (c *Connection) AllSms(onlyUnread bool) ([]Sms, error) {
+	messages, err := c.smsRequest(0, 500)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get all sms: %w", err)
+	}
+	if len(messages.Messages) == 0 {
+		return nil, nil
+	}
+
+	l := make([]Sms, 0, len(messages.Messages))
+	for _, m := range messages.Messages { //nolint:gocritic
+		if m.ReceivedAllConcatSms == "1" && (!onlyUnread || m.Tag == "1") {
+			l = append(l, m)
+		}
+	}
+	return l, nil
+}
+
+// ReadSms gets all unread SMS on the device and mark read/delete them.
+//
+// Method always returns the list of SMS if we could read them.
+// But it can have an error at the same time if we didn't read/delete successfully.
+func (c *Connection) ReadSms(del bool) ([]Sms, error) {
+	messages, err := c.smsRequest(0, 500)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get all sms: %w", err)
+	}
+	if len(messages.Messages) == 0 {
+		return nil, nil
+	}
+
+	// Collect all unread SMSs.
+	ids := make([]string, 0, len(messages.Messages))
+	l := make([]Sms, 0, len(messages.Messages))
+	for _, m := range messages.Messages { //nolint:gocritic
+		if m.ReceivedAllConcatSms == "1" && m.Tag == "1" {
+			ids = append(ids, m.ID)
+			l = append(l, m)
+		}
+	}
+
+	// Mark them read or delete.
+	ad, err := c.ad()
+	if err != nil {
+		return nil, fmt.Errorf("failed to read/delete sms: %w", err)
+	}
+	if del {
+		return l, c.smsDeleteRequest(ids, ad)
+	}
+	return l, c.smsReadRequest(ids, ad)
+}
+
 // parseDeviceVersion parses the ZTE device version.
 func (c *Connection) parseDeviceVersion() error {
 	deviceVersion := &DeviceVersionResponse{}

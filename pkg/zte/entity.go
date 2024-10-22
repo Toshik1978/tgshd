@@ -34,17 +34,20 @@ const (
 	BearerOnlyWCDMA   Bearer = "Only_WCDMA"    // 3G Only
 )
 
+// Sms is an SMS object.
+type Sms struct {
+	ID                   string `json:"id"`
+	Number               string `json:"number"`
+	Content              string `json:"content"`
+	Tag                  string `json:"tag"`
+	Date                 string `json:"date"`
+	DraftGroupID         string `json:"draft_group_id"`
+	ReceivedAllConcatSms string `json:"received_all_concat_sms"`
+	ConcatSmsTotal       string `json:"concat_sms_total"`
+	ConcatSmsReceived    string `json:"concat_sms_received"`
+}
+
 // SmsList is a list of SMS.
 type SmsList struct {
-	Messages []struct {
-		ID                   string `json:"id"`
-		Number               string `json:"number"`
-		Content              string `json:"content"`
-		Tag                  string `json:"tag"`
-		Date                 string `json:"date"`
-		DraftGroupID         string `json:"draft_group_id"`
-		ReceivedAllConcatSms string `json:"received_all_concat_sms"`
-		ConcatSmsTotal       string `json:"concat_sms_total"`
-		ConcatSmsReceived    string `json:"concat_sms_received"`
-	} `json:"messages"`
+	Messages []Sms `json:"messages"`
 }
