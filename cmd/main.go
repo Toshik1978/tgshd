@@ -145,8 +145,21 @@ func commandHandlers() fx.Option {
 				fx.ResultTags(`group:"command_handler"`),
 			),
 			fx.Annotate(
-				command.NewNetworkCommand,
-				fx.As(new(telegram.Handler)),
+				func(logger *zap.Logger, publisher command.Publisher, conn command.ZTE) telegram.Handler {
+					return command.NewNetworkCommand(logger, publisher, conn, "5g")
+				},
+				fx.ResultTags(`group:"command_handler"`),
+			),
+			fx.Annotate(
+				func(logger *zap.Logger, publisher command.Publisher, conn command.ZTE) telegram.Handler {
+					return command.NewNetworkCommand(logger, publisher, conn, "4g")
+				},
+				fx.ResultTags(`group:"command_handler"`),
+			),
+			fx.Annotate(
+				func(logger *zap.Logger, publisher command.Publisher, conn command.ZTE) telegram.Handler {
+					return command.NewNetworkCommand(logger, publisher, conn, "3g")
+				},
 				fx.ResultTags(`group:"command_handler"`),
 			),
 		),

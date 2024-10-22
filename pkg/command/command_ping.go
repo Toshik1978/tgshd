@@ -48,9 +48,9 @@ func (c *pingCommand) Handle(ctx context.Context, senderID int64) error {
 	text := "PONG\n\n"
 	for _, host := range c.hosts {
 		if resp[host] {
-			text += host + ": OK\n"
+			text += host + ": <b>OK</b>\n"
 		} else {
-			text += host + ": FAIL\n"
+			text += host + ": <b>FAIL</b>\n"
 		}
 	}
 

@@ -43,8 +43,13 @@ func (c *speedCommand) Handle(ctx context.Context, senderID int64) error {
 		return fmt.Errorf("failed to do speedtest: %w", err)
 	}
 
-	if err := c.publisher.Publish(ctx, senderID, fmt.Sprintf("Download: %.2f\nUpload: %.2f", dl, ul)); err != nil {
-		return fmt.Errorf("failed to publish reply: %w", err)
+	err1 := c.publisher.Publish(
+		ctx,
+		senderID,
+		fmt.Sprintf("Download: <b>%.2fMbps</b>\nUpload: <b>%.2fMbps</b>", dl, ul),
+	)
+	if err1 != nil {
+		return fmt.Errorf("failed to publish reply: %w", err1)
 	}
 	return nil
 }

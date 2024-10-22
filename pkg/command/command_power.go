@@ -44,7 +44,7 @@ func (c *powerCommand) Handle(ctx context.Context, senderID int64) error {
 		return fmt.Errorf("failed to get voltage: %w", err)
 	}
 
-	if err := c.publisher.Publish(ctx, senderID, fmt.Sprintf("Voltage: %.1f", voltage)); err != nil {
+	if err := c.publisher.Publish(ctx, senderID, fmt.Sprintf("Voltage: <b>%.1f</b>", voltage)); err != nil {
 		return fmt.Errorf("failed to publish reply: %w", err)
 	}
 	return nil
