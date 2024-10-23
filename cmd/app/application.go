@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/go-co-op/gocron/v2"
+
 	"go.uber.org/fx"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
@@ -17,12 +19,15 @@ type ApplicationParams struct {
 
 	Logger   *zap.Logger
 	Telegram telegram.Consumer
+	Workers  []Worker `group:"worker"`
 }
 
 // Application declare new instance of application.
 type Application struct {
 	logger     *zap.Logger
 	tlg        telegram.Consumer
+	workers    []Worker
+	scheduler  gocron.Scheduler
 	commit     string
 	buildstamp string
 }
@@ -32,6 +37,7 @@ func NewApplication(p ApplicationParams, commit, buildstamp string) *Application
 	return &Application{
 		logger:     p.Logger,
 		tlg:        p.Telegram,
+		workers:    p.Workers,
 		commit:     commit,
 		buildstamp: buildstamp,
 	}
@@ -52,6 +58,45 @@ func (a *Application) OnStart(ctx context.Context) error {
 }
 
 func (a *Application) onStart(ctx context.Context) error {
+	scheduler, err := gocron.NewScheduler()
+	if err != nil {
+		return fmt.Errorf("failed to start scheduler: %w", err)
+	}
+
+	a.scheduler = scheduler
+	for _, worker := range a.workers {
+		job, err := a.scheduler.
+			NewJob(
+				gocron.DurationJob(worker.Duration()),
+				gocron.NewTask(
+					func(worker Worker) {
+						a.logger.
+							With(zap.String("worker_name", worker.Name())).
+							Info("Run worker")
+
+						if err := worker.Do(ctx); err != nil {
+							a.logger.
+								With(zap.String("worker_name", worker.Name())).
+								With(zap.Error(err)).
+								Error("Failed to run worker")
+						}
+					},
+					worker,
+				),
+				gocron.WithSingletonMode(gocron.LimitModeReschedule),
+			)
+		if err != nil {
+			return fmt.Errorf("failed to start worker: %w", err)
+		}
+
+		a.logger.
+			With(zap.String("name", worker.Name())).
+			With(zap.String("job_id", job.ID().String())).
+			Info("Worker scheduled")
+	}
+	a.scheduler.Start()
+	a.logger.Info("Scheduler started")
+
 	if err := a.tlg.Start(ctx); err != nil {
 		return fmt.Errorf("failed to start telegram handler: %w", err)
 	}
@@ -79,6 +124,11 @@ func (a *Application) OnStop(ctx context.Context, cancel context.CancelFunc) err
 func (a *Application) onStop(ctx context.Context) error {
 	grp, grpCtx := errgroup.WithContext(ctx)
 	grp.Go(func() error { return a.tlg.Stop(grpCtx) })
+	grp.Go(func() error {
+		_ = a.scheduler.Shutdown()
+		a.logger.Info("Scheduler stopped")
+		return nil
+	})
 	return grp.Wait()
 }
 

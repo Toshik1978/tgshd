@@ -7,10 +7,15 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 
 	"github.com/go-resty/resty/v2"
 	"go.uber.org/zap"
 )
+
+// Practically, it's a singleton object.
+// Due to the fact we can't login on ZTE device twice at the same time,
+//  all public methods are locked with a local mutex and login/logout automatically.
 
 const (
 	GetCmd  = "/goform/goform_get_cmd_process"
@@ -27,47 +32,34 @@ type Connection struct {
 
 	crVersion      string
 	waInnerVersion string
-	cookie         *http.Cookie
+
+	mutex  sync.Mutex
+	cookie *http.Cookie
 }
 
 // NewConnection initializes a new Connection instance.
-func NewConnection(logger *zap.Logger, host, password string) *Connection {
-	return &Connection{
+func NewConnection(logger *zap.Logger, host, password string) (*Connection, error) {
+	conn := &Connection{
 		logger:   logger,
 		client:   resty.New().SetBaseURL("http://" + host).SetLogger(newLogger(logger)),
 		referer:  "http://" + host + "/",
 		password: password,
 	}
-}
 
-// Login logs in to the ZTE device.
-func (c *Connection) Login() error {
-	if err := c.parseDeviceVersion(); err != nil {
-		return fmt.Errorf("failed to login: %w", err)
+	// Initialize some persistent data.
+	if err := conn.parseDeviceVersion(); err != nil {
+		return nil, fmt.Errorf("failed to initialize: %w", err)
 	}
-	ld, err := c.ld()
-	if err != nil {
-		return fmt.Errorf("failed to login: %w", err)
-	}
-	cookie, err := c.loginRequest(c.calculatePassword(ld))
-	if err != nil {
-		return fmt.Errorf("failed to login: %w", err)
-	}
-	c.cookie = cookie
-	return nil
-}
-
-// Logout logs out from the ZTE device.
-func (c *Connection) Logout() error {
-	ad, err := c.ad()
-	if err != nil {
-		return fmt.Errorf("failed to logout: %w", err)
-	}
-	return c.logoutRequest(ad)
+	return conn, nil
 }
 
 // SetBearer sets the bearer preferences for the network.
 func (c *Connection) SetBearer(pref Bearer) error {
+	if err := c.login(); err != nil {
+		return fmt.Errorf("failed to login: %w", err)
+	}
+	defer func() { _ = c.logout() }()
+
 	ad, err := c.ad()
 	if err != nil {
 		return fmt.Errorf("failed to set bearer: %w", err)
@@ -77,6 +69,11 @@ func (c *Connection) SetBearer(pref Bearer) error {
 
 // AllSms gets all SMS on the device.
 func (c *Connection) AllSms(onlyUnread bool) ([]Sms, error) {
+	if err := c.login(); err != nil {
+		return nil, fmt.Errorf("failed to login: %w", err)
+	}
+	defer func() { _ = c.logout() }()
+
 	messages, err := c.smsRequest(0, 500)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get all sms: %w", err)
@@ -99,6 +96,11 @@ func (c *Connection) AllSms(onlyUnread bool) ([]Sms, error) {
 // Method always returns the list of SMS if we could read them.
 // But it can have an error at the same time if we didn't read/delete successfully.
 func (c *Connection) ReadSms(del bool) ([]Sms, error) {
+	if err := c.login(); err != nil {
+		return nil, fmt.Errorf("failed to login: %w", err)
+	}
+	defer func() { _ = c.logout() }()
+
 	messages, err := c.smsRequest(0, 500)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get all sms: %w", err)
@@ -145,6 +147,32 @@ func (c *Connection) parseDeviceVersion() error {
 	c.crVersion = deviceVersion.CrVersion
 	c.waInnerVersion = deviceVersion.WaInnerVersion
 	return nil
+}
+
+// Login logs in to the ZTE device.
+func (c *Connection) login() error {
+	if err := c.parseDeviceVersion(); err != nil {
+		return fmt.Errorf("failed to login: %w", err)
+	}
+	ld, err := c.ld()
+	if err != nil {
+		return fmt.Errorf("failed to login: %w", err)
+	}
+	cookie, err := c.loginRequest(c.calculatePassword(ld))
+	if err != nil {
+		return fmt.Errorf("failed to login: %w", err)
+	}
+	c.cookie = cookie
+	return nil
+}
+
+// Logout logs out from the ZTE device.
+func (c *Connection) logout() error {
+	ad, err := c.ad()
+	if err != nil {
+		return fmt.Errorf("failed to logout: %w", err)
+	}
+	return c.logoutRequest(ad)
 }
 
 // ad calculates the current AD value.

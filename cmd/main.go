@@ -18,6 +18,7 @@ import (
 	"github.com/Toshik1978/server-bot/pkg/command"
 	"github.com/Toshik1978/server-bot/pkg/ping"
 	"github.com/Toshik1978/server-bot/pkg/power"
+	"github.com/Toshik1978/server-bot/pkg/sms"
 	"github.com/Toshik1978/server-bot/pkg/speedtest"
 	"github.com/Toshik1978/server-bot/pkg/telegram"
 	"github.com/Toshik1978/server-bot/pkg/zte"
@@ -33,6 +34,7 @@ func main() {
 	fxApp := fx.New(
 		configuration(),
 		commandHandlers(),
+		workers(),
 		fx.Provide(newApplication),
 		fx.Invoke(register),
 		fx.ErrorHook(&errorHandler{}),
@@ -49,7 +51,13 @@ func configuration() fx.Option {
 		fx.Provide(
 			newLogger,
 			newConfig,
-			newZTEConnection,
+		),
+		fx.Provide(
+			fx.Annotate(
+				newZTEConnection,
+				fx.As(new(command.ZTE)),
+				fx.As(new(sms.ZTE)),
+			),
 		),
 		fx.Provide(
 			newTelegramBot,
@@ -111,7 +119,7 @@ func newTelegramBot(cfg *config) (*telebot.Bot, error) {
 }
 
 // newZTEConnection initializes new ZTE connection.
-func newZTEConnection(logger *zap.Logger, cfg *config) command.ZTE {
+func newZTEConnection(logger *zap.Logger, cfg *config) (*zte.Connection, error) {
 	return zte.NewConnection(logger, cfg.ZTEHost, cfg.ZTEPassword)
 }
 
@@ -162,6 +170,15 @@ func commandHandlers() fx.Option {
 				},
 				fx.ResultTags(`group:"command_handler"`),
 			),
+		),
+	)
+}
+
+// workers provide all workers in the application.
+func workers() fx.Option {
+	return fx.Options(
+		fx.Provide(
+			fx.Annotate(sms.NewWorker, fx.As(new(app.Worker)), fx.ResultTags(`group:"worker"`)),
 		),
 	)
 }

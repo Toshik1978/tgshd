@@ -11,8 +11,6 @@ import (
 )
 
 type ZTE interface {
-	Login() error
-	Logout() error
 	SetBearer(pref zte.Bearer) error
 }
 
@@ -45,19 +43,8 @@ func (c *networkCommand) Enabled() bool {
 func (c *networkCommand) Handle(ctx context.Context, senderID int64) error {
 	c.logger.Debug("Network command received")
 
-	err := c.conn.Login()
-	if err != nil {
-		return fmt.Errorf("failed to login: %w", err)
-	}
-
-	err = c.conn.SetBearer(c.commandToBearer())
-	if err != nil {
+	if err := c.conn.SetBearer(c.commandToBearer()); err != nil {
 		return fmt.Errorf("failed to set bearer: %w", err)
-	}
-
-	err = c.conn.Logout()
-	if err != nil {
-		return fmt.Errorf("failed to logout: %w", err)
 	}
 
 	reply := fmt.Sprintf("Bearer preferences succeeded: <b>%s</b>", strings.ToUpper(c.cmd))
