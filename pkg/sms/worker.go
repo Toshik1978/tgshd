@@ -10,8 +10,14 @@ import (
 )
 
 type worker struct {
-	logger *zap.Logger
-	conn   ZTE
+	logger    *zap.Logger
+	publisher Publisher
+	chatID    int64
+	conn      ZTE
+}
+
+type Publisher interface {
+	Publish(ctx context.Context, recipientID int64, msg string) error
 }
 
 type ZTE interface {
@@ -19,10 +25,12 @@ type ZTE interface {
 }
 
 // NewWorker instantiate new SMS worker.
-func NewWorker(logger *zap.Logger, conn ZTE) *worker {
+func NewWorker(logger *zap.Logger, publisher Publisher, chatID int64, conn ZTE) *worker {
 	return &worker{
-		logger: logger,
-		conn:   conn,
+		logger:    logger,
+		publisher: publisher,
+		chatID:    chatID,
+		conn:      conn,
 	}
 }
 

@@ -66,7 +66,7 @@ func configuration() fx.Option {
 				fx.As(new(telegram.Consumer)),
 				fx.ParamTags(``, ``, `group:"command_handler"`),
 			),
-			fx.Annotate(telegram.NewPublisher, fx.As(new(command.Publisher))),
+			fx.Annotate(telegram.NewPublisher, fx.As(new(command.Publisher)), fx.As(new(sms.Publisher))),
 		),
 	)
 }
@@ -88,7 +88,7 @@ func newLogger(cfg *config) (*zap.Logger, error) {
 type config struct {
 	AppEnv        string   `env:"APP_ENV"`
 	TelegramToken string   `env:"TELEGRAM_TOKEN"`
-	AlertChatID   int64    `env:"TELEGRAM_CHAT_ID"`
+	ChatID        int64    `env:"TELEGRAM_CHAT_ID"`
 	PingHosts     []string `env:"BOT_PING_HOSTS" envSeparator:","`
 	NutIP         string   `env:"BOT_NUT_IP"`
 	NutName       string   `env:"BOT_NUT_NAME"`
@@ -178,13 +178,18 @@ func commandHandlers() fx.Option {
 func workers() fx.Option {
 	return fx.Options(
 		fx.Provide(
-			fx.Annotate(sms.NewWorker, fx.As(new(app.Worker)), fx.ResultTags(`group:"worker"`)),
+			fx.Annotate(
+				func(logger *zap.Logger, publisher sms.Publisher, conn sms.ZTE, cfg *config) app.Worker {
+					return sms.NewWorker(logger, publisher, cfg.ChatID, conn)
+				},
+				fx.ResultTags(`group:"worker"`),
+			),
 		),
 	)
 }
 
 // newApplication initializes application.
-func newApplication(lc fx.Lifecycle, p app.ApplicationParams, cfg *config) *app.Application {
+func newApplication(lc fx.Lifecycle, p app.ApplicationParams) *app.Application {
 	a := app.NewApplication(p, Commit, Buildstamp)
 	cancelCtx, cancel := context.WithCancel(context.Background())
 
