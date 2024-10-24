@@ -79,6 +79,7 @@ func newLogger(cfg *config) (*zap.Logger, error) {
 		config.EncoderConfig.EncodeLevel = zapcore.CapitalColorLevelEncoder
 	} else {
 		config = zap.NewProductionConfig()
+		config.Level = zap.NewAtomicLevelAt(zapcore.WarnLevel)
 		config.Encoding = "console"
 		config.EncoderConfig.EncodeLevel = zapcore.CapitalLevelEncoder
 	}
