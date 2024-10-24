@@ -13,6 +13,7 @@ import (
 	"go.uber.org/zap"
 )
 
+// https://wijayamin.github.io/zte-modem-api-docs/
 // Practically, it's a singleton object.
 // Due to the fact we can't login on ZTE device twice at the same time,
 //  all public methods are locked with a local mutex and login/logout automatically.

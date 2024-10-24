@@ -2,6 +2,8 @@ package sms
 
 import (
 	"context"
+	"errors"
+	"fmt"
 	"time"
 
 	"go.uber.org/zap"
@@ -43,5 +45,18 @@ func (w *worker) Duration() time.Duration {
 }
 
 func (w *worker) Do(ctx context.Context) error {
-	return nil
+	sms, err := w.conn.ReadSms(true)
+	errs := make([]error, 0, len(sms))
+	errs = append(errs, err)
+
+	for _, m := range sms { //nolint:gocritic
+		text := "<b>SMS</b>\n\n"
+		text += fmt.Sprintf("<i>From</i>: %s\n", m.Number)
+		text += fmt.Sprintf("<i>Date</i>: %s\n\n", decodeDate(m.Date).Format(time.RFC1123))
+		text += decodeMessage(m.Content)
+
+		errs = append(errs, w.publisher.Publish(ctx, w.chatID, text))
+	}
+
+	return errors.Join(errs...)
 }
