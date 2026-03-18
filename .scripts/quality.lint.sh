@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-GOLANGCI_LINT_VERSION="1.61.0"
+GOLANGCI_LINT_VERSION="2.11.3"
 GOLANGCI_LINT_PATH="$(command -v golangci-lint)"
 
 if ! [ -x "$GOLANGCI_LINT_PATH" ]; then

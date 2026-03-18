@@ -1,30 +1,27 @@
 module github.com/Toshik1978/server-bot
 
-go 1.23
-
-toolchain go1.23.2
+go 1.26
 
 require (
-	github.com/caarlos0/env/v11 v11.2.2
-	github.com/go-ping/ping v1.1.0
-	github.com/go-resty/resty/v2 v2.15.3
+	github.com/caarlos0/env/v11 v11.4.0
+	github.com/go-co-op/gocron/v2 v2.19.1
 	github.com/joho/godotenv v1.5.1
+	github.com/prometheus-community/pro-bing v0.8.0
 	github.com/robbiet480/go.nut v0.0.0-20240622015809-60e196249c53
-	github.com/showwin/speedtest-go v1.7.9
-	go.uber.org/fx v1.23.0
-	go.uber.org/zap v1.27.0
-	golang.org/x/sync v0.8.0
-	gopkg.in/telebot.v4 v4.0.0-beta.4
+	github.com/showwin/speedtest-go v1.7.10
+	go.uber.org/fx v1.24.0
+	go.uber.org/zap v1.27.1
+	golang.org/x/sync v0.20.0
+	gopkg.in/telebot.v4 v4.0.0-beta.7
+	resty.dev/v3 v3.0.0-beta.6
 )
 
 require (
-	github.com/go-co-op/gocron/v2 v2.12.1 // indirect
 	github.com/google/uuid v1.6.0 // indirect
-	github.com/jonboulle/clockwork v0.4.0 // indirect
+	github.com/jonboulle/clockwork v0.5.0 // indirect
 	github.com/robfig/cron/v3 v3.0.1 // indirect
-	go.uber.org/dig v1.18.0 // indirect
+	go.uber.org/dig v1.19.0 // indirect
 	go.uber.org/multierr v1.11.0 // indirect
-	golang.org/x/exp v0.0.0-20241009180824-f66d83c29e7c // indirect
-	golang.org/x/net v0.30.0 // indirect
-	golang.org/x/sys v0.26.0 // indirect
+	golang.org/x/net v0.52.0 // indirect
+	golang.org/x/sys v0.42.0 // indirect
 )

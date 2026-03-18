@@ -7,10 +7,9 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-	"sync"
 
-	"github.com/go-resty/resty/v2"
 	"go.uber.org/zap"
+	"resty.dev/v3"
 )
 
 // https://wijayamin.github.io/zte-modem-api-docs/
@@ -34,7 +33,6 @@ type Connection struct {
 	crVersion      string
 	waInnerVersion string
 
-	mutex  sync.Mutex
 	cookie *http.Cookie
 }
 
@@ -369,7 +367,7 @@ func (c *Connection) smsDeleteRequest(ids []string, ad string) error {
 // request generates the basic resty request object.
 func (c *Connection) request(post bool) *resty.Request {
 	r := c.client.R().
-		ForceContentType("application/json").
+		SetForceResponseContentType("application/json").
 		SetHeader("Origin", c.referer).
 		SetHeader("Referer", c.referer)
 

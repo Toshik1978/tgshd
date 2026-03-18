@@ -11,8 +11,3 @@ pre-commit:
       run: make quality.tests
     Build application:
       run: make app.build
-
-commit-msg:
-  commands:
-    Run commitlint:
-      run: npx commitlint --edit

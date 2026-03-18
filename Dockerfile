@@ -1,4 +1,4 @@
-FROM golang:1.17-alpine3.15 AS builder
+FROM golang:1.26-alpine3.23 AS builder
 
 RUN apk add --no-cache git make
 
@@ -13,7 +13,7 @@ RUN make code.deps
 COPY . /app
 RUN make app.build
 
-FROM alpine:3.15
+FROM alpine:3.23
 
 WORKDIR /app
 

@@ -1,68 +1,8 @@
+version: "2"
 run:
-  concurrency: 4
-  timeout: 2m
-  go: "1.23"
-
-linters-settings:
-  funlen:
-    lines: 60
-    statements: 40
-
-  govet:
-    enable-all: true
-    disable:
-    - fieldalignment
-
-  revive:
-    confidence: 0.8
-    rules:
-      - name: unexported-return
-        disabled: true
-
-  gofmt:
-    simplify: true
-
-  goimports:
-    local-prefixes: github.com/Toshik1978
-
-  gocyclo:
-    min-complexity: 10
-
-  dupl:
-    threshold: 100
-
-  lll:
-    line-length: 120
-
-  nakedret:
-    max-func-lines: 30
-
-  prealloc:
-    simple: true
-    range-loops: true # Report preallocation suggestions on range loops, true by default
-    for-loops: false # Report preallocation suggestions on for loops, false by default
-
-  gocritic:
-    enabled-tags:
-      - diagnostic
-      - style
-      - performance
-      - experimental
-      - opinionated
-    disabled-checks:
-      - hugeParam
-      - whyNoLint
-      - unnamedResult
-
-  depguard:
-    rules:
-      main:
-        allow:
-          - $gostd
-          - github.com
-
+  go: "1.26"
 linters:
-  disable-all: true
+  default: none
   enable:
     - bodyclose
     - depguard
@@ -75,35 +15,101 @@ linters:
     - gocritic
     - gocyclo
     - godot
-    - gofmt
-    - goimports
-    - revive
     - gosec
-    - gosimple
     - govet
     - ineffassign
     - lll
     - misspell
     - nakedret
-    - copyloopvar
+    - predeclared
+    - revive
     - staticcheck
-    - stylecheck
-    - typecheck
     - unconvert
     - unparam
+    - unused
     - whitespace
-
-issues:
-  exclude-rules:
-    - path: _test\.go
-      linters:
-        - unused
-        - gocyclo
-        - errcheck
-        - dupl
-        - gosec
-        - lll
-        - funlen
-    - linters:
-        - lll
-      source: "^//go:generate "
+  settings:
+    depguard:
+      rules:
+        main:
+          allow:
+            - $gostd
+            - golang.org
+            - google.golang.org
+            - github.com
+            - go.uber.org
+            - go.elastic.co
+            - go.etcd.io
+            - gopkg.in
+            - resty.dev
+    dupl:
+      threshold: 100
+    funlen:
+      lines: 60
+      statements: 40
+    gocritic:
+      disabled-checks:
+        - hugeParam
+        - whyNoLint
+        - unnamedResult
+      enabled-tags:
+        - diagnostic
+        - style
+        - performance
+        - experimental
+        - opinionated
+    gocyclo:
+      min-complexity: 10
+    govet:
+      disable:
+        - fieldalignment
+      enable-all: true
+    lll:
+      line-length: 120
+    nakedret:
+      max-func-lines: 30
+    prealloc:
+      simple: true
+      range-loops: true
+      for-loops: false
+    revive:
+      rules:
+        - name: unexported-return
+          disabled: true
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    rules:
+      - linters:
+          - dupl
+          - errcheck
+          - funlen
+          - gocyclo
+          - gosec
+          - lll
+          - unused
+        path: _test\.go
+    paths:
+      - third_party$
+      - builtin$
+      - examples$
+formatters:
+  enable:
+    - gofmt
+    - goimports
+  settings:
+    gofmt:
+      simplify: true
+    goimports:
+      local-prefixes:
+        - github.com/Toshik1978
+  exclusions:
+    generated: lax
+    paths:
+      - third_party$
+      - builtin$
+      - examples$

@@ -64,7 +64,8 @@ Temporary Items
 
 bin/
 .env
-.lefthook-local
+.mise.local.toml
+.lefthook-local.yaml
 
 # Tests
 coverage.xml

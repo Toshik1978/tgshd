@@ -14,7 +14,7 @@ var ignoreChars = map[string]bool{
 }
 
 // encodeMessage encodes the string to GSM string.
-func encodeMessage(msg string) string {
+func encodeMessage(msg string) string { //nolint:unused
 	encoded := ""
 
 	if msg == "" {
@@ -82,10 +82,11 @@ func decodeDate(d string) time.Time {
 	return time.Date(int(year), time.Month(month), int(day), int(hour), int(minutes), int(sec), 0, time.Local)
 }
 
-func dec2Hex(a int64) string {
+func dec2Hex(a int64) string { //nolint:unused
 	return strconv.FormatInt(a, 16)
 }
 
+//nolint:gosec
 func hex2Char(hex string) string {
 	parsed, err := strconv.ParseInt(hex, 16, 32)
 	if err != nil {

@@ -5,7 +5,7 @@ import (
 	"fmt"
 	"time"
 
-	pingtool "github.com/go-ping/ping"
+	pingtool "github.com/prometheus-community/pro-bing"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
