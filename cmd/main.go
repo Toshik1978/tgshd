@@ -121,6 +121,10 @@ func newTelegramBot(cfg *config) (*telebot.Bot, error) {
 
 // newZTEConnection initializes new ZTE connection.
 func newZTEConnection(logger *zap.Logger, cfg *config) (*zte.Connection, error) {
+	if cfg.ZTEHost == "" {
+		logger.Info("ZTE connection disabled: BOT_ZTE_HOST not set")
+		return nil, nil
+	}
 	return zte.NewConnection(logger, cfg.ZTEHost, cfg.ZTEPassword)
 }
 
