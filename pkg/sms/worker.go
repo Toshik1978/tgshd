@@ -45,9 +45,6 @@ func (w *worker) Duration() time.Duration {
 }
 
 func (w *worker) Do(ctx context.Context) error {
-	if w.conn == nil {
-		return nil
-	}
 	sms, err := w.conn.ReadSms(true)
 	errs := make([]error, 0, len(sms))
 	errs = append(errs, err)

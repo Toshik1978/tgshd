@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"os"
 	"time"
 
 	"github.com/caarlos0/env/v11"
@@ -31,18 +32,20 @@ var (
 )
 
 func main() {
-	fxApp := fx.New(
+	options := []fx.Option{
 		configuration(),
 		commandHandlers(),
-		workers(),
 		fx.Provide(newApplication),
 		fx.Invoke(register),
 		fx.ErrorHook(&errorHandler{}),
 		fx.WithLogger(func(logger *zap.Logger) fxevent.Logger {
 			return &fxevent.ZapLogger{Logger: logger}
 		}),
-	)
-	fxApp.Run()
+	}
+	if os.Getenv("BOT_ZTE_HOST") != "" {
+		options = append(options, zteProviders(), zteWorkers())
+	}
+	fx.New(options...).Run()
 }
 
 // configuration provides basic configuration for fx.
@@ -53,13 +56,6 @@ func configuration() fx.Option {
 			newConfig,
 		),
 		fx.Provide(
-			fx.Annotate(
-				newZTEConnection,
-				fx.As(new(command.ZTE)),
-				fx.As(new(sms.ZTE)),
-			),
-		),
-		fx.Provide(
 			newTelegramBot,
 			fx.Annotate(
 				telegram.NewConsumer,
@@ -67,6 +63,39 @@ func configuration() fx.Option {
 				fx.ParamTags(``, ``, `group:"command_handler"`),
 			),
 			fx.Annotate(telegram.NewPublisher, fx.As(new(command.Publisher)), fx.As(new(sms.Publisher))),
+		),
+	)
+}
+
+// zteProviders provides ZTE connection and dependent components for fx.
+func zteProviders() fx.Option {
+	return fx.Options(
+		fx.Provide(
+			fx.Annotate(
+				newZTEConnection,
+				fx.As(new(command.ZTE)),
+				fx.As(new(sms.ZTE)),
+			),
+		),
+		fx.Provide(
+			fx.Annotate(
+				func(logger *zap.Logger, publisher command.Publisher, conn command.ZTE) telegram.Handler {
+					return command.NewNetworkCommand(logger, publisher, conn, "5g")
+				},
+				fx.ResultTags(`group:"command_handler"`),
+			),
+			fx.Annotate(
+				func(logger *zap.Logger, publisher command.Publisher, conn command.ZTE) telegram.Handler {
+					return command.NewNetworkCommand(logger, publisher, conn, "4g")
+				},
+				fx.ResultTags(`group:"command_handler"`),
+			),
+			fx.Annotate(
+				func(logger *zap.Logger, publisher command.Publisher, conn command.ZTE) telegram.Handler {
+					return command.NewNetworkCommand(logger, publisher, conn, "3g")
+				},
+				fx.ResultTags(`group:"command_handler"`),
+			),
 		),
 	)
 }
@@ -121,10 +150,6 @@ func newTelegramBot(cfg *config) (*telebot.Bot, error) {
 
 // newZTEConnection initializes new ZTE connection.
 func newZTEConnection(logger *zap.Logger, cfg *config) (*zte.Connection, error) {
-	if cfg.ZTEHost == "" {
-		logger.Info("ZTE connection disabled: BOT_ZTE_HOST not set")
-		return nil, nil
-	}
 	return zte.NewConnection(logger, cfg.ZTEHost, cfg.ZTEPassword)
 }
 
@@ -157,30 +182,12 @@ func commandHandlers() fx.Option {
 				fx.As(new(telegram.Handler)),
 				fx.ResultTags(`group:"command_handler"`),
 			),
-			fx.Annotate(
-				func(logger *zap.Logger, publisher command.Publisher, conn command.ZTE) telegram.Handler {
-					return command.NewNetworkCommand(logger, publisher, conn, "5g")
-				},
-				fx.ResultTags(`group:"command_handler"`),
-			),
-			fx.Annotate(
-				func(logger *zap.Logger, publisher command.Publisher, conn command.ZTE) telegram.Handler {
-					return command.NewNetworkCommand(logger, publisher, conn, "4g")
-				},
-				fx.ResultTags(`group:"command_handler"`),
-			),
-			fx.Annotate(
-				func(logger *zap.Logger, publisher command.Publisher, conn command.ZTE) telegram.Handler {
-					return command.NewNetworkCommand(logger, publisher, conn, "3g")
-				},
-				fx.ResultTags(`group:"command_handler"`),
-			),
 		),
 	)
 }
 
-// workers provide all workers in the application.
-func workers() fx.Option {
+// zteWorkers provide ZTE workers in the application.
+func zteWorkers() fx.Option {
 	return fx.Options(
 		fx.Provide(
 			fx.Annotate(
