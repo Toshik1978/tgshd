@@ -33,6 +33,7 @@ func (p *ping) Ping(ctx context.Context, hosts []string) (map[string]bool, error
 			if err != nil {
 				return fmt.Errorf("failed to ping: %w", err)
 			}
+			pinger.SetPrivileged(true)
 			pinger.Count = 3
 			pinger.Timeout = 5 * time.Second
 			if err := pinger.Run(); err != nil {
