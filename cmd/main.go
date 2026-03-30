@@ -19,6 +19,7 @@ import (
 	"github.com/Toshik1978/server-bot/pkg/command"
 	"github.com/Toshik1978/server-bot/pkg/ping"
 	"github.com/Toshik1978/server-bot/pkg/power"
+	"github.com/Toshik1978/server-bot/pkg/script"
 	"github.com/Toshik1978/server-bot/pkg/sms"
 	"github.com/Toshik1978/server-bot/pkg/speedtest"
 	"github.com/Toshik1978/server-bot/pkg/telegram"
@@ -119,6 +120,7 @@ type config struct {
 	AppEnv        string   `env:"APP_ENV"`
 	TelegramToken string   `env:"TELEGRAM_TOKEN"`
 	ChatID        int64    `env:"TELEGRAM_CHAT_ID"`
+	UnknownScript string   `env:"TELEGRAM_UNKNOWN_SCRIPT"`
 	PingHosts     []string `env:"BOT_PING_HOSTS" envSeparator:","`
 	NutIP         string   `env:"BOT_NUT_IP"`
 	NutName       string   `env:"BOT_NUT_NAME"`
@@ -164,6 +166,11 @@ func commandHandlers() fx.Option {
 			),
 			fx.Annotate(speedtest.New, fx.As(new(command.Speedtest))),
 			fx.Annotate(ping.New, fx.As(new(command.Pinger))),
+			fx.Annotate(
+				func(logger *zap.Logger, cfg *config) command.Script {
+					return script.New(logger, cfg.UnknownScript)
+				},
+			),
 		),
 		fx.Provide(
 			fx.Annotate(
@@ -179,6 +186,11 @@ func commandHandlers() fx.Option {
 			),
 			fx.Annotate(
 				command.NewSpeedCommand,
+				fx.As(new(telegram.Handler)),
+				fx.ResultTags(`group:"command_handler"`),
+			),
+			fx.Annotate(
+				command.NewUnknownCommand,
 				fx.As(new(telegram.Handler)),
 				fx.ResultTags(`group:"command_handler"`),
 			),

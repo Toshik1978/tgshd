@@ -3,6 +3,7 @@ package telegram
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"go.uber.org/zap"
 	"gopkg.in/telebot.v4"
@@ -15,7 +16,7 @@ type Handler interface {
 	// Enabled return true if command is enabled.
 	Enabled() bool
 	// Handle handles command.
-	Handle(ctx context.Context, senderID int64) error
+	Handle(ctx context.Context, senderID int64, cmd string) error
 }
 
 // Consumer declare telegram consumer.
@@ -51,11 +52,14 @@ func (c *consumer) Start(_ context.Context) error {
 	enabled := make(map[string]Handler)
 	for _, handler := range c.handlers {
 		if handler.Enabled() {
-			c.logger.With(zap.String("command", handler.Name())).Info("Telegram command added")
-			c.bot.Handle("/"+handler.Name(), func(ctx telebot.Context) error {
-				return c.handleCommand(handler, ctx)
-			})
-			enabled["/"+handler.Name()] = handler
+			names := strings.Split(handler.Name(), "|")
+			for _, name := range names {
+				c.logger.With(zap.String("command", name)).Info("Telegram command added")
+				c.bot.Handle("/"+name, func(ctx telebot.Context) error {
+					return c.handleCommand(handler, ctx)
+				})
+				enabled["/"+name] = handler
+			}
 		}
 	}
 	// Add generic handler in case we are in the channel.
@@ -98,7 +102,7 @@ func (c *consumer) handleCommand(handler Handler, ctx telebot.Context) error {
 		}
 	}()
 
-	err := handler.Handle(context.Background(), senderID)
+	err := handler.Handle(context.Background(), senderID, ctx.Text())
 	if err != nil {
 		logger.
 			With(zap.Error(err)).

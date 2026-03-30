@@ -40,7 +40,7 @@ func (c *networkCommand) Enabled() bool {
 	return true
 }
 
-func (c *networkCommand) Handle(ctx context.Context, senderID int64) error {
+func (c *networkCommand) Handle(ctx context.Context, senderID int64, _ string) error {
 	c.logger.Debug("Network command received")
 
 	if err := c.conn.SetBearer(c.commandToBearer()); err != nil {

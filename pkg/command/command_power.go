@@ -36,7 +36,7 @@ func (c *powerCommand) Enabled() bool {
 	return c.power.Valid()
 }
 
-func (c *powerCommand) Handle(ctx context.Context, senderID int64) error {
+func (c *powerCommand) Handle(ctx context.Context, senderID int64, _ string) error {
 	c.logger.Debug("Power command received")
 
 	voltage, err := c.power.Voltage(ctx)

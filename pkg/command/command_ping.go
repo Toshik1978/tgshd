@@ -37,7 +37,7 @@ func (c *pingCommand) Enabled() bool {
 	return len(c.hosts) > 0
 }
 
-func (c *pingCommand) Handle(ctx context.Context, senderID int64) error {
+func (c *pingCommand) Handle(ctx context.Context, senderID int64, _ string) error {
 	c.logger.Debug("Ping command received")
 
 	resp, err := c.pinger.Ping(ctx, c.hosts)

@@ -35,7 +35,7 @@ func (c *speedCommand) Enabled() bool {
 	return true
 }
 
-func (c *speedCommand) Handle(ctx context.Context, senderID int64) error {
+func (c *speedCommand) Handle(ctx context.Context, senderID int64, _ string) error {
 	c.logger.Debug("Speed command received")
 
 	dl, ul, err := c.speedtest.Speedtest(ctx)
