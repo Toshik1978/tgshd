@@ -106,7 +106,7 @@ jobs:
       - name: Update gist badges
         # Badges publish only on push to main.
         if: github.ref == 'refs/heads/main'
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         env:
           GIST_ID: ${{ secrets.GIST_ID }}
           TEST_BADGE_MSG: ${{ env.TEST_BADGE_MSG }}
