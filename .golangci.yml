@@ -146,6 +146,10 @@ linters:
       line-length: 120
     nakedret:
       max-func-lines: 30
+    nolintlint:
+      require-explanation: true
+      require-specific: true
+      allow-unused: false
     prealloc:
       simple: true
       range-loops: true

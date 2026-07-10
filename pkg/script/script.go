@@ -28,7 +28,8 @@ func (s *script) Name() (string, error) {
 		return "", nil
 	}
 
-	stream, err := exec.CommandContext(context.Background(), s.scriptFile).Output() //nolint:gosec
+	//nolint:gosec // G204: scriptFile is operator-provided configuration, not untrusted user input.
+	stream, err := exec.CommandContext(context.Background(), s.scriptFile).Output()
 	if err != nil {
 		s.logger.Error("Failed to execute script", zap.Error(err))
 		return "", fmt.Errorf("failed to execute script reply: %w", err)
@@ -43,7 +44,8 @@ func (s *script) Execute(ctx context.Context, cmd string) error {
 		return nil
 	}
 
-	command := exec.CommandContext(ctx, s.scriptFile, cmd) //nolint:gosec
+	//nolint:gosec // G204: scriptFile is operator-provided configuration, not untrusted user input.
+	command := exec.CommandContext(ctx, s.scriptFile, cmd)
 	if err := command.Run(); err != nil {
 		s.logger.Error("Failed to execute script", zap.Error(err))
 		return fmt.Errorf("failed to execute script: %w", err)

@@ -87,7 +87,8 @@ func (c *Connection) AllSms(onlyUnread bool) ([]Sms, error) {
 	}
 
 	l := make([]Sms, 0, len(messages.Messages))
-	for _, m := range messages.Messages { //nolint:gocritic
+	//nolint:gocritic // rangeValCopy: iterating Sms by value keeps the filter readable; the copy is cheap here.
+	for _, m := range messages.Messages {
 		if m.ReceivedAllConcatSms == "1" && (!onlyUnread || m.Tag == "1") {
 			l = append(l, m)
 		}
@@ -117,7 +118,8 @@ func (c *Connection) ReadSms(del bool) ([]Sms, error) {
 	// Collect all unread SMSs.
 	ids := make([]string, 0, len(messages.Messages))
 	l := make([]Sms, 0, len(messages.Messages))
-	for _, m := range messages.Messages { //nolint:gocritic
+	//nolint:gocritic // rangeValCopy: iterating Sms by value keeps the filter readable; the copy is cheap here.
+	for _, m := range messages.Messages {
 		if m.ReceivedAllConcatSms == "1" && m.Tag == "1" {
 			ids = append(ids, m.ID)
 			l = append(l, m)

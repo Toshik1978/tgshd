@@ -1,4 +1,3 @@
-//nolint:gosec
 package zte
 
 // DeviceVersionResponse define the device version response.
@@ -25,6 +24,7 @@ type Response struct {
 // Bearer is a type of network.
 type Bearer string
 
+//nolint:gosec // G101 false positive: these are network bearer names, not hardcoded credentials.
 const (
 	BearerWLAnd5G     Bearer = "WL_AND_5G"     // 5G/4G/3G
 	BearerLTEAnd5G    Bearer = "LTE_AND_5G"    // 5G NSA
