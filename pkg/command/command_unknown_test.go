@@ -11,12 +11,14 @@ import (
 type fakeScript struct {
 	name       string
 	nameErr    error
+	nameCalls  int
 	executeErr error
 	executed   bool
 	lastCmd    string
 }
 
 func (f *fakeScript) Name() (string, error) {
+	f.nameCalls++
 	return f.name, f.nameErr
 }
 
@@ -28,14 +30,46 @@ func (f *fakeScript) Execute(_ context.Context, cmd string) error {
 
 func TestUnknownName(t *testing.T) {
 	script := &fakeScript{name: "custom-unknown"}
-	cmd := NewUnknownCommand(zap.NewNop(), &fakePublisher{}, script)
+	cmd, err := NewUnknownCommand(zap.NewNop(), &fakePublisher{}, script)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if got := cmd.Name(); got != "custom-unknown" {
 		t.Errorf("Name() = %q, want %q", got, "custom-unknown")
 	}
 }
 
+func TestUnknownNameResolvedOnceAtConstruction(t *testing.T) {
+	script := &fakeScript{name: "custom-unknown"}
+	cmd, err := NewUnknownCommand(zap.NewNop(), &fakePublisher{}, script)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Name() must be served from the value resolved once at construction and
+	// must never re-run the (side-effectful) script on the dispatch hot path.
+	_ = cmd.Name()
+	_ = cmd.Name()
+
+	if script.nameCalls != 1 {
+		t.Errorf("Script.Name() called %d times, want exactly 1 (resolved at construction)", script.nameCalls)
+	}
+}
+
+func TestUnknownConstructorErrorOnScriptNameError(t *testing.T) {
+	script := &fakeScript{nameErr: errors.New("boom")}
+
+	_, err := NewUnknownCommand(zap.NewNop(), &fakePublisher{}, script)
+	if err == nil {
+		t.Fatal("expected NewUnknownCommand to return an error when Script.Name() fails")
+	}
+}
+
 func TestUnknownEnabled(t *testing.T) {
-	cmd := NewUnknownCommand(zap.NewNop(), &fakePublisher{}, &fakeScript{})
+	cmd, err := NewUnknownCommand(zap.NewNop(), &fakePublisher{}, &fakeScript{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if !cmd.Enabled() {
 		t.Error("Enabled() = false, want true")
 	}
@@ -44,7 +78,10 @@ func TestUnknownEnabled(t *testing.T) {
 func TestUnknownHandleHappyPath(t *testing.T) {
 	pub := &fakePublisher{}
 	script := &fakeScript{}
-	cmd := NewUnknownCommand(zap.NewNop(), pub, script)
+	cmd, err := NewUnknownCommand(zap.NewNop(), pub, script)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	if err := cmd.Handle(context.Background(), 55, "/whatever arg1"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
@@ -67,10 +104,13 @@ func TestUnknownHandleHappyPath(t *testing.T) {
 func TestUnknownHandleExecuteError(t *testing.T) {
 	pub := &fakePublisher{}
 	script := &fakeScript{executeErr: errors.New("boom")}
-	cmd := NewUnknownCommand(zap.NewNop(), pub, script)
+	cmd, err := NewUnknownCommand(zap.NewNop(), pub, script)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
-	err := cmd.Handle(context.Background(), 55, "/whatever")
-	if err == nil {
+	handleErr := cmd.Handle(context.Background(), 55, "/whatever")
+	if handleErr == nil {
 		t.Fatal("expected an error when Execute fails")
 	}
 	if pub.count != 0 {
@@ -78,25 +118,16 @@ func TestUnknownHandleExecuteError(t *testing.T) {
 	}
 }
 
-func TestUnknownNamePanicsOnScriptNameError(t *testing.T) {
-	defer func() {
-		if r := recover(); r == nil {
-			t.Error("expected Name() to panic when Script.Name() fails")
-		}
-	}()
-
-	script := &fakeScript{nameErr: errors.New("boom")}
-	cmd := NewUnknownCommand(zap.NewNop(), &fakePublisher{}, script)
-	cmd.Name()
-}
-
 func TestUnknownHandlePublishError(t *testing.T) {
 	pub := &errPublisher{err: errors.New("publish failed")}
 	script := &fakeScript{}
-	cmd := NewUnknownCommand(zap.NewNop(), pub, script)
+	cmd, err := NewUnknownCommand(zap.NewNop(), pub, script)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
-	err := cmd.Handle(context.Background(), 55, "/whatever")
-	if err == nil {
+	handleErr := cmd.Handle(context.Background(), 55, "/whatever")
+	if handleErr == nil {
 		t.Fatal("expected an error when publish fails")
 	}
 }
