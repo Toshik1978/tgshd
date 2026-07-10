@@ -50,7 +50,12 @@ func (p *power) Voltage(_ context.Context) (float64, error) {
 
 	for _, variable := range vars {
 		if variable.Name == "input.voltage" {
-			return variable.Value.(float64), nil
+			voltage, ok := variable.Value.(float64)
+			if !ok {
+				return 0, errors.New("input.voltage is not a float64")
+			}
+
+			return voltage, nil
 		}
 	}
 

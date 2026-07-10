@@ -28,7 +28,7 @@ func (s *script) Name() (string, error) {
 		return "", nil
 	}
 
-	stream, err := exec.Command(s.scriptFile).Output() //nolint:gosec
+	stream, err := exec.CommandContext(context.Background(), s.scriptFile).Output() //nolint:gosec
 	if err != nil {
 		s.logger.Error("Failed to execute script", zap.Error(err))
 		return "", fmt.Errorf("failed to execute script reply: %w", err)

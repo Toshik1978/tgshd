@@ -30,6 +30,8 @@ import (
 )
 
 // Build-time constants.
+//
+//nolint:gochecknoglobals // injected via -ldflags at build time; must be package-level vars.
 var (
 	Buildstamp = "undefined"
 	Commit     = "undefined"
@@ -116,7 +118,12 @@ func gammuProviders() fx.Option {
 		),
 		fx.Provide(
 			fx.Annotate(
-				func(logger *zap.Logger, publisher command.Publisher, sender command.SmsSender, cfg *config) telegram.Handler {
+				func(
+					logger *zap.Logger,
+					publisher command.Publisher,
+					sender command.SmsSender,
+					cfg *config,
+				) telegram.Handler {
 					return command.NewSmsCommand(logger, publisher, sender, cfg.ChatID)
 				},
 				fx.ResultTags(`group:"command_handler"`),
@@ -153,7 +160,12 @@ func newLogger(cfg *config) (*zap.Logger, error) {
 		config.EncoderConfig.EncodeLevel = zapcore.CapitalLevelEncoder
 	}
 
-	return config.Build()
+	logger, err := config.Build()
+	if err != nil {
+		return nil, fmt.Errorf("failed to build logger: %w", err)
+	}
+
+	return logger, nil
 }
 
 type config struct {
@@ -188,12 +200,23 @@ func newTelegramBot(cfg *config) (*telebot.Bot, error) {
 		Token:  cfg.TelegramToken,
 		Poller: &telebot.LongPoller{Timeout: 5 * time.Second},
 	}
-	return telebot.NewBot(pref)
+
+	bot, err := telebot.NewBot(pref)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create telegram bot: %w", err)
+	}
+
+	return bot, nil
 }
 
 // newZTEConnection initializes new ZTE connection.
 func newZTEConnection(logger *zap.Logger, cfg *config) (*zte.Connection, error) {
-	return zte.NewConnection(logger, cfg.ZTEHost, cfg.ZTEPassword)
+	conn, err := zte.NewConnection(logger, cfg.ZTEHost, cfg.ZTEPassword)
+	if err != nil {
+		return nil, fmt.Errorf("failed to connect to zte modem: %w", err)
+	}
+
+	return conn, nil
 }
 
 // commandHandlers provides telegram commands information for fx.
@@ -215,7 +238,12 @@ func commandHandlers() fx.Option {
 		),
 		fx.Provide(
 			fx.Annotate(
-				func(logger *zap.Logger, publisher command.Publisher, pinger command.Pinger, cfg *config) telegram.Handler {
+				func(
+					logger *zap.Logger,
+					publisher command.Publisher,
+					pinger command.Pinger,
+					cfg *config,
+				) telegram.Handler {
 					return command.NewPingCommand(logger, publisher, pinger, cfg.PingHosts)
 				},
 				fx.ResultTags(`group:"command_handler"`),

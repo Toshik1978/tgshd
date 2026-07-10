@@ -7,11 +7,11 @@ import (
 	"unicode/utf16"
 )
 
-// ignoreChars is the list of ignored characters.
-var ignoreChars = map[string]bool{
-	"0009": true,
-	"0000": true,
-}
+// Control characters skipped when decoding a GSM string (tab and null).
+const (
+	hexTab  = "0009"
+	hexNull = "0000"
+)
 
 // encodeMessage encodes the string to GSM string.
 func encodeMessage(msg string) string {
@@ -61,7 +61,7 @@ func decodeMessage(encoded string) string {
 	var result strings.Builder
 	for index := 0; index < len(encoded); index += 4 {
 		hexCode := encoded[index : index+4]
-		if !ignoreChars[hexCode] {
+		if hexCode != hexTab && hexCode != hexNull {
 			result.WriteString(hex2Char(hexCode))
 		}
 	}
@@ -79,7 +79,9 @@ func decodeDate(d string) time.Time {
 	minutes, _ := strconv.ParseInt(fields[4], 10, 32)
 	sec, _ := strconv.ParseInt(fields[5], 10, 32)
 
-	return time.Date(int(year), time.Month(month), int(day), int(hour), int(minutes), int(sec), 0, time.Local)
+	loc := time.Local //nolint:gosmopolitan // the modem reports timestamps in the server's local timezone
+
+	return time.Date(int(year), time.Month(month), int(day), int(hour), int(minutes), int(sec), 0, loc)
 }
 
 func dec2Hex(a int64) string {

@@ -55,6 +55,28 @@ func (a *Application) OnStart(ctx context.Context) error {
 	return nil
 }
 
+// OnStop calls in hook on application stop.
+func (a *Application) OnStop(ctx context.Context, cancel context.CancelFunc) error {
+	defer func() { _ = a.logger.Sync() }()
+
+	logger := a.logger.
+		With(zap.String("commit", a.commit)).
+		With(zap.String("build_timestamp", a.buildstamp))
+
+	cancel()
+	if err := a.onStop(ctx); err != nil {
+		logger.With(zap.Error(err)).Error("Failed to stop application")
+		return fmt.Errorf("failed to stop application: %w", err)
+	}
+
+	logger.Info("Stop application")
+
+	return nil
+}
+
+func (a *Application) Bootstrap() {
+}
+
 func (a *Application) onStart(ctx context.Context) error {
 	scheduler, err := gocron.NewScheduler()
 	if err != nil {
@@ -102,36 +124,19 @@ func (a *Application) onStart(ctx context.Context) error {
 	return nil
 }
 
-// OnStop calls in hook on application stop.
-func (a *Application) OnStop(ctx context.Context, cancel context.CancelFunc) error {
-	defer func() { _ = a.logger.Sync() }()
-
-	logger := a.logger.
-		With(zap.String("commit", a.commit)).
-		With(zap.String("build_timestamp", a.buildstamp))
-
-	cancel()
-	if err := a.onStop(ctx); err != nil {
-		logger.With(zap.Error(err)).Error("Failed to stop application")
-		return fmt.Errorf("failed to stop application: %w", err)
-	}
-
-	logger.Info("Stop application")
-
-	return nil
-}
-
 func (a *Application) onStop(ctx context.Context) error {
 	grp, grpCtx := errgroup.WithContext(ctx)
 	grp.Go(func() error { return a.tlg.Stop(grpCtx) })
 	grp.Go(func() error {
 		_ = a.scheduler.Shutdown()
 		a.logger.Info("Scheduler stopped")
+
 		return nil
 	})
 
-	return grp.Wait()
-}
+	if err := grp.Wait(); err != nil {
+		return fmt.Errorf("failed to stop application components: %w", err)
+	}
 
-func (a *Application) Bootstrap() {
+	return nil
 }

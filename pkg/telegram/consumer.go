@@ -66,6 +66,23 @@ func (c *consumer) Start(_ context.Context) error {
 	return nil
 }
 
+func (c *consumer) Stop(ctx context.Context) error {
+	shutdownChannel := make(chan any)
+	go func() {
+		c.bot.Stop()
+		close(shutdownChannel)
+		c.logger.Info("Telegram bot gracefully stopped")
+	}()
+
+	select {
+	case <-shutdownChannel:
+	case <-ctx.Done():
+		return context.DeadlineExceeded
+	}
+
+	return nil
+}
+
 func (c *consumer) handleCommands(handlers map[string]Handler, ctx telebot.Context) error {
 	fields := strings.Fields(ctx.Text())
 	if len(fields) == 0 {
@@ -108,23 +125,6 @@ func (c *consumer) handleCommand(handler Handler, ctx telebot.Context) error {
 			With(zap.Error(err)).
 			Error("Error in message handler")
 		return fmt.Errorf("failed to handle command: %w", err)
-	}
-
-	return nil
-}
-
-func (c *consumer) Stop(ctx context.Context) error {
-	shutdownChannel := make(chan any)
-	go func() {
-		c.bot.Stop()
-		close(shutdownChannel)
-		c.logger.Info("Telegram bot gracefully stopped")
-	}()
-
-	select {
-	case <-shutdownChannel:
-	case <-ctx.Done():
-		return context.DeadlineExceeded
 	}
 
 	return nil

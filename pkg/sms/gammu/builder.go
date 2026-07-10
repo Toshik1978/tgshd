@@ -62,7 +62,8 @@ func isASCII(s string) bool {
 }
 
 func (b *builder) updateUDH(parts []MessagePart) {
-	reference := int64(rand.IntN(256))
+	// The concatenation reference is a message id, not a security value.
+	reference := int64(rand.IntN(256)) //nolint:gosec // non-cryptographic: SMS multipart reference
 	total := int64(len(parts))
 	for i := range parts {
 		parts[i].UDH = b.buildUDH(reference, total, int64(i+1))

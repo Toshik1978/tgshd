@@ -22,6 +22,8 @@ const (
 	GetCmd  = "/goform/goform_get_cmd_process"
 	SetCmd  = "/goform/goform_set_cmd_process"
 	Success = "success"
+
+	goformID = "goformId"
 )
 
 // Connection manages a ZTE MC888 device connection.
@@ -218,11 +220,8 @@ func (c *Connection) xd(result any, cmd string) error {
 		SetQueryParam("cmd", cmd).
 		SetResult(result).
 		Get(GetCmd)
-	if err1 := c.checkError(err, r, "get "+cmd); err1 != nil {
-		return err1
-	}
 
-	return nil
+	return c.checkError(err, r, "get "+cmd)
 }
 
 // calculatePassword generates the password hash based on the LD value.
@@ -246,7 +245,7 @@ func (c *Connection) loginRequest(hash string) (*http.Cookie, error) {
 	result := &Response{}
 	r, err := c.request(true).
 		SetFormData(map[string]string{
-			"goformId": "LOGIN",
+			goformID:   "LOGIN",
 			"password": hash,
 		}).
 		SetResult(result).
@@ -273,8 +272,8 @@ func (c *Connection) logoutRequest(ad string) error {
 	result := &Response{}
 	r, err := c.request(true).
 		SetFormData(map[string]string{
-			"goformId": "LOGOUT",
-			"AD":       ad,
+			goformID: "LOGOUT",
+			"AD":     ad,
 		}).
 		SetResult(result).
 		Post(SetCmd)
@@ -293,7 +292,7 @@ func (c *Connection) bearerRequest(pref Bearer, ad string) error {
 	result := &Response{}
 	r, err := c.request(true).
 		SetFormData(map[string]string{
-			"goformId":         "SET_BEARER_PREFERENCE",
+			goformID:           "SET_BEARER_PREFERENCE",
 			"BearerPreference": string(pref),
 			"AD":               ad,
 		}).
@@ -337,10 +336,10 @@ func (c *Connection) smsReadRequest(ids []string, ad string) error {
 	result := &Response{}
 	r, err := c.request(true).
 		SetFormData(map[string]string{
-			"goformId": "SET_MSG_READ",
-			"msg_id":   strings.Join(ids, ";") + ";",
-			"tag":      "0",
-			"AD":       ad,
+			goformID: "SET_MSG_READ",
+			"msg_id": strings.Join(ids, ";") + ";",
+			"tag":    "0",
+			"AD":     ad,
 		}).
 		SetResult(result).
 		Post(SetCmd)
@@ -363,9 +362,9 @@ func (c *Connection) smsDeleteRequest(ids []string, ad string) error {
 	result := &Response{}
 	r, err := c.request(true).
 		SetFormData(map[string]string{
-			"goformId": "DELETE_SMS",
-			"msg_id":   strings.Join(ids, ";") + ";",
-			"AD":       ad,
+			goformID: "DELETE_SMS",
+			"msg_id": strings.Join(ids, ";") + ";",
+			"AD":     ad,
 		}).
 		SetResult(result).
 		Post(SetCmd)

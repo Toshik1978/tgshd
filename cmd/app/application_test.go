@@ -175,7 +175,7 @@ func TestOnStopTelegramError(t *testing.T) {
 	}
 }
 
-func TestBootstrap(t *testing.T) {
+func TestBootstrap(_ *testing.T) {
 	app := newTestApplication(&fakeConsumer{}, nil)
 	app.Bootstrap() // no-op, exercised for coverage.
 }
