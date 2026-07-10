@@ -79,6 +79,27 @@ func TestDecodeDate(t *testing.T) {
 	}
 }
 
+func TestDecodeDateMalformed(t *testing.T) {
+	tests := []struct {
+		name string
+		date string
+	}{
+		{name: "too few fields", date: "2024,1,2"},
+		{name: "empty string", date: ""},
+		{name: "single field", date: "2024"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// A malformed modem timestamp must not panic; it yields the zero time.
+			got := decodeDate(tt.date)
+			if !got.IsZero() {
+				t.Errorf("decodeDate(%q) = %v, want zero time", tt.date, got)
+			}
+		})
+	}
+}
+
 func TestEncodeMessage(t *testing.T) {
 	tests := []struct {
 		name string

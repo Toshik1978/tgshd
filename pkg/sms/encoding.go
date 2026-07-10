@@ -57,9 +57,14 @@ func decodeMessage(encoded string) string {
 	return string(utf16.Decode(units))
 }
 
-// decodeDate convert SMS date to the Time structure.
+// decodeDate convert SMS date to the Time structure. A malformed timestamp
+// (fewer than six comma-separated fields) yields the zero time rather than
+// panicking, so one bad message can't abort the whole SMS batch.
 func decodeDate(d string) time.Time {
 	fields := strings.Split(d, ",")
+	if len(fields) < 6 {
+		return time.Time{}
+	}
 	year, _ := strconv.ParseInt(fields[0], 10, 32)
 	month, _ := strconv.ParseInt(fields[1], 10, 32)
 	day, _ := strconv.ParseInt(fields[2], 10, 32)
