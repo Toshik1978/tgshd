@@ -101,9 +101,12 @@ These are non-negotiable for changes in this repo.
 
 ## Testing coverage
 
-The CI coverage gate measures the logic packages that can be unit-tested
-(`task test:coverage`'s `-coverpkg` scope): `pkg/command`, `pkg/sms`,
-`pkg/sms/gammu`, `pkg/zte`, `pkg/script`, and `cmd/app`. The thin I/O adapters
-(`pkg/ping`, `pkg/power`, `pkg/speedtest`, the Telegram transport) and the fx
-root (`cmd/main.go`) run only against real hardware/services and are exercised in
-deployment, not the unit gate.
+The CI coverage gate (80% floor) measures the packages that can be cleanly
+unit-tested — `task test:coverage`'s `-coverpkg` scope: `pkg/command`,
+`pkg/sms`, `pkg/script`, and `cmd/app`. Everything that only runs against real
+hardware/services is excluded from the gate: the I/O adapters (`pkg/ping`,
+`pkg/power`, `pkg/speedtest`, the Telegram transport), the ZTE device HTTP
+client (`pkg/zte`), the gammu Postgres repository (`pkg/sms/gammu`), and the fx
+root (`cmd/main.go`). Their tests still run in CI (`go test ./...`) — e.g. the
+gammu message-part builder is unit-tested — they just don't count toward the
+coverage gate.

@@ -2,6 +2,11 @@ version: "3"
 
 vars:
   BINARY: bin/tgshd
+  # Coverage gate scope: the cleanly unit-testable logic packages. The I/O
+  # adapters (ping, power, speedtest, telegram transport, zte device client),
+  # the gammu Postgres repository, and the fx root (cmd/main.go) run only
+  # against real hardware/services and are exercised in integration, not here.
+  COVERPKG: ./pkg/command/...,./pkg/sms,./pkg/script,./cmd/app
   BUILDSTAMP:
     sh: date +%Y/%m/%d_%H:%M:%S
   COMMIT:
@@ -27,8 +32,11 @@ tasks:
     cmd: go test -v ./...
 
   test:coverage:
-    desc: Run unit tests with race detector and coverage profile
-    cmd: go test -race -coverpkg=./... -coverprofile=coverage.txt -covermode=atomic ./...
+    desc: Run all unit tests with the race detector and coverage over the gate scope
+    cmd: >-
+      go test -race
+      -coverpkg={{.COVERPKG}}
+      -coverprofile=coverage.txt -covermode=atomic ./...
 
   build:
     desc: Compile the tgshd binary

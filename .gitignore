@@ -1,6 +1,14 @@
 # Build outputs
 /bin/
 
+# Coverage artifacts
+coverage.txt
+coverage.out
+coverage.xml
+coverage_func.txt
+code-coverage-results.md
+test_status.log
+
 # DB and local runtime files
 .env
 

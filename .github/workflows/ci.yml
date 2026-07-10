@@ -27,6 +27,9 @@ jobs:
   test:
     name: test
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      pull-requests: write
     steps:
       - name: Checkout
         uses: actions/checkout@v7
@@ -43,8 +46,146 @@ jobs:
       - name: Setup project
         run: task setup
 
-      - name: Run tests
-        run: task test
+      - name: Run tests with coverage
+        run: |
+          # Run the whole suite (so the test count reflects every package), but
+          # measure coverage only over the gate scope (the logic packages).
+          # Don't fail the step here: the badge update below must still publish
+          # on failure. Capture the real exit code for the gate at the end.
+          set +e
+          go test -v \
+            -coverpkg=./pkg/command/...,./pkg/sms,./pkg/script,./cmd/app \
+            -covermode=count -coverprofile=coverage.out \
+            ./... > test_status.log 2>&1
+          echo "TEST_EXIT=$?" >> "$GITHUB_ENV"
+          set -e
+          cat test_status.log
+
+      - name: Process test results and coverage
+        run: |
+          PASSED=$(grep -c -- "--- PASS:" test_status.log || true)
+          FAILED=$(grep -c -- "--- FAIL:" test_status.log || true)
+          SKIPPED=$(grep -c -- "--- SKIP:" test_status.log || true)
+
+          MSG=""
+          [ "$PASSED" -gt 0 ] && MSG="${PASSED} passed"
+          [ "$FAILED" -gt 0 ] && MSG="${MSG:+$MSG, }${FAILED} failed"
+          [ "$SKIPPED" -gt 0 ] && MSG="${MSG:+$MSG, }${SKIPPED} skipped"
+          [ -z "$MSG" ] && MSG="0 tests"
+          echo "TEST_BADGE_MSG=$MSG" >> "$GITHUB_ENV"
+
+          if [ "${TEST_EXIT:-0}" -ne 0 ] || [ "$FAILED" -gt 0 ]; then
+            echo "TEST_BADGE_COLOR=red" >> "$GITHUB_ENV"
+            echo "TESTS_FAILED=true" >> "$GITHUB_ENV"
+          elif [ "$SKIPPED" -gt 0 ]; then
+            echo "TEST_BADGE_COLOR=yellow" >> "$GITHUB_ENV"
+            echo "TESTS_FAILED=false" >> "$GITHUB_ENV"
+          else
+            echo "TEST_BADGE_COLOR=green" >> "$GITHUB_ENV"
+            echo "TESTS_FAILED=false" >> "$GITHUB_ENV"
+          fi
+
+          if [ -f coverage.out ]; then
+            go tool cover -func=coverage.out -o coverage_func.txt
+            TOTAL=$(tail -n 1 coverage_func.txt | awk '{print $3}' | tr -d '%')
+            [ -z "$TOTAL" ] && TOTAL="0"
+          else
+            TOTAL="0"
+          fi
+          echo "TOTAL_COVERAGE=$TOTAL" >> "$GITHUB_ENV"
+
+          COV_INT=$(echo "$TOTAL" | cut -d'.' -f1)
+          if [ "$COV_INT" -ge 80 ]; then
+            echo "COVERAGE_BADGE_COLOR=green" >> "$GITHUB_ENV"
+          elif [ "$COV_INT" -ge 50 ]; then
+            echo "COVERAGE_BADGE_COLOR=yellow" >> "$GITHUB_ENV"
+          else
+            echo "COVERAGE_BADGE_COLOR=red" >> "$GITHUB_ENV"
+          fi
+
+      - name: Update gist badges
+        # Badges publish only on push to main.
+        if: github.ref == 'refs/heads/main'
+        uses: actions/github-script@v8
+        env:
+          GIST_ID: ${{ secrets.GIST_ID }}
+          TEST_BADGE_MSG: ${{ env.TEST_BADGE_MSG }}
+          TEST_BADGE_COLOR: ${{ env.TEST_BADGE_COLOR }}
+          TOTAL_COVERAGE: ${{ env.TOTAL_COVERAGE }}
+          COVERAGE_BADGE_COLOR: ${{ env.COVERAGE_BADGE_COLOR }}
+        with:
+          github-token: ${{ secrets.GIST_SECRET_TOKEN }}
+          script: |
+            await github.rest.gists.update({
+              gist_id: process.env.GIST_ID,
+              files: {
+                'tests.json': {
+                  content: JSON.stringify({
+                    schemaVersion: 1,
+                    label: 'Tests',
+                    namedLogo: 'go',
+                    message: process.env.TEST_BADGE_MSG,
+                    color: process.env.TEST_BADGE_COLOR,
+                    cacheSeconds: 180,
+                  }, null, 2),
+                },
+                'coverage.json': {
+                  content: JSON.stringify({
+                    schemaVersion: 1,
+                    label: 'Coverage',
+                    namedLogo: 'go',
+                    message: process.env.TOTAL_COVERAGE + '%',
+                    color: process.env.COVERAGE_BADGE_COLOR,
+                    cacheSeconds: 180,
+                  }, null, 2),
+                },
+              },
+            });
+
+      - name: Convert coverage to Cobertura
+        if: github.event_name == 'pull_request'
+        run: go run github.com/boumenot/gocover-cobertura@latest < coverage.out > coverage.xml
+
+      - name: Code coverage report
+        if: github.event_name == 'pull_request'
+        uses: irongut/CodeCoverageSummary@v1.3.0
+        with:
+          filename: coverage.xml
+          badge: true
+          hide_branch_rate: true
+          hide_complexity: true
+          format: markdown
+          output: both
+          thresholds: '50 80'
+
+      - name: Coverage PR comment
+        if: github.event_name == 'pull_request'
+        uses: marocchino/sticky-pull-request-comment@v3
+        with:
+          recreate: true
+          path: code-coverage-results.md
+
+      - name: Check test and coverage gates
+        run: |
+          # Runs AFTER the badge update so the (red) badges still publish.
+          MIN_COVERAGE=80
+          FAILED=0
+
+          if [ "${{ env.TESTS_FAILED }}" = "true" ] || [ "${TEST_EXIT:-0}" -ne 0 ]; then
+            echo "Tests failed (parsed=${{ env.TESTS_FAILED }}, exit=${TEST_EXIT:-0})."
+            FAILED=1
+          fi
+
+          COVERAGE=$(echo "${TOTAL_COVERAGE:-0}" | cut -d'.' -f1)
+          if [ "${COVERAGE:-0}" -lt "$MIN_COVERAGE" ]; then
+            echo "Coverage ${TOTAL_COVERAGE:-0}% is below the ${MIN_COVERAGE}% floor."
+            FAILED=1
+          fi
+
+          if [ "$FAILED" -eq 1 ]; then
+            exit 1
+          fi
+          echo "Gates passed: coverage ${TOTAL_COVERAGE:-0}% (floor ${MIN_COVERAGE}%)."
 
   build:
     name: build
