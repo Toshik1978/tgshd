@@ -45,11 +45,12 @@ func (w *worker) Duration() time.Duration {
 }
 
 func (w *worker) Do(ctx context.Context) error {
-	sms, err := w.conn.ReadSms(true)
-	errs := make([]error, 0, len(sms))
+	messages, err := w.conn.ReadSms(true)
+	errs := make([]error, 0, len(messages))
 	errs = append(errs, err)
 
-	for _, m := range sms { //nolint:gocritic
+	//nolint:gocritic // rangeValCopy: iterating messages by value keeps the loop simple; the copy is cheap enough here.
+	for _, m := range messages {
 		text := "<b>SMS</b>\n\n"
 		text += fmt.Sprintf("<i>From</i>: %s\n", m.Number)
 		text += fmt.Sprintf("<i>Date</i>: %s\n\n", decodeDate(m.Date).Format(time.RFC1123))
