@@ -11,62 +11,50 @@ import (
 const (
 	hexTab  = "0009"
 	hexNull = "0000"
+
+	hexDigits = "0123456789abcdef"
 )
 
-// encodeMessage encodes the string to GSM string.
+// encodeMessage encodes the string to a UCS2 hex string: one 4-hex code unit
+// per UTF-16 code unit, so an astral character becomes its surrogate pair.
 func encodeMessage(msg string) string {
 	if msg == "" {
 		return ""
 	}
 
-	d := int64(0)
-
 	var encoded strings.Builder
-	for _, r := range msg {
-		a := int64(r)
-
-		if d != 0 {
-			if 56320 <= a && a <= 57343 {
-				codePoint := dec2Hex(65536 + ((d - 55296) << 10) + (a - 56320))
-				encoded.WriteString(codePoint)
-				d = 0
-
-				continue
-			}
-
-			d = 0
-		}
-
-		if 55296 <= a && a <= 56319 {
-			d = a
-		} else {
-			cp := dec2Hex(a)
-			for len(cp) < 4 {
-				cp = "0" + cp
-			}
-
-			encoded.WriteString(cp)
-		}
+	for _, u := range utf16.Encode([]rune(msg)) {
+		encoded.WriteByte(hexDigits[(u>>12)&0xF])
+		encoded.WriteByte(hexDigits[(u>>8)&0xF])
+		encoded.WriteByte(hexDigits[(u>>4)&0xF])
+		encoded.WriteByte(hexDigits[u&0xF])
 	}
 
 	return encoded.String()
 }
 
-// decodeMessage decodes GSM string to string.
+// decodeMessage decodes a UCS2 hex string back to a string, combining UTF-16
+// surrogate pairs and skipping the tab and null control units.
 func decodeMessage(encoded string) string {
 	if encoded == "" {
 		return ""
 	}
 
-	var result strings.Builder
-	for index := 0; index < len(encoded); index += 4 {
+	units := make([]uint16, 0, len(encoded)/4)
+	for index := 0; index+4 <= len(encoded); index += 4 {
 		hexCode := encoded[index : index+4]
-		if hexCode != hexTab && hexCode != hexNull {
-			result.WriteString(hex2Char(hexCode))
+		if hexCode == hexTab || hexCode == hexNull {
+			continue
 		}
+
+		u, err := strconv.ParseUint(hexCode, 16, 16)
+		if err != nil {
+			continue
+		}
+		units = append(units, uint16(u))
 	}
 
-	return result.String()
+	return string(utf16.Decode(units))
 }
 
 // decodeDate convert SMS date to the Time structure.
@@ -82,28 +70,4 @@ func decodeDate(d string) time.Time {
 	loc := time.Local //nolint:gosmopolitan // the modem reports timestamps in the server's local timezone
 
 	return time.Date(int(year), time.Month(month), int(day), int(hour), int(minutes), int(sec), 0, loc)
-}
-
-func dec2Hex(a int64) string {
-	return strconv.FormatInt(a, 16)
-}
-
-//nolint:gosec
-func hex2Char(hex string) string {
-	parsed, err := strconv.ParseInt(hex, 16, 32)
-	if err != nil {
-		return ""
-	}
-	char := int(parsed)
-
-	if char <= 65535 {
-		return string(rune(char))
-	} else if char <= 1114111 {
-		char -= 65536
-		r1 := rune(55296 | (char >> 10))
-		r2 := rune(56320 | (char & 1023))
-		return strconv.Itoa(int(utf16.Encode([]rune{r1, r2})[0]))
-	}
-
-	return ""
 }

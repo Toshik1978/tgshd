@@ -79,58 +79,6 @@ func TestDecodeDate(t *testing.T) {
 	}
 }
 
-func TestHex2Char(t *testing.T) {
-	tests := []struct {
-		name string
-		hex  string
-		want string
-	}{
-		{
-			name: "bmp code point A",
-			hex:  "0041",
-			want: "A",
-		},
-		{
-			name: "bmp code point digit",
-			hex:  "0030",
-			want: "0",
-		},
-		{
-			name: "invalid hex string",
-			hex:  "zzzz",
-			want: "",
-		},
-		{
-			name: "empty string",
-			hex:  "",
-			want: "",
-		},
-		{
-			name: "supplementary plane code point produces surrogate pair branch",
-			hex:  "1F600",
-			// utf16.Encode rejects the manually-built surrogate-range rune
-			// and substitutes the Unicode replacement character (U+FFFD),
-			// whose decimal code point is 65533 — this is the actual,
-			// slightly surprising behavior of the current implementation.
-			want: "65533",
-		},
-		{
-			name: "code point beyond valid Unicode range",
-			hex:  "110000",
-			want: "",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := hex2Char(tt.hex)
-			if got != tt.want {
-				t.Errorf("hex2Char(%q) = %q, want %q", tt.hex, got, tt.want)
-			}
-		})
-	}
-}
-
 func TestEncodeMessage(t *testing.T) {
 	tests := []struct {
 		name string
@@ -165,43 +113,31 @@ func TestEncodeMessage(t *testing.T) {
 }
 
 func TestEncodeDecodeRoundTrip(t *testing.T) {
-	msg := "Hello"
-	encoded := encodeMessage(msg)
-	decoded := decodeMessage(encoded)
-	if decoded != msg {
-		t.Errorf("round trip: got %q, want %q", decoded, msg)
-	}
-}
-
-func TestDec2Hex(t *testing.T) {
 	tests := []struct {
 		name string
-		a    int64
-		want string
+		msg  string
 	}{
-		{
-			name: "zero",
-			a:    0,
-			want: "0",
-		},
-		{
-			name: "255",
-			a:    255,
-			want: "ff",
-		},
-		{
-			name: "65",
-			a:    65,
-			want: "41",
-		},
+		{name: "ascii", msg: "Hello"},
+		{name: "bmp non-ascii", msg: "Привет"},
+		{name: "emoji (surrogate pair)", msg: "Hi 😀"},
+		{name: "mixed astral and bmp", msg: "a😀b€c"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := dec2Hex(tt.a)
-			if got != tt.want {
-				t.Errorf("dec2Hex(%d) = %q, want %q", tt.a, got, tt.want)
+			encoded := encodeMessage(tt.msg)
+			decoded := decodeMessage(encoded)
+			if decoded != tt.msg {
+				t.Errorf("round trip: got %q, want %q", decoded, tt.msg)
 			}
 		})
+	}
+}
+
+func TestDecodeMessageSurrogatePair(t *testing.T) {
+	// U+1F600 GRINNING FACE encodes to the UTF-16 surrogate pair D83D DE00.
+	got := decodeMessage("d83dde00")
+	if got != "😀" {
+		t.Errorf("decodeMessage(surrogate pair) = %q, want %q", got, "😀")
 	}
 }
