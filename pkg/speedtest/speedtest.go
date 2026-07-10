@@ -50,5 +50,6 @@ func (s *speedtest) findServer(ctx context.Context) (*st.Server, error) {
 	if len(targets) != 1 {
 		return nil, fmt.Errorf("failed to get server for testing: %w", err)
 	}
+
 	return targets[0], nil
 }

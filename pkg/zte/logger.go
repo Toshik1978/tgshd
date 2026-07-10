@@ -12,14 +12,14 @@ func newLogger(log *zap.Logger) *logger {
 	return &logger{log: log.Sugar()}
 }
 
-func (l *logger) Errorf(format string, v ...interface{}) {
+func (l *logger) Errorf(format string, v ...any) {
 	l.log.Errorf(format, v...)
 }
 
-func (l *logger) Warnf(format string, v ...interface{}) {
+func (l *logger) Warnf(format string, v ...any) {
 	l.log.Warnf(format, v...)
 }
 
-func (l *logger) Debugf(format string, v ...interface{}) {
+func (l *logger) Debugf(format string, v ...any) {
 	l.log.Debugf(format, v...)
 }

@@ -32,6 +32,7 @@ func (p *fakePublisher) Publish(_ context.Context, recipientID int64, msg string
 	if idx < len(p.errs) {
 		return p.errs[idx]
 	}
+
 	return nil
 }
 

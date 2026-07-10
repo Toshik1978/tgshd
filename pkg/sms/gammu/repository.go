@@ -69,6 +69,7 @@ func (r *repository) StoreMultipart(ctx context.Context, phone string, parts []M
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("failed to commit transaction: %w", err)
 	}
+
 	return nil
 }
 

@@ -20,6 +20,7 @@ type speedCommand struct {
 // NewSpeedCommand creates new handler for speed command.
 func NewSpeedCommand(logger *zap.Logger, publisher Publisher, speedtest Speedtest) *speedCommand {
 	logger.Info("Speed command created")
+
 	return &speedCommand{
 		logger:    logger,
 		publisher: publisher,
@@ -51,5 +52,6 @@ func (c *speedCommand) Handle(ctx context.Context, senderID int64, _ string) err
 	if err1 != nil {
 		return fmt.Errorf("failed to publish reply: %w", err1)
 	}
+
 	return nil
 }

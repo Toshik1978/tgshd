@@ -104,5 +104,6 @@ func writeScript(t *testing.T, content string) string {
 	if err := os.WriteFile(path, []byte(content), 0o755); err != nil {
 		t.Fatalf("failed to write script: %v", err)
 	}
+
 	return path
 }

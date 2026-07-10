@@ -24,6 +24,7 @@ type smsCommand struct {
 // NewSmsCommand creates a new handler for the /sms command.
 func NewSmsCommand(logger *zap.Logger, publisher Publisher, sender SmsSender, chatID int64) *smsCommand {
 	logger.Info("SMS command created")
+
 	return &smsCommand{
 		logger:    logger,
 		publisher: publisher,
@@ -56,15 +57,20 @@ func (c *smsCommand) Handle(ctx context.Context, senderID int64, cmd string) err
 
 	if err := c.sender.Publish(ctx, phone, msg); err != nil {
 		if replyErr := c.publisher.Publish(ctx, senderID,
-			fmt.Sprintf("Failed to send SMS: %s", html.EscapeString(err.Error()))); replyErr != nil {
+			"Failed to send SMS: "+html.EscapeString(err.Error())); replyErr != nil {
 			c.logger.With(zap.Error(replyErr)).Debug("Failed to send /sms failure reply")
 		}
 		return fmt.Errorf("failed to send sms: %w", err)
 	}
 
-	if err := c.publisher.Publish(ctx, senderID, fmt.Sprintf("SMS queued for <b>%s</b>", html.EscapeString(phone))); err != nil {
+	if err := c.publisher.Publish(
+		ctx,
+		senderID,
+		fmt.Sprintf("SMS queued for <b>%s</b>", html.EscapeString(phone)),
+	); err != nil {
 		return fmt.Errorf("failed to publish reply: %w", err)
 	}
+
 	return nil
 }
 

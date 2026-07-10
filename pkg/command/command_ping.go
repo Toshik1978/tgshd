@@ -3,6 +3,7 @@ package command
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	"go.uber.org/zap"
 )
@@ -21,6 +22,7 @@ type pingCommand struct {
 // NewPingCommand creates new handler for ping command.
 func NewPingCommand(logger *zap.Logger, publisher Publisher, pinger Pinger, hosts []string) *pingCommand {
 	logger.Info("Ping command created")
+
 	return &pingCommand{
 		logger:    logger,
 		publisher: publisher,
@@ -45,17 +47,19 @@ func (c *pingCommand) Handle(ctx context.Context, senderID int64, _ string) erro
 		return fmt.Errorf("failed to ping: %w", err)
 	}
 
-	text := "PONG\n\n"
+	var text strings.Builder
+	text.WriteString("PONG\n\n")
 	for _, host := range c.hosts {
 		if resp[host] {
-			text += host + ": <b>OK</b>\n"
+			text.WriteString(host + ": <b>OK</b>\n")
 		} else {
-			text += host + ": <b>FAIL</b>\n"
+			text.WriteString(host + ": <b>FAIL</b>\n")
 		}
 	}
 
-	if err := c.publisher.Publish(ctx, senderID, text); err != nil {
+	if err := c.publisher.Publish(ctx, senderID, text.String()); err != nil {
 		return fmt.Errorf("failed to publish reply: %w", err)
 	}
+
 	return nil
 }

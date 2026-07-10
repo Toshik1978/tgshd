@@ -50,7 +50,11 @@ func TestUnknownHandleHappyPath(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if !script.executed || script.lastCmd != "/whatever arg1" {
-		t.Errorf("expected Execute called with the raw command, got executed=%v cmd=%q", script.executed, script.lastCmd)
+		t.Errorf(
+			"expected Execute called with the raw command, got executed=%v cmd=%q",
+			script.executed,
+			script.lastCmd,
+		)
 	}
 	if pub.count != 1 || pub.lastRecipient != 55 {
 		t.Errorf("expected one reply to sender 55, got count=%d recipient=%d", pub.count, pub.lastRecipient)

@@ -2,6 +2,7 @@ package telegram
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -19,29 +20,22 @@ type Handler interface {
 	Handle(ctx context.Context, senderID int64, cmd string) error
 }
 
-// Consumer declare telegram consumer.
-type Consumer interface {
-	// Start starts consuming messages.
-	Start(ctx context.Context) error
-	// Stop stops consuming messages.
-	Stop(ctx context.Context) error
-}
-
 type consumer struct {
 	logger          *zap.Logger
 	bot             *telebot.Bot
 	handlers        []Handler
-	shutdownChannel chan interface{}
+	shutdownChannel chan any
 }
 
 // NewConsumer initializes new consumer for telegram messages.
 func NewConsumer(logger *zap.Logger, bot *telebot.Bot, handlers []Handler) *consumer {
 	logger.Info("Creation of TelegramConsumer")
+
 	return &consumer{
 		logger:          logger,
 		bot:             bot,
 		handlers:        handlers,
-		shutdownChannel: make(chan interface{}),
+		shutdownChannel: make(chan any),
 	}
 }
 
@@ -52,8 +46,8 @@ func (c *consumer) Start(_ context.Context) error {
 	enabled := make(map[string]Handler)
 	for _, handler := range c.handlers {
 		if handler.Enabled() {
-			names := strings.Split(handler.Name(), "|")
-			for _, name := range names {
+			names := strings.SplitSeq(handler.Name(), "|")
+			for name := range names {
 				c.logger.With(zap.String("command", name)).Info("Telegram command added")
 				c.bot.Handle("/"+name, func(ctx telebot.Context) error {
 					return c.handleCommand(handler, ctx)
@@ -68,6 +62,7 @@ func (c *consumer) Start(_ context.Context) error {
 	})
 
 	go c.bot.Start()
+
 	return nil
 }
 
@@ -79,6 +74,7 @@ func (c *consumer) handleCommands(handlers map[string]Handler, ctx telebot.Conte
 	if handler, ok := handlers[fields[0]]; ok {
 		return c.handleCommand(handler, ctx)
 	}
+
 	return nil
 }
 
@@ -94,7 +90,7 @@ func (c *consumer) handleCommand(handler Handler, ctx telebot.Context) error {
 		senderID = message.Chat.ID
 	default:
 		logger.Error("Failed to get sender ID")
-		return fmt.Errorf("failed to get sender ID")
+		return errors.New("failed to get sender ID")
 	}
 
 	logger = logger.With(zap.Int64("sender_id", senderID))
@@ -113,11 +109,12 @@ func (c *consumer) handleCommand(handler Handler, ctx telebot.Context) error {
 			Error("Error in message handler")
 		return fmt.Errorf("failed to handle command: %w", err)
 	}
+
 	return nil
 }
 
 func (c *consumer) Stop(ctx context.Context) error {
-	shutdownChannel := make(chan interface{})
+	shutdownChannel := make(chan any)
 	go func() {
 		c.bot.Stop()
 		close(shutdownChannel)
@@ -129,5 +126,6 @@ func (c *consumer) Stop(ctx context.Context) error {
 	case <-ctx.Done():
 		return context.DeadlineExceeded
 	}
+
 	return nil
 }

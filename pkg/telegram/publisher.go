@@ -30,5 +30,6 @@ func (p *publisher) Publish(_ context.Context, recipientID int64, msg string) er
 	if err != nil {
 		return fmt.Errorf("failed to send telegram message: %w", err)
 	}
+
 	return nil
 }

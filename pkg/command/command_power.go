@@ -21,6 +21,7 @@ type powerCommand struct {
 // NewPowerCommand creates new handler for power command.
 func NewPowerCommand(logger *zap.Logger, publisher Publisher, power Power) *powerCommand {
 	logger.Info("Power command created")
+
 	return &powerCommand{
 		logger:    logger,
 		publisher: publisher,
@@ -47,5 +48,6 @@ func (c *powerCommand) Handle(ctx context.Context, senderID int64, _ string) err
 	if err := c.publisher.Publish(ctx, senderID, fmt.Sprintf("Voltage: <b>%.1f</b>", voltage)); err != nil {
 		return fmt.Errorf("failed to publish reply: %w", err)
 	}
+
 	return nil
 }

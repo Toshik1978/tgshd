@@ -21,6 +21,7 @@ type unknownCommand struct {
 // NewUnknownCommand creates new handler for unknown command.
 func NewUnknownCommand(logger *zap.Logger, publisher Publisher, runner Script) *unknownCommand {
 	logger.Info("Unknown command created")
+
 	return &unknownCommand{
 		logger:    logger,
 		publisher: publisher,
@@ -50,5 +51,6 @@ func (c *unknownCommand) Handle(ctx context.Context, senderID int64, cmd string)
 	if err := c.publisher.Publish(ctx, senderID, "Script succeeded!"); err != nil {
 		return fmt.Errorf("failed to publish reply: %w", err)
 	}
+
 	return nil
 }

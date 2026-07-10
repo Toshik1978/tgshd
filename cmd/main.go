@@ -66,7 +66,7 @@ func configuration() fx.Option {
 			newTelegramBot,
 			fx.Annotate(
 				telegram.NewConsumer,
-				fx.As(new(telegram.Consumer)),
+				fx.As(new(app.TelegramConsumer)),
 				fx.ParamTags(``, ``, `group:"command_handler"`),
 			),
 			fx.Annotate(telegram.NewPublisher, fx.As(new(command.Publisher)), fx.As(new(sms.Publisher))),
@@ -136,6 +136,7 @@ func newGammuDB(lc fx.Lifecycle, cfg *config) (*sql.DB, error) {
 			return db.Close()
 		},
 	})
+
 	return db, nil
 }
 
@@ -151,6 +152,7 @@ func newLogger(cfg *config) (*zap.Logger, error) {
 		config.Encoding = "console"
 		config.EncoderConfig.EncodeLevel = zapcore.CapitalLevelEncoder
 	}
+
 	return config.Build()
 }
 
@@ -159,7 +161,7 @@ type config struct {
 	TelegramToken string   `env:"TELEGRAM_TOKEN"`
 	ChatID        int64    `env:"TELEGRAM_CHAT_ID"`
 	UnknownScript string   `env:"TELEGRAM_UNKNOWN_SCRIPT"`
-	PingHosts     []string `env:"BOT_PING_HOSTS" envSeparator:","`
+	PingHosts     []string `env:"BOT_PING_HOSTS"          envSeparator:","`
 	NutIP         string   `env:"BOT_NUT_IP"`
 	NutName       string   `env:"BOT_NUT_NAME"`
 	NutUser       string   `env:"BOT_NUT_USER"`
@@ -264,6 +266,7 @@ func newApplication(lc fx.Lifecycle, p app.ApplicationParams) *app.Application {
 			return a.OnStop(ctx, cancel)
 		},
 	})
+
 	return a
 }
 
@@ -273,8 +276,7 @@ func register(a *app.Application) {
 }
 
 // errorHandler is an error handler for fx.
-type errorHandler struct {
-}
+type errorHandler struct{}
 
 func (h *errorHandler) HandleError(err error) {
 	log.Print("Runtime FX error: ", err)

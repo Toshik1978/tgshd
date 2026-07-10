@@ -14,26 +14,27 @@ var ignoreChars = map[string]bool{
 }
 
 // encodeMessage encodes the string to GSM string.
-func encodeMessage(msg string) string { //nolint:unused
-	encoded := ""
-
+func encodeMessage(msg string) string {
 	if msg == "" {
-		return encoded
+		return ""
 	}
 
 	d := int64(0)
+
+	var encoded strings.Builder
 	for _, r := range msg {
 		a := int64(r)
 
 		if d != 0 {
 			if 56320 <= a && a <= 57343 {
 				codePoint := dec2Hex(65536 + ((d - 55296) << 10) + (a - 56320))
-				encoded += codePoint
+				encoded.WriteString(codePoint)
 				d = 0
+
 				continue
-			} else {
-				d = 0
 			}
+
+			d = 0
 		}
 
 		if 55296 <= a && a <= 56319 {
@@ -43,11 +44,12 @@ func encodeMessage(msg string) string { //nolint:unused
 			for len(cp) < 4 {
 				cp = "0" + cp
 			}
-			encoded += cp
+
+			encoded.WriteString(cp)
 		}
 	}
 
-	return encoded
+	return encoded.String()
 }
 
 // decodeMessage decodes GSM string to string.
@@ -56,18 +58,15 @@ func decodeMessage(encoded string) string {
 		return ""
 	}
 
-	result := ""
-
-	index := 0
-	for index < len(encoded) {
+	var result strings.Builder
+	for index := 0; index < len(encoded); index += 4 {
 		hexCode := encoded[index : index+4]
-		index += 4
 		if !ignoreChars[hexCode] {
-			result += hex2Char(hexCode)
+			result.WriteString(hex2Char(hexCode))
 		}
 	}
 
-	return result
+	return result.String()
 }
 
 // decodeDate convert SMS date to the Time structure.
@@ -79,10 +78,11 @@ func decodeDate(d string) time.Time {
 	hour, _ := strconv.ParseInt(fields[3], 10, 32)
 	minutes, _ := strconv.ParseInt(fields[4], 10, 32)
 	sec, _ := strconv.ParseInt(fields[5], 10, 32)
+
 	return time.Date(int(year), time.Month(month), int(day), int(hour), int(minutes), int(sec), 0, time.Local)
 }
 
-func dec2Hex(a int64) string { //nolint:unused
+func dec2Hex(a int64) string {
 	return strconv.FormatInt(a, 16)
 }
 
@@ -102,5 +102,6 @@ func hex2Char(hex string) string {
 		r2 := rune(56320 | (char & 1023))
 		return strconv.Itoa(int(utf16.Encode([]rune{r1, r2})[0]))
 	}
+
 	return ""
 }

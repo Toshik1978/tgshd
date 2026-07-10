@@ -11,7 +11,7 @@ import (
 	"go.uber.org/zap"
 )
 
-// fakeConsumer implements telegram.Consumer for tests.
+// fakeConsumer implements TelegramConsumer for tests.
 type fakeConsumer struct {
 	mu        sync.Mutex
 	startErr  error
@@ -73,6 +73,7 @@ func newTestApplication(tlg *fakeConsumer, workers []Worker) *Application {
 		Telegram: tlg,
 		Workers:  workers,
 	}
+
 	return NewApplication(params, "commit", "stamp")
 }
 
@@ -115,8 +116,7 @@ func TestOnStartTelegramError(t *testing.T) {
 	worker := &fakeWorker{name: "worker1", duration: time.Second}
 	app := newTestApplication(tlg, []Worker{worker})
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	ctx := t.Context()
 
 	err := app.OnStart(ctx)
 	if err == nil {

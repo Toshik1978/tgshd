@@ -44,6 +44,7 @@ func (p *ping) Ping(ctx context.Context, hosts []string) (map[string]bool, error
 			if stat.PacketsSent == stat.PacketsRecv {
 				ch <- host
 			}
+
 			return nil
 		})
 	}
@@ -57,5 +58,6 @@ func (p *ping) Ping(ctx context.Context, hosts []string) (map[string]bool, error
 	for host := range ch {
 		resp[host] = true
 	}
+
 	return resp, nil
 }

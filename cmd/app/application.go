@@ -5,12 +5,9 @@ import (
 	"fmt"
 
 	"github.com/go-co-op/gocron/v2"
-
 	"go.uber.org/fx"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
-
-	"github.com/Toshik1978/tgshd/pkg/telegram"
 )
 
 // ApplicationParams declare parameters to run application.
@@ -18,14 +15,14 @@ type ApplicationParams struct {
 	fx.In
 
 	Logger   *zap.Logger
-	Telegram telegram.Consumer
+	Telegram TelegramConsumer
 	Workers  []Worker `group:"worker"`
 }
 
 // Application declare new instance of application.
 type Application struct {
 	logger     *zap.Logger
-	tlg        telegram.Consumer
+	tlg        TelegramConsumer
 	workers    []Worker
 	scheduler  gocron.Scheduler
 	commit     string
@@ -54,6 +51,7 @@ func (a *Application) OnStart(ctx context.Context) error {
 		logger.With(zap.Error(err)).Error("Failed to start application")
 		return fmt.Errorf("failed to start application: %w", err)
 	}
+
 	return nil
 }
 
@@ -100,6 +98,7 @@ func (a *Application) onStart(ctx context.Context) error {
 	if err := a.tlg.Start(ctx); err != nil {
 		return fmt.Errorf("failed to start telegram handler: %w", err)
 	}
+
 	return nil
 }
 
@@ -118,6 +117,7 @@ func (a *Application) OnStop(ctx context.Context, cancel context.CancelFunc) err
 	}
 
 	logger.Info("Stop application")
+
 	return nil
 }
 
@@ -129,6 +129,7 @@ func (a *Application) onStop(ctx context.Context) error {
 		a.logger.Info("Scheduler stopped")
 		return nil
 	})
+
 	return grp.Wait()
 }
 

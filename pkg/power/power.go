@@ -2,6 +2,7 @@ package power
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	nut "github.com/robbiet480/go.nut"
@@ -19,6 +20,7 @@ type power struct {
 // New instantiate power control object.
 func New(logger *zap.Logger, ip, name, user, password string) *power {
 	logger.Info("Power object created")
+
 	return &power{
 		logger:   logger,
 		ip:       ip,
@@ -51,6 +53,7 @@ func (p *power) Voltage(_ context.Context) (float64, error) {
 			return variable.Value.(float64), nil
 		}
 	}
+
 	return 0, nil
 }
 
@@ -64,12 +67,13 @@ func (p *power) connect() (*nut.UPS, *nut.Client, error) {
 		return nil, nil, fmt.Errorf("failed authenticate in nut: %w", err)
 	}
 	if !ok {
-		return nil, nil, fmt.Errorf("failed authenticate in nut")
+		return nil, nil, errors.New("failed authenticate in nut")
 	}
 	ups, err := nut.NewUPS(p.name, &client)
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to initialize ups: %w", err)
 	}
+
 	return &ups, &client, nil
 }
 

@@ -47,6 +47,7 @@ func (b *builder) Do(_ context.Context, text string) []MessagePart {
 	if len(parts) > 1 {
 		b.updateUDH(parts)
 	}
+
 	return parts
 }
 
@@ -56,6 +57,7 @@ func isASCII(s string) bool {
 			return false
 		}
 	}
+
 	return true
 }
 

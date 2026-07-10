@@ -2,6 +2,7 @@ package gammu
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
 
@@ -33,10 +34,7 @@ func TestBuilderSinglePartUnicode(t *testing.T) {
 
 func TestBuilderMultipartASCII(t *testing.T) {
 	// 200 ASCII chars > 160 GSM7 limit => 2 parts.
-	body := ""
-	for i := 0; i < 200; i++ {
-		body += "a"
-	}
+	body := strings.Repeat("a", 200)
 	parts := NewSequenceBuilder().Do(context.Background(), body)
 	if len(parts) != 2 {
 		t.Fatalf("expected 2 parts, got %d", len(parts))

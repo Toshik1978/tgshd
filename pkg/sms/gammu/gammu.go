@@ -19,6 +19,7 @@ type gammu struct {
 // NewSQLBackend instantiates the gammu SMS sender backed by a SQL outbox.
 func NewSQLBackend(logger *zap.Logger, db *sql.DB) *gammu {
 	logger.Info("Gammu SQL backend wrapper created")
+
 	return &gammu{
 		logger:  logger,
 		r:       NewRepository(logger, db),
@@ -37,5 +38,6 @@ func (g *gammu) Publish(ctx context.Context, phone, msg string) error {
 	if len(parts) == 1 {
 		return g.r.Store(ctx, phone, parts[0])
 	}
+
 	return g.r.StoreMultipart(ctx, phone, parts)
 }

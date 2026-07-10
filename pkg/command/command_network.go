@@ -24,6 +24,7 @@ type networkCommand struct {
 // NewNetworkCommand creates new handler for network command.
 func NewNetworkCommand(logger *zap.Logger, publisher Publisher, conn ZTE, cmd string) *networkCommand {
 	logger.Info("Network command created")
+
 	return &networkCommand{
 		logger:    logger,
 		publisher: publisher,
@@ -51,6 +52,7 @@ func (c *networkCommand) Handle(ctx context.Context, senderID int64, _ string) e
 	if err := c.publisher.Publish(ctx, senderID, reply); err != nil {
 		return fmt.Errorf("failed to publish reply: %w", err)
 	}
+
 	return nil
 }
 
@@ -63,5 +65,6 @@ func (c *networkCommand) commandToBearer() zte.Bearer {
 	case "3g":
 		return zte.BearerOnlyWCDMA
 	}
+
 	return zte.BearerWCDMAAndLTE
 }

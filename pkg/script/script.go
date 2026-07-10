@@ -33,6 +33,7 @@ func (s *script) Name() (string, error) {
 		s.logger.Error("Failed to execute script", zap.Error(err))
 		return "", fmt.Errorf("failed to execute script reply: %w", err)
 	}
+
 	return string(stream), nil
 }
 
@@ -47,5 +48,6 @@ func (s *script) Execute(ctx context.Context, cmd string) error {
 		s.logger.Error("Failed to execute script", zap.Error(err))
 		return fmt.Errorf("failed to execute script: %w", err)
 	}
+
 	return nil
 }

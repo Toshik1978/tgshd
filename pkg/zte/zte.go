@@ -3,6 +3,7 @@ package zte
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -49,6 +50,7 @@ func NewConnection(logger *zap.Logger, host, password string) (*Connection, erro
 	if err := conn.parseDeviceVersion(); err != nil {
 		return nil, fmt.Errorf("failed to initialize: %w", err)
 	}
+
 	return conn, nil
 }
 
@@ -63,6 +65,7 @@ func (c *Connection) SetBearer(pref Bearer) error {
 	if err != nil {
 		return fmt.Errorf("failed to set bearer: %w", err)
 	}
+
 	return c.bearerRequest(pref, ad)
 }
 
@@ -87,6 +90,7 @@ func (c *Connection) AllSms(onlyUnread bool) ([]Sms, error) {
 			l = append(l, m)
 		}
 	}
+
 	return l, nil
 }
 
@@ -126,6 +130,7 @@ func (c *Connection) ReadSms(del bool) ([]Sms, error) {
 	if del {
 		return l, c.smsDeleteRequest(ids, ad)
 	}
+
 	return l, c.smsReadRequest(ids, ad)
 }
 
@@ -145,6 +150,7 @@ func (c *Connection) parseDeviceVersion() error {
 
 	c.crVersion = deviceVersion.CrVersion
 	c.waInnerVersion = deviceVersion.WaInnerVersion
+
 	return nil
 }
 
@@ -162,6 +168,7 @@ func (c *Connection) login() error {
 		return fmt.Errorf("failed to login: %w", err)
 	}
 	c.cookie = cookie
+
 	return nil
 }
 
@@ -177,12 +184,13 @@ func (c *Connection) logout() error {
 // ad calculates the current AD value.
 func (c *Connection) ad() (string, error) {
 	if c.crVersion == "" && c.waInnerVersion == "" {
-		return "", fmt.Errorf("not logged in")
+		return "", errors.New("not logged in")
 	}
 	rd, err := c.rd()
 	if err != nil {
 		return "", fmt.Errorf("failed to get RD value: %w", err)
 	}
+
 	return c.calculateAD(rd), nil
 }
 
@@ -205,14 +213,15 @@ func (c *Connection) rd() (string, error) {
 }
 
 // xd is a generic logic to get LD or RD.
-func (c *Connection) xd(result interface{}, cmd string) error {
+func (c *Connection) xd(result any, cmd string) error {
 	r, err := c.request(false).
 		SetQueryParam("cmd", cmd).
 		SetResult(result).
 		Get(GetCmd)
-	if err1 := c.checkError(err, r, fmt.Sprintf("get %s", cmd)); err1 != nil {
+	if err1 := c.checkError(err, r, "get "+cmd); err1 != nil {
 		return err1
 	}
+
 	return nil
 }
 
@@ -255,7 +264,8 @@ func (c *Connection) loginRequest(hash string) (*http.Cookie, error) {
 			return cookie, nil
 		}
 	}
-	return nil, fmt.Errorf("login failed: no cookies found")
+
+	return nil, errors.New("login failed: no cookies found")
 }
 
 // logoutRequest sends a logout request to the ZTE device.
@@ -274,6 +284,7 @@ func (c *Connection) logoutRequest(ad string) error {
 	if result.Result != Success {
 		return fmt.Errorf("logout failed: %s", result.Result)
 	}
+
 	return nil
 }
 
@@ -294,6 +305,7 @@ func (c *Connection) bearerRequest(pref Bearer, ad string) error {
 	if result.Result != Success {
 		return fmt.Errorf("bearer failed: %s", result.Result)
 	}
+
 	return nil
 }
 
@@ -312,6 +324,7 @@ func (c *Connection) smsRequest(page, size int) (*SmsList, error) {
 	if err1 := c.checkError(err, r, "get sms list"); err1 != nil {
 		return nil, err1
 	}
+
 	return result, nil
 }
 
@@ -337,6 +350,7 @@ func (c *Connection) smsReadRequest(ids []string, ad string) error {
 	if result.Result != Success {
 		return fmt.Errorf("read sms failed: %s", result.Result)
 	}
+
 	return nil
 }
 
@@ -361,6 +375,7 @@ func (c *Connection) smsDeleteRequest(ids []string, ad string) error {
 	if result.Result != Success {
 		return fmt.Errorf("delete sms failed: %s", result.Result)
 	}
+
 	return nil
 }
 
@@ -391,5 +406,6 @@ func (c *Connection) checkError(err error, r *resty.Response, prefix string) err
 	if r.StatusCode() != http.StatusOK {
 		return fmt.Errorf("%s failed: %s", prefix, r.Status())
 	}
+
 	return nil
 }

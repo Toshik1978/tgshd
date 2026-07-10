@@ -14,3 +14,11 @@ type Worker interface {
 	// Do is the entry point of worker.
 	Do(ctx context.Context) error
 }
+
+// TelegramConsumer consumes and dispatches incoming Telegram messages.
+type TelegramConsumer interface {
+	// Start starts consuming messages.
+	Start(ctx context.Context) error
+	// Stop stops consuming messages.
+	Stop(ctx context.Context) error
+}
