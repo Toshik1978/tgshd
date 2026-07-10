@@ -3,12 +3,17 @@ package command
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"go.uber.org/zap"
 )
 
+// scriptNameTimeout bounds the one-shot script invocation used to resolve the
+// command list at construction, so a hanging operator script cannot wedge boot.
+const scriptNameTimeout = 10 * time.Second
+
 type Script interface {
-	Name() (string, error)
+	Name(ctx context.Context) (string, error)
 	Execute(ctx context.Context, cmd string) error
 }
 
@@ -23,7 +28,10 @@ type unknownCommand struct {
 // is resolved from the script once, here at construction, so Name() stays a
 // cheap accessor instead of re-executing the script on every dispatch.
 func NewUnknownCommand(logger *zap.Logger, publisher Publisher, runner Script) (*unknownCommand, error) {
-	name, err := runner.Name()
+	ctx, cancel := context.WithTimeout(context.Background(), scriptNameTimeout)
+	defer cancel()
+
+	name, err := runner.Name(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get unknown commands list: %w", err)
 	}

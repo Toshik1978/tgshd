@@ -23,13 +23,13 @@ func New(logger *zap.Logger, scriptFile string) *script {
 }
 
 // Name runs the script to get the list of available commands.
-func (s *script) Name() (string, error) {
+func (s *script) Name(ctx context.Context) (string, error) {
 	if s.scriptFile == "" {
 		return "", nil
 	}
 
 	//nolint:gosec // G204: scriptFile is operator-provided configuration, not untrusted user input.
-	stream, err := exec.CommandContext(context.Background(), s.scriptFile).Output()
+	stream, err := exec.CommandContext(ctx, s.scriptFile).Output()
 	if err != nil {
 		s.logger.Error("Failed to execute script", zap.Error(err))
 		return "", fmt.Errorf("failed to execute script reply: %w", err)

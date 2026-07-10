@@ -17,7 +17,7 @@ type fakeScript struct {
 	lastCmd    string
 }
 
-func (f *fakeScript) Name() (string, error) {
+func (f *fakeScript) Name(_ context.Context) (string, error) {
 	f.nameCalls++
 	return f.name, f.nameErr
 }

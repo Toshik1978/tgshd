@@ -13,7 +13,7 @@ import (
 func TestName_EmptyScriptFile(t *testing.T) {
 	s := New(zap.NewNop(), "")
 
-	got, err := s.Name()
+	got, err := s.Name(context.Background())
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -34,7 +34,7 @@ func TestName_Success(t *testing.T) {
 	path := writeScript(t, "#!/bin/sh\necho hello\n")
 	s := New(zap.NewNop(), path)
 
-	got, err := s.Name()
+	got, err := s.Name(context.Background())
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -56,7 +56,7 @@ func TestName_NonExistentScript(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "nope")
 	s := New(zap.NewNop(), path)
 
-	got, err := s.Name()
+	got, err := s.Name(context.Background())
 	if err == nil {
 		t.Fatal("expected an error, got nil")
 	}
@@ -87,12 +87,24 @@ func TestName_ScriptExitsNonZero(t *testing.T) {
 	path := writeScript(t, "#!/bin/sh\nexit 1\n")
 	s := New(zap.NewNop(), path)
 
-	got, err := s.Name()
+	got, err := s.Name(context.Background())
 	if err == nil {
 		t.Fatal("expected an error, got nil")
 	}
 	if got != "" {
 		t.Fatalf("expected empty string, got %q", got)
+	}
+}
+
+func TestName_ContextCancelled(t *testing.T) {
+	path := writeScript(t, "#!/bin/sh\necho hello\n")
+	s := New(zap.NewNop(), path)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	if _, err := s.Name(ctx); err == nil {
+		t.Fatal("expected an error when the context is already cancelled")
 	}
 }
 
