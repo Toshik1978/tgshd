@@ -1,52 +1,116 @@
 version: "2"
 run:
   go: "1.26"
+issues:
+  max-issues-per-linter: 0
+  max-same-issues: 0
 linters:
   default: none
   enable:
+    - arangolint
+    - asasalint
+    - asciicheck
+    - bidichk
     - bodyclose
-    - depguard
+    - canonicalheader
+    - clickhouselint
+    - containedctx
+    - copyloopvar
+    - cyclop
+    - decorder
     - dogsled
     - dupl
+    - durationcheck
+    - embeddedstructfieldcheck
     - errcheck
-    - funlen
+    - errchkjson
+    - errname
+    - errorlint
+    - exhaustive
+    - exptostd
+    - fatcontext
+    - forbidigo
+    - forcetypeassert
+    - funcorder
+    - ginkgolinter
+    - gocheckcompilerdirectives
+    - gochecknoglobals
     - gochecknoinits
+    - gochecksumtype
+    - gocognit
     - goconst
     - gocritic
     - gocyclo
+    - godoclint
     - godot
+    - godox
+    - goheader
+    - gomoddirectives
+    - gomodguard_v2
+    - goprintffuncname
     - gosec
+    - gosmopolitan
     - govet
+    - grouper
+    - iface
+    - importas
+    - inamedparam
     - ineffassign
+    - interfacebloat
+    - intrange
+    - iotamixing
+    - ireturn
     - lll
+    - loggercheck
+    - maintidx
+    - makezero
+    - mirror
     - misspell
+    - modernize
+    - musttag
     - nakedret
+    - nestif
+    - nilerr
+    - nilnesserr
+    - nilnil
+    - noctx
+    - nolintlint
+    - nosprintfhostport
+    - perfsprint
+    - prealloc
     - predeclared
+    - promlinter
+    - protogetter
+    - reassign
+    - recvcheck
     - revive
+    - rowserrcheck
+    - sloglint
+    - spancheck
+    - sqlclosecheck
+    - sloglint
     - staticcheck
+    - tagalign
+    - testableexamples
+    - testifylint
+    - thelper
+    - tparallel
     - unconvert
     - unparam
+    - unqueryvet
     - unused
+    - usestdlibvars
+    - usetesting
+    - wastedassign
     - whitespace
+    - wrapcheck
+    - wsl_v5
+    - zerologlint
   settings:
-    depguard:
-      rules:
-        main:
-          allow:
-            - $gostd
-            - golang.org
-            - google.golang.org
-            - github.com
-            - go.uber.org
-            - go.elastic.co
-            - go.etcd.io
-            - gopkg.in
-            - resty.dev
     dupl:
       threshold: 100
-    funlen:
-      lines: 60
-      statements: 40
+    goconst:
+      ignore-tests: true
     gocritic:
       disabled-checks:
         - hugeParam
@@ -64,6 +128,12 @@ linters:
       disable:
         - fieldalignment
       enable-all: true
+    iface:
+      enable:
+        - identical
+        - unused
+        - opaque
+        - unexported
     lll:
       line-length: 120
     nakedret:
@@ -73,9 +143,66 @@ linters:
       range-loops: true
       for-loops: false
     revive:
+      enable-all-rules: true
       rules:
+        - name: add-constant
+          disabled: true
+        - name: argument-limit
+          exclude: ["**/*_test.go"]
+        - name: cognitive-complexity
+          disabled: true
+        - name: confusing-naming
+          disabled: true
+        - name: confusing-results
+          disabled: true
+        - name: enforce-switch-style
+          disabled: true
+        - name: epoch-naming
+          disabled: true
+        - name: flag-parameter
+          disabled: true
+        - name: function-length
+          arguments: [40, 60]
+          exclude: ["**/*_test.go"]
+        - name: line-length-limit
+          arguments: [120]
+          exclude: ["**/*_test.go"]
+        - name: nested-structs
+          disabled: true
+        - name: package-naming
+          arguments:
+            - skip-collision-with-common-std: true
+        - name: unchecked-type-assertion
+          exclude: ["**/*_test.go"]
         - name: unexported-return
           disabled: true
+        - name: unhandled-error
+          arguments: [
+            '^os\.(CreateTemp|WriteFile|Chmod)$',
+            '^fmt\.Print',
+            '^fmt\.Fprintf',
+            '^fmt\.Fprintln',
+            '^net\.',
+            '^(bytes\.Buffer|string\.Writer|strings\.Builder)\.Write(Byte|Rune|String)?$',
+          ]
+        - name: unsecure-url-scheme
+          disabled: true
+        - name: unused-receiver
+          disabled: true
+    sloglint:
+      no-global: "all"
+      msg-style: "lowercased"
+      key-naming-case: "snake"
+    wsl_v5:
+      branch-max-lines: 5
+      default: none
+      enable:
+        - branch
+        - return
+        - send
+        - err
+        - leading-whitespace
+        - trailing-whitespace
   exclusions:
     generated: lax
     presets:
@@ -84,32 +211,36 @@ linters:
       - legacy
       - std-error-handling
     rules:
-      - linters:
+      - path: _test\.go
+        linters:
           - dupl
           - errcheck
-          - funlen
+          - funcorder
+          - goconst
           - gocyclo
           - gosec
           - lll
+          - makezero
+          - unparam
           - unused
-        path: _test\.go
-    paths:
-      - third_party$
-      - builtin$
-      - examples$
+          - wrapcheck
 formatters:
   enable:
-    - gofmt
-    - goimports
+    - gci
+    - gofumpt
+    - golines
   settings:
-    gofmt:
-      simplify: true
-    goimports:
-      local-prefixes:
-        - github.com/Toshik1978
+    gci:
+      sections:
+        - standard
+        - default
+        - prefix(github.com/Toshik1978/tgshd)
+    gofumpt:
+      module-path: github.com/Toshik1978/tgshd
+      extra-rules: true
+    golines:
+      max-len: 120
+      shorten-comments: true
   exclusions:
     generated: lax
-    paths:
-      - third_party$
-      - builtin$
-      - examples$
+    warn-unused: true

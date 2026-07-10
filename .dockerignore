@@ -1,0 +1,13 @@
+.antigravitycli
+.claude
+.idea
+.vscode
+.git
+.gitignore
+.dockerignore
+bin
+.env
+.env.dist
+Dockerfile
+Taskfile.yml
+coverage.txt

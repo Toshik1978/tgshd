@@ -1,0 +1,48 @@
+version: "3"
+
+vars:
+  BINARY: bin/tgshd
+  BUILDSTAMP:
+    sh: date +%Y/%m/%d_%H:%M:%S
+  COMMIT:
+    sh: git rev-parse --short HEAD 2>/dev/null || echo unknown
+
+tasks:
+  setup:
+    desc: Download Go module dependencies
+    cmd: go mod download
+
+  lint:
+    desc: Run golangci-lint
+    cmd: golangci-lint run
+
+  format:
+    desc: Format the codebase
+    cmds:
+      - golangci-lint fmt
+      - golangci-lint run --fix
+
+  test:
+    desc: Run unit tests
+    cmd: go test -v ./...
+
+  test:coverage:
+    desc: Run unit tests with race detector and coverage profile
+    cmd: go test -race -coverpkg=./... -coverprofile=coverage.txt -covermode=atomic ./...
+
+  build:
+    desc: Compile the tgshd binary
+    cmds:
+      - rm -f {{.BINARY}}
+      - >-
+        GOGC=off go build -v
+        -ldflags "-X main.Buildstamp={{.BUILDSTAMP}} -X main.Commit={{.COMMIT}}"
+        -o {{.BINARY}} cmd/main.go
+    generates:
+      - "{{.BINARY}}"
+
+  clean:
+    desc: Remove build artifacts and test cache
+    cmds:
+      - go clean -testcache
+      - rm -f {{.BINARY}} coverage.txt

@@ -10,7 +10,7 @@ import (
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 
-	"github.com/Toshik1978/server-bot/pkg/telegram"
+	"github.com/Toshik1978/tgshd/pkg/telegram"
 )
 
 // ApplicationParams declare parameters to run application.

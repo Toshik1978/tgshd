@@ -1,10 +1,10 @@
 [Unit]
-Description=Ubuntu Server Bot Service
+Description=Telegram Shell Daemon
 After=network-online.target
 
 [Service]
-ExecStart=/usr/local/bin/server-bot
-EnvironmentFile=/usr/local/etc/server.conf
+ExecStart=/usr/local/bin/tgshd
+EnvironmentFile=/usr/local/etc/tgshd.conf
 TimeoutSec=30
 Restart=on-failure
 RestartSec=30

@@ -1,4 +1,4 @@
-module github.com/Toshik1978/server-bot
+module github.com/Toshik1978/tgshd
 
 go 1.26
 

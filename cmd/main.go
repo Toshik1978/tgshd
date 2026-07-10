@@ -15,15 +15,15 @@ import (
 	"go.uber.org/zap/zapcore"
 	"gopkg.in/telebot.v4"
 
-	"github.com/Toshik1978/server-bot/cmd/app"
-	"github.com/Toshik1978/server-bot/pkg/command"
-	"github.com/Toshik1978/server-bot/pkg/ping"
-	"github.com/Toshik1978/server-bot/pkg/power"
-	"github.com/Toshik1978/server-bot/pkg/script"
-	"github.com/Toshik1978/server-bot/pkg/sms"
-	"github.com/Toshik1978/server-bot/pkg/speedtest"
-	"github.com/Toshik1978/server-bot/pkg/telegram"
-	"github.com/Toshik1978/server-bot/pkg/zte"
+	"github.com/Toshik1978/tgshd/cmd/app"
+	"github.com/Toshik1978/tgshd/pkg/command"
+	"github.com/Toshik1978/tgshd/pkg/ping"
+	"github.com/Toshik1978/tgshd/pkg/power"
+	"github.com/Toshik1978/tgshd/pkg/script"
+	"github.com/Toshik1978/tgshd/pkg/sms"
+	"github.com/Toshik1978/tgshd/pkg/speedtest"
+	"github.com/Toshik1978/tgshd/pkg/telegram"
+	"github.com/Toshik1978/tgshd/pkg/zte"
 )
 
 // Build-time constants.

@@ -1,4 +1,4 @@
-name: Build and Test
+name: Lint, Test & Build
 on:
   push:
     branches:
@@ -10,44 +10,61 @@ jobs:
     name: lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - name: Checkout
+        uses: actions/checkout@v7
 
       - name: Setup Golang
         uses: actions/setup-go@v6
         with:
           go-version: '1.26'
-          cache: false
+          cache: true
 
-      - name: Run the linter
+      - name: Run Golang linter
         uses: golangci/golangci-lint-action@v9
         with:
-          version: v2.11.3
+          version: v2.12.2
 
   test:
     name: test
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v6
+      - name: Checkout
+        uses: actions/checkout@v7
 
       - name: Setup Golang
         uses: actions/setup-go@v6
         with:
           go-version: '1.26'
+          cache: true
+
+      - name: Install Task
+        uses: go-task/setup-task@v2
+
+      - name: Setup project
+        run: task setup
 
       - name: Run tests
-        run: make quality.tests
+        run: task test
 
   build:
     name: build
     runs-on: ubuntu-latest
     needs: [lint, test]
     steps:
-      - uses: actions/checkout@v6
+      - name: Checkout
+        uses: actions/checkout@v7
 
       - name: Setup Golang
         uses: actions/setup-go@v6
         with:
           go-version: '1.26'
+          cache: true
+
+      - name: Install Task
+        uses: go-task/setup-task@v2
+
+      - name: Setup project
+        run: task setup
 
       - name: Run build
-        run: make app.build
+        run: task build

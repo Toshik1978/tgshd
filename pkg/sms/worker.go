@@ -8,7 +8,7 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/Toshik1978/server-bot/pkg/zte"
+	"github.com/Toshik1978/tgshd/pkg/zte"
 )
 
 type worker struct {
