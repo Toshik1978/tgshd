@@ -14,7 +14,7 @@ require (
 	go.uber.org/zap v1.28.0
 	golang.org/x/sync v0.21.0
 	gopkg.in/telebot.v4 v4.0.0-beta.10
-	resty.dev/v3 v3.0.0-beta.6
+	resty.dev/v3 v3.0.0-rc.3
 )
 
 require (
