@@ -107,7 +107,7 @@ func TestSmsUsageOnBadArgs(t *testing.T) {
 }
 
 func TestSmsSendFailureReported(t *testing.T) {
-	sender := &fakeSender{err: errors.New("db down")}
+	sender := &fakeSender{err: errors.New("connection <failed> & down")}
 	pub := &fakePublisher{}
 	cmd := NewSmsCommand(zap.NewNop(), pub, sender, 100)
 
@@ -117,5 +117,11 @@ func TestSmsSendFailureReported(t *testing.T) {
 	}
 	if pub.count != 1 {
 		t.Error("expected an error reply to the sender")
+	}
+	if strings.Contains(pub.lastMsg, "<failed>") {
+		t.Errorf("failure reply must be HTML-escaped, got %q", pub.lastMsg)
+	}
+	if !strings.Contains(pub.lastMsg, "&lt;failed&gt;") {
+		t.Errorf("failure reply must contain escaped error, got %q", pub.lastMsg)
 	}
 }

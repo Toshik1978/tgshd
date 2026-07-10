@@ -3,6 +3,7 @@ package command
 import (
 	"context"
 	"fmt"
+	"html"
 	"strings"
 
 	"go.uber.org/zap"
@@ -54,11 +55,14 @@ func (c *smsCommand) Handle(ctx context.Context, senderID int64, cmd string) err
 	}
 
 	if err := c.sender.Publish(ctx, phone, msg); err != nil {
-		_ = c.publisher.Publish(ctx, senderID, fmt.Sprintf("Failed to send SMS: %v", err))
+		if replyErr := c.publisher.Publish(ctx, senderID,
+			fmt.Sprintf("Failed to send SMS: %s", html.EscapeString(err.Error()))); replyErr != nil {
+			c.logger.With(zap.Error(replyErr)).Debug("Failed to send /sms failure reply")
+		}
 		return fmt.Errorf("failed to send sms: %w", err)
 	}
 
-	if err := c.publisher.Publish(ctx, senderID, fmt.Sprintf("SMS queued for <b>%s</b>", phone)); err != nil {
+	if err := c.publisher.Publish(ctx, senderID, fmt.Sprintf("SMS queued for <b>%s</b>", html.EscapeString(phone))); err != nil {
 		return fmt.Errorf("failed to publish reply: %w", err)
 	}
 	return nil
