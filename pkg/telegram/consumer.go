@@ -21,10 +21,9 @@ type Handler interface {
 }
 
 type consumer struct {
-	logger          *zap.Logger
-	bot             *telebot.Bot
-	handlers        []Handler
-	shutdownChannel chan any
+	logger   *zap.Logger
+	bot      *telebot.Bot
+	handlers []Handler
 }
 
 // NewConsumer initializes new consumer for telegram messages.
@@ -32,14 +31,13 @@ func NewConsumer(logger *zap.Logger, bot *telebot.Bot, handlers []Handler) *cons
 	logger.Info("Creation of TelegramConsumer")
 
 	return &consumer{
-		logger:          logger,
-		bot:             bot,
-		handlers:        handlers,
-		shutdownChannel: make(chan any),
+		logger:   logger,
+		bot:      bot,
+		handlers: handlers,
 	}
 }
 
-func (c *consumer) Start(_ context.Context) error {
+func (c *consumer) Start(ctx context.Context) error {
 	c.logger.Info("Telegram bot started")
 
 	// Add commands.
@@ -49,16 +47,16 @@ func (c *consumer) Start(_ context.Context) error {
 			names := strings.SplitSeq(handler.Name(), "|")
 			for name := range names {
 				c.logger.With(zap.String("command", name)).Info("Telegram command added")
-				c.bot.Handle("/"+name, func(ctx telebot.Context) error {
-					return c.handleCommand(handler, ctx)
+				c.bot.Handle("/"+name, func(tctx telebot.Context) error {
+					return c.handleCommand(ctx, handler, tctx)
 				})
 				enabled["/"+name] = handler
 			}
 		}
 	}
 	// Add generic handler in case we are in the channel.
-	c.bot.Handle(telebot.OnChannelPost, func(ctx telebot.Context) error {
-		return c.handleCommands(enabled, ctx)
+	c.bot.Handle(telebot.OnChannelPost, func(tctx telebot.Context) error {
+		return c.handleCommands(ctx, enabled, tctx)
 	})
 
 	go c.bot.Start()
@@ -83,21 +81,21 @@ func (c *consumer) Stop(ctx context.Context) error {
 	return nil
 }
 
-func (c *consumer) handleCommands(handlers map[string]Handler, ctx telebot.Context) error {
-	fields := strings.Fields(ctx.Text())
+func (c *consumer) handleCommands(ctx context.Context, handlers map[string]Handler, tctx telebot.Context) error {
+	fields := strings.Fields(tctx.Text())
 	if len(fields) == 0 {
 		return nil
 	}
 	if handler, ok := handlers[fields[0]]; ok {
-		return c.handleCommand(handler, ctx)
+		return c.handleCommand(ctx, handler, tctx)
 	}
 
 	return nil
 }
 
-func (c *consumer) handleCommand(handler Handler, ctx telebot.Context) error {
+func (c *consumer) handleCommand(ctx context.Context, handler Handler, tctx telebot.Context) error {
 	logger := c.logger.With(zap.String("command", handler.Name()))
-	message := ctx.Message()
+	message := tctx.Message()
 
 	var senderID int64
 	switch {
@@ -119,7 +117,7 @@ func (c *consumer) handleCommand(handler Handler, ctx telebot.Context) error {
 		}
 	}()
 
-	err := handler.Handle(context.Background(), senderID, ctx.Text())
+	err := handler.Handle(ctx, senderID, tctx.Text())
 	if err != nil {
 		logger.
 			With(zap.Error(err)).
