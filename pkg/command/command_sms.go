@@ -47,7 +47,7 @@ func (c *smsCommand) Handle(ctx context.Context, senderID int64, cmd string) err
 
 	phone, msg := parseSmsArgs(cmd)
 	if phone == "" || msg == "" {
-		if err := c.publisher.Publish(ctx, senderID, "Usage: /sms <phone> <message>"); err != nil {
+		if err := c.publisher.Publish(ctx, senderID, "Usage: /sms &lt;phone&gt; &lt;message&gt;"); err != nil {
 			return fmt.Errorf("failed to publish reply: %w", err)
 		}
 		return nil

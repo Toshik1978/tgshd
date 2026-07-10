@@ -3,6 +3,7 @@ package command
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"go.uber.org/zap"
@@ -99,6 +100,9 @@ func TestSmsUsageOnBadArgs(t *testing.T) {
 	}
 	if pub.count != 1 {
 		t.Error("expected a usage reply")
+	}
+	if !strings.Contains(pub.lastMsg, "&lt;") || strings.Contains(pub.lastMsg, "<phone") {
+		t.Errorf("usage reply must be HTML-escaped, got %q", pub.lastMsg)
 	}
 }
 
