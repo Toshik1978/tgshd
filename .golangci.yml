@@ -134,6 +134,14 @@ linters:
         - unused
         - opaque
         - unexported
+    ireturn:
+      # fx constructors idiomatically return fx.Option; that is not a leaky abstraction.
+      allow:
+        - anon
+        - error
+        - empty
+        - stdlib
+        - go.uber.org/fx.Option
     lll:
       line-length: 120
     nakedret:
@@ -151,6 +159,10 @@ linters:
           exclude: ["**/*_test.go"]
         - name: cognitive-complexity
           disabled: true
+        - name: cyclomatic
+          exclude: ["**/*_test.go"]
+        - name: max-public-structs
+          arguments: [10]
         - name: confusing-naming
           disabled: true
         - name: confusing-results
@@ -213,12 +225,14 @@ linters:
     rules:
       - path: _test\.go
         linters:
+          - cyclop
           - dupl
           - errcheck
           - funcorder
           - goconst
           - gocyclo
           - gosec
+          - gosmopolitan
           - lll
           - makezero
           - unparam
