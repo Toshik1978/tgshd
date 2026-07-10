@@ -2,12 +2,14 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"log"
 	"os"
 	"time"
 
 	"github.com/caarlos0/env/v11"
+	_ "github.com/jackc/pgx/v5/stdlib"
 	_ "github.com/joho/godotenv/autoload"
 	"go.uber.org/fx"
 	"go.uber.org/fx/fxevent"
@@ -21,6 +23,7 @@ import (
 	"github.com/Toshik1978/tgshd/pkg/power"
 	"github.com/Toshik1978/tgshd/pkg/script"
 	"github.com/Toshik1978/tgshd/pkg/sms"
+	"github.com/Toshik1978/tgshd/pkg/sms/gammu"
 	"github.com/Toshik1978/tgshd/pkg/speedtest"
 	"github.com/Toshik1978/tgshd/pkg/telegram"
 	"github.com/Toshik1978/tgshd/pkg/zte"
@@ -45,6 +48,9 @@ func main() {
 	}
 	if os.Getenv("BOT_ZTE_HOST") != "" {
 		options = append(options, zteProviders(), zteWorkers())
+	}
+	if os.Getenv("BOT_GAMMU_DSN") != "" {
+		options = append(options, gammuProviders())
 	}
 	fx.New(options...).Run()
 }
@@ -101,6 +107,38 @@ func zteProviders() fx.Option {
 	)
 }
 
+// gammuProviders provides the gammu SMS backend and the /sms command for fx.
+func gammuProviders() fx.Option {
+	return fx.Options(
+		fx.Provide(
+			newGammuDB,
+			fx.Annotate(gammu.NewSQLBackend, fx.As(new(command.SmsSender))),
+		),
+		fx.Provide(
+			fx.Annotate(
+				func(logger *zap.Logger, publisher command.Publisher, sender command.SmsSender, cfg *config) telegram.Handler {
+					return command.NewSmsCommand(logger, publisher, sender, cfg.ChatID)
+				},
+				fx.ResultTags(`group:"command_handler"`),
+			),
+		),
+	)
+}
+
+// newGammuDB opens the gammu Postgres database and closes it on shutdown.
+func newGammuDB(lc fx.Lifecycle, cfg *config) (*sql.DB, error) {
+	db, err := sql.Open("pgx", cfg.GammuDSN)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open gammu database: %w", err)
+	}
+	lc.Append(fx.Hook{
+		OnStop: func(_ context.Context) error {
+			return db.Close()
+		},
+	})
+	return db, nil
+}
+
 // newLogger initializes logger for console.
 func newLogger(cfg *config) (*zap.Logger, error) {
 	var config zap.Config
@@ -130,6 +168,7 @@ type config struct {
 	NutError      float64  `env:"BOT_NUT_ERR"`
 	ZTEHost       string   `env:"BOT_ZTE_HOST"`
 	ZTEPassword   string   `env:"BOT_ZTE_PASS"`
+	GammuDSN      string   `env:"BOT_GAMMU_DSN"`
 }
 
 // newConfig initializes configuration.

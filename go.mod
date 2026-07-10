@@ -5,6 +5,7 @@ go 1.26
 require (
 	github.com/caarlos0/env/v11 v11.4.0
 	github.com/go-co-op/gocron/v2 v2.19.1
+	github.com/jackc/pgx/v5 v5.10.0
 	github.com/joho/godotenv v1.5.1
 	github.com/prometheus-community/pro-bing v0.8.0
 	github.com/robbiet480/go.nut v0.0.0-20240622015809-60e196249c53
@@ -20,7 +21,7 @@ require (
 	github.com/google/uuid v1.6.0 // indirect
 	github.com/jackc/pgpassfile v1.0.0 // indirect
 	github.com/jackc/pgservicefile v0.0.0-20240606120523-5a60cdf6a761 // indirect
-	github.com/jackc/pgx/v5 v5.10.0 // indirect
+	github.com/jackc/puddle/v2 v2.2.2 // indirect
 	github.com/jonboulle/clockwork v0.5.0 // indirect
 	github.com/robfig/cron/v3 v3.0.1 // indirect
 	go.uber.org/dig v1.19.0 // indirect
