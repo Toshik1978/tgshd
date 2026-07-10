@@ -2,12 +2,11 @@ package ping
 
 import (
 	"context"
-	"fmt"
+	"sync"
 	"time"
 
 	pingtool "github.com/prometheus-community/pro-bing"
 	"go.uber.org/zap"
-	"golang.org/x/sync/errgroup"
 )
 
 type ping struct {
@@ -22,42 +21,48 @@ func New(logger *zap.Logger) *ping {
 	}
 }
 
-// Ping do actual ping test and return per-host status.
+// Ping pings every host in parallel and returns per-host reachability. A setup
+// or send error for a single host is recorded as unreachable (and logged)
+// rather than failing the whole batch, so one bad host never masks the rest.
 func (p *ping) Ping(ctx context.Context, hosts []string) (map[string]bool, error) {
-	// Do ping in parallel
-	grp, _ := errgroup.WithContext(ctx)
-	ch := make(chan string, len(hosts))
+	resp := make(map[string]bool, len(hosts))
+	var (
+		mu sync.Mutex
+		wg sync.WaitGroup
+	)
+
 	for _, host := range hosts {
-		grp.Go(func() error {
-			pinger, err := pingtool.NewPinger(host)
-			if err != nil {
-				return fmt.Errorf("failed to ping: %w", err)
-			}
-			pinger.SetPrivileged(true)
-			pinger.Count = 3
-			pinger.Timeout = 5 * time.Second
-			if err := pinger.Run(); err != nil {
-				return fmt.Errorf("failed to ping: %w", err)
-			}
+		wg.Go(func() {
+			reachable := p.pingHost(ctx, host)
 
-			stat := pinger.Statistics()
-			if stat.PacketsSent == stat.PacketsRecv {
-				ch <- host
-			}
-
-			return nil
+			mu.Lock()
+			resp[host] = reachable
+			mu.Unlock()
 		})
 	}
-	if err := grp.Wait(); err != nil {
-		return nil, fmt.Errorf("failed to ping: %w", err)
-	}
-	close(ch)
-
-	// Collect all successful results
-	resp := make(map[string]bool)
-	for host := range ch {
-		resp[host] = true
-	}
+	wg.Wait()
 
 	return resp, nil
+}
+
+// pingHost reports whether host answered every probe.
+func (p *ping) pingHost(ctx context.Context, host string) bool {
+	logger := p.logger.With(zap.String("host", host))
+
+	pinger, err := pingtool.NewPinger(host)
+	if err != nil {
+		logger.With(zap.Error(err)).Warn("Failed to create pinger")
+		return false
+	}
+	pinger.SetPrivileged(true)
+	pinger.Count = 3
+	pinger.Timeout = 5 * time.Second
+	if err := pinger.RunWithContext(ctx); err != nil {
+		logger.With(zap.Error(err)).Warn("Failed to ping host")
+		return false
+	}
+
+	stat := pinger.Statistics()
+
+	return stat.PacketsSent == stat.PacketsRecv
 }
