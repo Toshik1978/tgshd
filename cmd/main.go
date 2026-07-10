@@ -139,6 +139,14 @@ func newGammuDB(lc fx.Lifecycle, cfg *config) (*sql.DB, error) {
 	if err != nil {
 		return nil, fmt.Errorf("failed to open gammu database: %w", err)
 	}
+
+	// Bound the pool: SMS traffic is low-volume, so a small cap plus a
+	// lifetime ceiling keeps stale Postgres connections from lingering in a
+	// long-running daemon.
+	db.SetMaxOpenConns(4)
+	db.SetMaxIdleConns(2)
+	db.SetConnMaxLifetime(5 * time.Minute)
+
 	lc.Append(fx.Hook{
 		OnStop: func(_ context.Context) error {
 			return db.Close()
