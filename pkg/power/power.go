@@ -4,10 +4,16 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	nut "github.com/robbiet480/go.nut"
 	"go.uber.org/zap"
 )
+
+// voltageTimeout bounds a single UPS read. go.nut dials over TCP without a
+// deadline, so a black-holed NUT host would otherwise hang the /power handler
+// until the OS connect timeout (minutes).
+const voltageTimeout = 15 * time.Second
 
 type power struct {
 	logger   *zap.Logger
@@ -36,7 +42,34 @@ func (p *power) Valid() bool {
 }
 
 // Voltage retrieve current UPS voltage.
-func (p *power) Voltage(_ context.Context) (float64, error) {
+func (p *power) Voltage(ctx context.Context) (float64, error) {
+	ctx, cancel := context.WithTimeout(ctx, voltageTimeout)
+	defer cancel()
+
+	type result struct {
+		voltage float64
+		err     error
+	}
+	// Buffered so the goroutine never blocks on send even after we return on
+	// ctx.Done(). go.nut has no cancellation support, so the read runs to
+	// completion in the background and its result is discarded on timeout.
+	ch := make(chan result, 1)
+	go func() {
+		voltage, err := p.readVoltage()
+		ch <- result{voltage: voltage, err: err}
+	}()
+
+	select {
+	case <-ctx.Done():
+		return 0, fmt.Errorf("failed to read ups voltage: %w", ctx.Err())
+	case r := <-ch:
+		return r.voltage, r.err
+	}
+}
+
+// readVoltage performs the blocking NUT read. It has no cancellation because
+// go.nut owns the TCP connection; Voltage wraps it to honor ctx.
+func (p *power) readVoltage() (float64, error) {
 	ups, client, err := p.connect()
 	if err != nil {
 		return 0, fmt.Errorf("failed connect to ups: %w", err)
