@@ -174,8 +174,3 @@ func TestOnStopTelegramError(t *testing.T) {
 		t.Fatal("expected an error when Telegram.Stop fails")
 	}
 }
-
-func TestBootstrap(_ *testing.T) {
-	app := newTestApplication(&fakeConsumer{}, nil)
-	app.Bootstrap() // no-op, exercised for coverage.
-}

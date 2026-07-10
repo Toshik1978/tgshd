@@ -74,9 +74,6 @@ func (a *Application) OnStop(ctx context.Context, cancel context.CancelFunc) err
 	return nil
 }
 
-func (a *Application) Bootstrap() {
-}
-
 func (a *Application) onStart(ctx context.Context) error {
 	scheduler, err := gocron.NewScheduler()
 	if err != nil {

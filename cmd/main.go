@@ -42,7 +42,8 @@ func main() {
 		configuration(),
 		commandHandlers(),
 		fx.Provide(newApplication),
-		fx.Invoke(register),
+		// Force construction of *Application so its lifecycle hook registers.
+		fx.Invoke(func(*app.Application) {}),
 		fx.ErrorHook(&errorHandler{}),
 		fx.WithLogger(func(logger *zap.Logger) fxevent.Logger {
 			return &fxevent.ZapLogger{Logger: logger}
@@ -296,11 +297,6 @@ func newApplication(lc fx.Lifecycle, p app.ApplicationParams) *app.Application {
 	})
 
 	return a
-}
-
-// register bootstrap application.
-func register(a *app.Application) {
-	a.Bootstrap()
 }
 
 // errorHandler is an error handler for fx.
