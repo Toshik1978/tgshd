@@ -72,7 +72,11 @@ func (c *consumer) Start(_ context.Context) error {
 }
 
 func (c *consumer) handleCommands(handlers map[string]Handler, ctx telebot.Context) error {
-	if handler, ok := handlers[ctx.Text()]; ok {
+	fields := strings.Fields(ctx.Text())
+	if len(fields) == 0 {
+		return nil
+	}
+	if handler, ok := handlers[fields[0]]; ok {
 		return c.handleCommand(handler, ctx)
 	}
 	return nil
