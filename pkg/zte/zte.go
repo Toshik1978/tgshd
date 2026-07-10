@@ -1,6 +1,7 @@
 package zte
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -8,6 +9,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"time"
 
 	"go.uber.org/zap"
 	"resty.dev/v3"
@@ -24,6 +26,11 @@ const (
 	Success = "success"
 
 	goformID = "goformId"
+
+	// requestTimeout bounds every HTTP call to the modem. Its embedded web
+	// server can stall indefinitely, so without this a single hung request
+	// would park the SMS worker or a command handler forever.
+	requestTimeout = 30 * time.Second
 )
 
 // Connection manages a ZTE MC888 device connection.
@@ -43,13 +50,13 @@ type Connection struct {
 func NewConnection(logger *zap.Logger, host, password string) (*Connection, error) {
 	conn := &Connection{
 		logger:   logger,
-		client:   resty.New().SetBaseURL("http://" + host).SetLogger(newLogger(logger)),
+		client:   resty.New().SetBaseURL("http://" + host).SetTimeout(requestTimeout).SetLogger(newLogger(logger)),
 		referer:  "http://" + host + "/",
 		password: password,
 	}
 
 	// Initialize some persistent data.
-	if err := conn.parseDeviceVersion(); err != nil {
+	if err := conn.parseDeviceVersion(context.Background()); err != nil {
 		return nil, fmt.Errorf("failed to initialize: %w", err)
 	}
 
@@ -57,28 +64,28 @@ func NewConnection(logger *zap.Logger, host, password string) (*Connection, erro
 }
 
 // SetBearer sets the bearer preferences for the network.
-func (c *Connection) SetBearer(pref Bearer) error {
-	if err := c.login(); err != nil {
+func (c *Connection) SetBearer(ctx context.Context, pref Bearer) error {
+	if err := c.login(ctx); err != nil {
 		return fmt.Errorf("failed to login: %w", err)
 	}
-	defer func() { _ = c.logout() }()
+	defer func() { _ = c.logout(ctx) }()
 
-	ad, err := c.ad()
+	ad, err := c.ad(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to set bearer: %w", err)
 	}
 
-	return c.bearerRequest(pref, ad)
+	return c.bearerRequest(ctx, pref, ad)
 }
 
 // AllSms gets all SMS on the device.
-func (c *Connection) AllSms(onlyUnread bool) ([]Sms, error) {
-	if err := c.login(); err != nil {
+func (c *Connection) AllSms(ctx context.Context, onlyUnread bool) ([]Sms, error) {
+	if err := c.login(ctx); err != nil {
 		return nil, fmt.Errorf("failed to login: %w", err)
 	}
-	defer func() { _ = c.logout() }()
+	defer func() { _ = c.logout(ctx) }()
 
-	messages, err := c.smsRequest(0, 500)
+	messages, err := c.smsRequest(ctx, 0, 500)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get all sms: %w", err)
 	}
@@ -101,13 +108,13 @@ func (c *Connection) AllSms(onlyUnread bool) ([]Sms, error) {
 //
 // Method always returns the list of SMS if we could read them.
 // But it can have an error at the same time if we didn't read/delete successfully.
-func (c *Connection) ReadSms(del bool) ([]Sms, error) {
-	if err := c.login(); err != nil {
+func (c *Connection) ReadSms(ctx context.Context, del bool) ([]Sms, error) {
+	if err := c.login(ctx); err != nil {
 		return nil, fmt.Errorf("failed to login: %w", err)
 	}
-	defer func() { _ = c.logout() }()
+	defer func() { _ = c.logout(ctx) }()
 
-	messages, err := c.smsRequest(0, 500)
+	messages, err := c.smsRequest(ctx, 0, 500)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get all sms: %w", err)
 	}
@@ -127,21 +134,21 @@ func (c *Connection) ReadSms(del bool) ([]Sms, error) {
 	}
 
 	// Mark them read or delete.
-	ad, err := c.ad()
+	ad, err := c.ad(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read/delete sms: %w", err)
 	}
 	if del {
-		return l, c.smsDeleteRequest(ids, ad)
+		return l, c.smsDeleteRequest(ctx, ids, ad)
 	}
 
-	return l, c.smsReadRequest(ids, ad)
+	return l, c.smsReadRequest(ctx, ids, ad)
 }
 
 // parseDeviceVersion parses the ZTE device version.
-func (c *Connection) parseDeviceVersion() error {
+func (c *Connection) parseDeviceVersion(ctx context.Context) error {
 	deviceVersion := &DeviceVersionResponse{}
-	r, err := c.request(false).
+	r, err := c.request(ctx, false).
 		SetQueryParams(map[string]string{
 			"cmd":        "Language,cr_version,wa_inner_version",
 			"multi_data": "1",
@@ -159,15 +166,15 @@ func (c *Connection) parseDeviceVersion() error {
 }
 
 // Login logs in to the ZTE device.
-func (c *Connection) login() error {
-	if err := c.parseDeviceVersion(); err != nil {
+func (c *Connection) login(ctx context.Context) error {
+	if err := c.parseDeviceVersion(ctx); err != nil {
 		return fmt.Errorf("failed to login: %w", err)
 	}
-	ld, err := c.ld()
+	ld, err := c.ld(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to login: %w", err)
 	}
-	cookie, err := c.loginRequest(c.calculatePassword(ld))
+	cookie, err := c.loginRequest(ctx, c.calculatePassword(ld))
 	if err != nil {
 		return fmt.Errorf("failed to login: %w", err)
 	}
@@ -177,20 +184,20 @@ func (c *Connection) login() error {
 }
 
 // Logout logs out from the ZTE device.
-func (c *Connection) logout() error {
-	ad, err := c.ad()
+func (c *Connection) logout(ctx context.Context) error {
+	ad, err := c.ad(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to logout: %w", err)
 	}
-	return c.logoutRequest(ad)
+	return c.logoutRequest(ctx, ad)
 }
 
 // ad calculates the current AD value.
-func (c *Connection) ad() (string, error) {
+func (c *Connection) ad(ctx context.Context) (string, error) {
 	if c.crVersion == "" && c.waInnerVersion == "" {
 		return "", errors.New("not logged in")
 	}
-	rd, err := c.rd()
+	rd, err := c.rd(ctx)
 	if err != nil {
 		return "", fmt.Errorf("failed to get RD value: %w", err)
 	}
@@ -199,26 +206,26 @@ func (c *Connection) ad() (string, error) {
 }
 
 // ld retrieves the LD value from the ZTE device.
-func (c *Connection) ld() (string, error) {
+func (c *Connection) ld(ctx context.Context) (string, error) {
 	ld := &LDResponse{}
-	if err := c.xd(ld, "LD"); err != nil {
+	if err := c.xd(ctx, ld, "LD"); err != nil {
 		return "", fmt.Errorf("get LD failed: %w", err)
 	}
 	return ld.LD, nil
 }
 
 // rd retrieves the RD value from the ZTE device.
-func (c *Connection) rd() (string, error) {
+func (c *Connection) rd(ctx context.Context) (string, error) {
 	rd := &RDResponse{}
-	if err := c.xd(rd, "RD"); err != nil {
+	if err := c.xd(ctx, rd, "RD"); err != nil {
 		return "", fmt.Errorf("get RD failed: %w", err)
 	}
 	return rd.RD, nil
 }
 
 // xd is a generic logic to get LD or RD.
-func (c *Connection) xd(result any, cmd string) error {
-	r, err := c.request(false).
+func (c *Connection) xd(ctx context.Context, result any, cmd string) error {
+	r, err := c.request(ctx, false).
 		SetQueryParam("cmd", cmd).
 		SetResult(result).
 		Get(GetCmd)
@@ -243,9 +250,9 @@ func (c *Connection) calculateAD(rd string) string {
 }
 
 // loginRequest sends a login request to the ZTE device.
-func (c *Connection) loginRequest(hash string) (*http.Cookie, error) {
+func (c *Connection) loginRequest(ctx context.Context, hash string) (*http.Cookie, error) {
 	result := &Response{}
-	r, err := c.request(true).
+	r, err := c.request(ctx, true).
 		SetFormData(map[string]string{
 			goformID:   "LOGIN",
 			"password": hash,
@@ -270,9 +277,9 @@ func (c *Connection) loginRequest(hash string) (*http.Cookie, error) {
 }
 
 // logoutRequest sends a logout request to the ZTE device.
-func (c *Connection) logoutRequest(ad string) error {
+func (c *Connection) logoutRequest(ctx context.Context, ad string) error {
 	result := &Response{}
-	r, err := c.request(true).
+	r, err := c.request(ctx, true).
 		SetFormData(map[string]string{
 			goformID: "LOGOUT",
 			"AD":     ad,
@@ -290,9 +297,9 @@ func (c *Connection) logoutRequest(ad string) error {
 }
 
 // bearerRequest sends a bearer request to the ZTE device.
-func (c *Connection) bearerRequest(pref Bearer, ad string) error {
+func (c *Connection) bearerRequest(ctx context.Context, pref Bearer, ad string) error {
 	result := &Response{}
-	r, err := c.request(true).
+	r, err := c.request(ctx, true).
 		SetFormData(map[string]string{
 			goformID:           "SET_BEARER_PREFERENCE",
 			"BearerPreference": string(pref),
@@ -311,9 +318,9 @@ func (c *Connection) bearerRequest(pref Bearer, ad string) error {
 }
 
 // smsRequest gets all SMSs.
-func (c *Connection) smsRequest(page, size int) (*SmsList, error) {
+func (c *Connection) smsRequest(ctx context.Context, page, size int) (*SmsList, error) {
 	result := &SmsList{}
-	r, err := c.request(false).
+	r, err := c.request(ctx, false).
 		SetQueryParam("cmd", "sms_data_total").
 		SetQueryParam("page", strconv.Itoa(page)).
 		SetQueryParam("data_per_page", strconv.Itoa(size)).
@@ -330,13 +337,13 @@ func (c *Connection) smsRequest(page, size int) (*SmsList, error) {
 }
 
 // smsReadRequest marks SMSs as READ.
-func (c *Connection) smsReadRequest(ids []string, ad string) error {
+func (c *Connection) smsReadRequest(ctx context.Context, ids []string, ad string) error {
 	if len(ids) == 0 {
 		return nil
 	}
 
 	result := &Response{}
-	r, err := c.request(true).
+	r, err := c.request(ctx, true).
 		SetFormData(map[string]string{
 			goformID: "SET_MSG_READ",
 			"msg_id": strings.Join(ids, ";") + ";",
@@ -356,13 +363,13 @@ func (c *Connection) smsReadRequest(ids []string, ad string) error {
 }
 
 // smsDeleteRequest delete SMSs.
-func (c *Connection) smsDeleteRequest(ids []string, ad string) error {
+func (c *Connection) smsDeleteRequest(ctx context.Context, ids []string, ad string) error {
 	if len(ids) == 0 {
 		return nil
 	}
 
 	result := &Response{}
-	r, err := c.request(true).
+	r, err := c.request(ctx, true).
 		SetFormData(map[string]string{
 			goformID: "DELETE_SMS",
 			"msg_id": strings.Join(ids, ";") + ";",
@@ -381,8 +388,9 @@ func (c *Connection) smsDeleteRequest(ids []string, ad string) error {
 }
 
 // request generates the basic resty request object.
-func (c *Connection) request(post bool) *resty.Request {
+func (c *Connection) request(ctx context.Context, post bool) *resty.Request {
 	r := c.client.R().
+		SetContext(ctx).
 		SetResponseForceContentType("application/json").
 		SetHeader("Origin", c.referer).
 		SetHeader("Referer", c.referer)

@@ -17,7 +17,7 @@ type fakeZTE struct {
 	err        error
 }
 
-func (f *fakeZTE) SetBearer(pref zte.Bearer) error {
+func (f *fakeZTE) SetBearer(_ context.Context, pref zte.Bearer) error {
 	f.called = true
 	f.lastBearer = pref
 	return f.err

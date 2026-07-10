@@ -11,7 +11,7 @@ import (
 )
 
 type ZTE interface {
-	SetBearer(pref zte.Bearer) error
+	SetBearer(ctx context.Context, pref zte.Bearer) error
 }
 
 type networkCommand struct {
@@ -44,7 +44,7 @@ func (c *networkCommand) Enabled() bool {
 func (c *networkCommand) Handle(ctx context.Context, senderID int64, _ string) error {
 	c.logger.Debug("Network command received")
 
-	if err := c.conn.SetBearer(c.commandToBearer()); err != nil {
+	if err := c.conn.SetBearer(ctx, c.commandToBearer()); err != nil {
 		return fmt.Errorf("failed to set bearer: %w", err)
 	}
 

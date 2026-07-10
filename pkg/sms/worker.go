@@ -23,7 +23,7 @@ type Publisher interface {
 }
 
 type ZTE interface {
-	ReadSms(del bool) ([]zte.Sms, error)
+	ReadSms(ctx context.Context, del bool) ([]zte.Sms, error)
 }
 
 // NewWorker instantiate new SMS worker.
@@ -45,7 +45,7 @@ func (w *worker) Duration() time.Duration {
 }
 
 func (w *worker) Do(ctx context.Context) error {
-	messages, err := w.conn.ReadSms(true)
+	messages, err := w.conn.ReadSms(ctx, true)
 	errs := make([]error, 0, len(messages))
 	errs = append(errs, err)
 

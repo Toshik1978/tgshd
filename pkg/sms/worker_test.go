@@ -42,7 +42,7 @@ type fakeZTE struct {
 	err error
 }
 
-func (z *fakeZTE) ReadSms(_ bool) ([]zte.Sms, error) {
+func (z *fakeZTE) ReadSms(_ context.Context, _ bool) ([]zte.Sms, error) {
 	return z.sms, z.err
 }
 
