@@ -381,7 +381,7 @@ func (c *Connection) smsDeleteRequest(ids []string, ad string) error {
 // request generates the basic resty request object.
 func (c *Connection) request(post bool) *resty.Request {
 	r := c.client.R().
-		SetForceResponseContentType("application/json").
+		SetResponseForceContentType("application/json").
 		SetHeader("Origin", c.referer).
 		SetHeader("Referer", c.referer)
 
