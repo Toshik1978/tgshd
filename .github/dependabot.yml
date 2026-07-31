@@ -26,6 +26,44 @@ updates:
     commit-message:
       prefix: ci
       include: scope
+
+    # The actions listed below are pinned to a moving major tag (`@v2`, `@v7`),
+    # not to an exact `x.y.z`. Upstream repoints those tags on each release, so
+    # minor and patch updates arrive without a commit here and a PR proposing
+    # one is at best a no-op.
+    #
+    # At worst it is a regression. Dependabot does not know `@v4` is an alias:
+    # it reads the ref as the literal version "4", compares 4 < 4.5.2, and
+    # proposes `@v4` -> `@v4.5.2`. That converts a self-updating alias into a
+    # frozen pin needing a PR for every future patch, and if `v4` already points
+    # past v4.5.2 it moves the action *backwards* while reading as an upgrade.
+    #
+    # Major bumps are deliberately still proposed: those genuinely require a
+    # commit here, because `@v4` does not become `@v7` on its own.
+    #
+    # This is an explicit list rather than `"*"` because one action in this repo
+    # IS pinned to an exact version and DOES need minor/patch PRs:
+    #   - irongut/CodeCoverageSummary@v1.3.0 — upstream publishes no `v1` alias
+    #     (its tags are `v1.0`…`v1.3.0`), so the exact pin is the only option.
+    #
+    # ADD EVERY NEW MAJOR-TAGGED ACTION TO THIS LIST, or it will start proposing
+    # the bad bump described above.
+    ignore:
+      - dependency-name: "actions/checkout"
+        update-types: ["version-update:semver-minor", "version-update:semver-patch"]
+      - dependency-name: "actions/github-script"
+        update-types: ["version-update:semver-minor", "version-update:semver-patch"]
+      - dependency-name: "actions/setup-go"
+        update-types: ["version-update:semver-minor", "version-update:semver-patch"]
+      - dependency-name: "go-task/setup-task"
+        update-types: ["version-update:semver-minor", "version-update:semver-patch"]
+      - dependency-name: "golangci/golangci-lint-action"
+        update-types: ["version-update:semver-minor", "version-update:semver-patch"]
+      - dependency-name: "marocchino/sticky-pull-request-comment"
+        update-types: ["version-update:semver-minor", "version-update:semver-patch"]
+
+    # Still covers minor/patch: those survive the ignore above only for the
+    # exact-pinned action, and it should ride in the same grouped PR.
     groups:
       github-actions:
         patterns:
