@@ -9,7 +9,7 @@ require (
 	github.com/joho/godotenv v1.5.1
 	github.com/prometheus-community/pro-bing v0.9.1
 	github.com/robbiet480/go.nut v0.0.0-20240622015809-60e196249c53
-	github.com/showwin/speedtest-go v1.7.10
+	github.com/showwin/speedtest-go v1.7.11
 	go.uber.org/fx v1.24.0
 	go.uber.org/zap v1.28.0
 	golang.org/x/sync v0.22.0
