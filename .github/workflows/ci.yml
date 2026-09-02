@@ -13,11 +13,23 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v7
 
+      # go-version-file, not a literal: go.mod already states the floor, and a
+      # second copy in this file could only fall out of step with it. Every job
+      # reads the same source, so lint, test and build cannot disagree.
+      #
+      # check-latest costs roughly 20s a job and buys the patch version. go.mod
+      # names a minor with no patch, and without the flag the action resolves
+      # that against the runner image's pre-baked tool cache and stops —
+      # `Found in cache @ /opt/hostedtoolcache/go/1.27.x/x64` — never asking
+      # whether a newer patch exists. That pins the toolchain to whatever
+      # GitHub last baked into the image, which this repository cannot see or
+      # influence, and stdlib security fixes land in those patches.
       - name: Setup Golang
         uses: actions/setup-go@v7
         with:
-          go-version: '1.27'
+          go-version-file: go.mod
           cache: true
+          check-latest: true
 
       - name: Run Golang linter
         uses: golangci/golangci-lint-action@v9
@@ -37,8 +49,9 @@ jobs:
       - name: Setup Golang
         uses: actions/setup-go@v7
         with:
-          go-version: '1.27'
+          go-version-file: go.mod
           cache: true
+          check-latest: true
 
       - name: Install Task
         uses: go-task/setup-task@v2
@@ -198,8 +211,9 @@ jobs:
       - name: Setup Golang
         uses: actions/setup-go@v7
         with:
-          go-version: '1.27'
+          go-version-file: go.mod
           cache: true
+          check-latest: true
 
       - name: Install Task
         uses: go-task/setup-task@v2
