@@ -32,7 +32,7 @@ that feature is simply inactive and the daemon still runs.
 
 ## Requirements
 
-- **Go 1.26+** (the binary compiles with `CGO_ENABLED=0`)
+- **Go 1.27+** (the binary compiles with `CGO_ENABLED=0`)
 - **[go-task](https://taskfile.dev)** — all automation is driven through `Taskfile.yml`
 - Optional, per feature: a [NUT](https://networkupstools.org/) server (power),
   a ZTE MC888 modem (network switching + incoming SMS), and a

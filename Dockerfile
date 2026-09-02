@@ -2,7 +2,7 @@
 # Pin the builder to the native build host ($BUILDPLATFORM) and cross-compile to
 # the requested target arch. CGO is disabled, so Go cross-compiles trivially and
 # we avoid slow QEMU emulation when producing multi-arch images.
-FROM --platform=$BUILDPLATFORM golang:1.26-alpine3.23 AS builder
+FROM --platform=$BUILDPLATFORM golang:1.27-alpine3.23 AS builder
 
 # libcap provides setcap, used below to grant the ICMP capability to the binary.
 RUN apk add --no-cache libcap

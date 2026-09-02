@@ -1,5 +1,5 @@
 [tools]
-go = "1.26"
+go = "1.27"
 # golangci-lint floats on purpose, matching the workflow. A version pin on one
 # side only drifts against the other: the day they disagree, the gate goes red
 # locally while CI stays green (or the reverse) on code nobody changed.

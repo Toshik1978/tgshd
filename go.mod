@@ -1,6 +1,6 @@
 module github.com/Toshik1978/tgshd
 
-go 1.26
+go 1.27
 
 require (
 	github.com/caarlos0/env/v11 v11.4.1
