@@ -255,7 +255,15 @@ formatters:
         - prefix(github.com/Toshik1978/tgshd)
     gofumpt:
       module-path: github.com/Toshik1978/tgshd
-      extra-rules: true
+      # Named individually, not `extra-rules: true`. That flag is deprecated in
+      # golangci-lint 2.13, and its meaning widened underneath this config on
+      # the way there: it used to mean group-params alone, and now enables every
+      # extra rule gofumpt has. A key that lists what it wants cannot silently
+      # acquire a fourth rule the same way.
+      extra:
+        group-params: true
+        clothe-returns: true
+        balance-calls: true
     golines:
       max-len: 120
       shorten-comments: true
