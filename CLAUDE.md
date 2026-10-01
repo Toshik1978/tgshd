@@ -92,8 +92,7 @@ These are non-negotiable for changes in this repo.
 3. **New third-party dependencies require approval.** State the package, what it
    solves, and why the standard library is insufficient before adding it.
 4. **Commit style.** Plain, capitalized imperative subjects (e.g. `Add gammu SMS
-   builder`). No conventional-commit prefixes and **no `Co-Authored-By` or other
-   AI-attribution trailers**. Work is committed directly on `main` in this repo.
+   builder`). No conventional-commit prefixes. Work is committed directly on `main` in this repo.
 5. **`CGO_ENABLED=0`.** The Docker image is distroless and static; do not
    introduce a CGO dependency.
 
