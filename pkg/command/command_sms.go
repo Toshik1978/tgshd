@@ -56,18 +56,15 @@ func (c *smsCommand) Handle(ctx context.Context, senderID int64, cmd string) err
 	}
 
 	if err := c.sender.Publish(ctx, phone, msg); err != nil {
-		if replyErr := c.publisher.Publish(ctx, senderID,
-			"Failed to send SMS: "+html.EscapeString(err.Error())); replyErr != nil {
+		reply := "Failed to send SMS: " + html.EscapeString(err.Error())
+		if replyErr := c.publisher.Publish(ctx, senderID, reply); replyErr != nil {
 			c.logger.With(zap.Error(replyErr)).Debug("Failed to send /sms failure reply")
 		}
 		return fmt.Errorf("failed to send sms: %w", err)
 	}
 
-	if err := c.publisher.Publish(
-		ctx,
-		senderID,
-		fmt.Sprintf("SMS queued for <b>%s</b>", html.EscapeString(phone)),
-	); err != nil {
+	reply := fmt.Sprintf("SMS queued for <b>%s</b>", html.EscapeString(phone))
+	if err := c.publisher.Publish(ctx, senderID, reply); err != nil {
 		return fmt.Errorf("failed to publish reply: %w", err)
 	}
 

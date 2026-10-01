@@ -60,8 +60,9 @@ func (r *repository) StoreMultipart(ctx context.Context, phone string, parts []M
 	}
 
 	for i := 1; i < len(parts); i++ {
-		if _, err := tx.ExecContext(ctx, insertOutboxMultipart,
-			id, i+1, parts[i].UDH, parts[i].Text, parts[i].Coding); err != nil {
+		_, err := tx.ExecContext(ctx, insertOutboxMultipart,
+			id, i+1, parts[i].UDH, parts[i].Text, parts[i].Coding)
+		if err != nil {
 			return fmt.Errorf("failed to add outbox multipart item: %w", err)
 		}
 	}
@@ -74,9 +75,11 @@ func (r *repository) StoreMultipart(ctx context.Context, phone string, parts []M
 }
 
 func storeOutbox(ctx context.Context, db execer, multipart bool, phone string, part MessagePart) error {
-	if _, err := db.ExecContext(ctx, insertOutbox,
-		creatorID, multipart, phone, part.UDH, part.Text, part.Coding); err != nil {
+	_, err := db.ExecContext(ctx, insertOutbox,
+		creatorID, multipart, phone, part.UDH, part.Text, part.Coding)
+	if err != nil {
 		return fmt.Errorf("failed to add outbox item: %w", err)
 	}
+
 	return nil
 }
