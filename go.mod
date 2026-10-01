@@ -5,14 +5,14 @@ go 1.27
 require (
 	github.com/caarlos0/env/v11 v11.4.1
 	github.com/go-co-op/gocron/v2 v2.22.0
-	github.com/jackc/pgx/v5 v5.10.0
+	github.com/jackc/pgx/v5 v5.11.0
 	github.com/joho/godotenv v1.5.1
 	github.com/prometheus-community/pro-bing v0.9.1
 	github.com/robbiet480/go.nut v0.0.0-20240622015809-60e196249c53
-	github.com/showwin/speedtest-go v1.8.2
+	github.com/showwin/speedtest-go v1.8.3
 	go.uber.org/fx v1.24.0
 	go.uber.org/zap v1.28.0
-	golang.org/x/sync v0.22.0
+	golang.org/x/sync v0.23.0
 	gopkg.in/telebot.v4 v4.0.0-beta.10
 	resty.dev/v3 v3.0.0-rc.3
 )
