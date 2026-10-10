@@ -1,20 +1,45 @@
+# Install with `pre-commit install`. That alone only wires the pre-commit
+# stage, which would leave the pre-push hooks dormant — declaring the hook
+# types here is what makes one command enough.
+#
+# No commit-msg hook: this repository uses plain imperative subjects, not
+# conventional-commit prefixes (see CLAUDE.md).
+default_install_hook_types: [pre-commit, pre-push]
+
 repos:
 - repo: local
   hooks:
-    - id: linters
-      name: Run linters
-      types_or: [go]
-      pass_filenames: false
+    # Each gate at the cheapest stage that still catches it. Cheap enough for
+    # every commit; a nuisance to discover later.
+    - id: golangci-lint-fmt
+      name: golangci-lint fmt --diff
+      entry: golangci-lint fmt --diff
       language: system
+      types: [go]
+      pass_filenames: false
+      stages:
+        - pre-commit
+
+    # Pre-push, not earlier: these are the full CI gates, and pushing is the
+    # first point at which anyone else sees the commits. Putting them on
+    # pre-commit is the surest way to breed the `--no-verify` habit that makes
+    # the hooks worthless.
+    #
+    # Not filtered by file type: a push touching only go.mod, go.sum or
+    # .golangci.yml can break the build just as well, and `types: [go]` would
+    # skip exactly those.
+    - id: lint
+      name: task lint
       entry: task lint
+      language: system
+      pass_filenames: false
       stages:
         - pre-push
 
     - id: tests
-      name: Run tests
-      types_or: [go]
-      pass_filenames: false
-      language: system
+      name: task test
       entry: task test
+      language: system
+      pass_filenames: false
       stages:
         - pre-push
