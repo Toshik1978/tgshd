@@ -1,0 +1,91 @@
+package runner
+
+import (
+	"context"
+	"time"
+
+	"go.uber.org/zap"
+
+	"github.com/Toshik1978/tgshd/pkg/health"
+	"github.com/Toshik1978/tgshd/pkg/health/notify"
+	"github.com/Toshik1978/tgshd/pkg/health/store"
+)
+
+// interruptedSaveTimeout bounds the checkpoint that records the fixes of a
+// tick cut short by shutdown.
+const interruptedSaveTimeout = 5 * time.Second
+
+// Fix is one fix action a check took (e.g. the command check restarting a
+// container). Every fix is recorded in the alert log as kind "fix"; it is
+// pushed only when Send is set, on Mode (the notifier's default when empty).
+type Fix struct {
+	At    time.Time
+	Check string
+	Key   string
+	Text  string
+	Send  bool
+	Mode  health.Mode
+}
+
+// FixSource hands over the fix actions a check took since the last call.
+type FixSource interface {
+	TakeFixes() []Fix
+}
+
+// takeFixes collects the fixes made by this tick's runs (and by runs that
+// finished late, after their deadline) into the cycle.
+func (r *Runner) takeFixes(c *cycle) {
+	for _, s := range r.opts.Fixes {
+		c.fixes = append(c.fixes, s.TakeFixes()...)
+	}
+}
+
+// dispatchFixes pushes the fixes that ask for it on their mode.
+func (r *Runner) dispatchFixes(ctx context.Context, c *cycle) {
+	for _, f := range c.fixes {
+		if !f.Send {
+			continue
+		}
+		// Notify queues a failed delivery and retries it; its error is always nil.
+		_ = r.notifier.Notify(ctx, notify.Message{
+			Kind: notify.KindEvent, Check: f.Check, Key: f.Key, Text: f.Text, Mode: notify.Mode(f.Mode),
+		})
+	}
+}
+
+// saveInterruptedFixes records the fixes of a tick cut short by shutdown: a
+// fix has happened, so it must reach the alert log although the rest of the
+// tick is dropped. Nothing is sent. The best-effort checkpoint keeps the
+// conditions as they were before the tick's runs (none of its results was
+// dispatched) and leaves the checks' own state as last saved, so no result of
+// the tick is lost unseen.
+func (r *Runner) saveInterruptedFixes(ctx context.Context, c *cycle, loaded bool) {
+	r.takeFixes(c)
+	if len(c.fixes) == 0 || r.opts.Store == nil {
+		return
+	}
+	r.pendingAlerts = append(r.pendingAlerts, fixRecords(c)...)
+	if !loaded {
+		return
+	}
+	alerts, samples := r.pendingAlerts, r.pendingSamples
+	r.pendingAlerts, r.pendingSamples = nil, nil
+
+	saveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), interruptedSaveTimeout)
+	defer cancel()
+
+	st := store.State{Conditions: c.before, RateMarks: r.marks.Export(), Queue: r.notifier.Export()}
+	if err := r.opts.Store.Checkpoint(saveCtx, st, alerts, samples); err != nil {
+		r.opts.Logger.Warn("Cannot record the fixes of an interrupted health tick", zap.Error(err))
+	}
+}
+
+// fixRecords returns the alert-log records of the cycle's fixes.
+func fixRecords(c *cycle) []store.Alert {
+	out := make([]store.Alert, 0, len(c.fixes))
+	for _, f := range c.fixes {
+		out = append(out, store.Alert{At: f.At, Kind: store.KindFix, Check: f.Check, Key: f.Key, Text: f.Text})
+	}
+
+	return out
+}

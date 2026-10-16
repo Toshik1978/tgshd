@@ -235,7 +235,7 @@ func TestRunChecksRunsEveryCheckOnceInOrder(t *testing.T) {
 		buf bytes.Buffer
 		tl  tally
 	)
-	if interrupted := runChecks(t.Context(), &buf, checks, &tl); interrupted {
+	if interrupted := runChecks(t.Context(), &buf, checks, nil, &tl); interrupted {
 		t.Fatal("nothing interrupted the run")
 	}
 
@@ -502,6 +502,10 @@ func TestCollectCheckSetsUsesTheDaemonProviders(t *testing.T) {
 		Disks:        &hcfg.Disks{},
 		Temperatures: &hcfg.Temperatures{},
 		Kernel:       &hcfg.Kernel{},
+		Containers:   &hcfg.Containers{},
+		HTTP:         []hcfg.HTTP{{Name: "app", URL: "https://app.example.org/"}},
+		Freshness:    []hcfg.Freshness{{Name: "backup", Path: "/var/lib/example/backup.stamp"}},
+		Command:      []hcfg.Command{{Name: "queue", Run: []string{"/usr/local/bin/queue-ok"}}},
 	}}
 	cfg := &config{NutIP: "192.0.2.10", NutName: "ups", NutUser: "monitor", NutPassword: "secret"}
 
@@ -516,11 +520,16 @@ func TestCollectCheckSetsUsesTheDaemonProviders(t *testing.T) {
 	for _, c := range set.Checks {
 		names = append(names, c.Name)
 	}
-	if !slices.Equal(names, []string{"disks", "kernel", "network", "temps", "ups"}) || len(set.Errors) != 0 {
+	want := []string{
+		"command/queue", "containers", "disks", "freshness/backup", "http/app", "kernel", "network", "temps", "ups",
+	}
+	if !slices.Equal(names, want) || len(set.Errors) != 0 {
 		t.Fatalf("checks = %v, errors = %+v", names, set.Errors)
 	}
-	if len(set.Persisters) != 3 || set.Drives == nil || len(set.Background) != 1 {
-		t.Fatalf("persisters = %d, drives = %v, background = %d", len(set.Persisters), set.Drives, len(set.Background))
+	// disks, temps, kernel, containers, freshness and command keep state.
+	if len(set.Persisters) != 6 || set.Drives == nil || len(set.Background) != 1 || len(set.Fixes) != 1 {
+		t.Fatalf("persisters = %d, drives = %v, background = %d, fixes = %d",
+			len(set.Persisters), set.Drives, len(set.Background), len(set.Fixes))
 	}
 }
 
@@ -667,7 +676,7 @@ func TestRunChecksStopsWhenInterrupted(t *testing.T) {
 		buf bytes.Buffer
 		tl  tally
 	)
-	if !runChecks(ctx, &buf, checks, &tl) {
+	if !runChecks(ctx, &buf, checks, nil, &tl) {
 		t.Fatal("the run must report the interruption")
 	}
 	if ranLater {

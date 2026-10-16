@@ -50,6 +50,16 @@ that feature is simply inactive and the daemon still runs.
   `/dev/*` and `/dev/kmsg`, so run the daemon as root (the systemd unit below).
   Hardware checks are not supported in the Docker image (distroless, nonroot,
   no `smartctl`/`nvidia-smi`).
+- Health monitoring, service checks: `containers`, the `container` option of an
+  `http` entry and a `command` fix with `restart_container` talk to the Docker
+  Engine API through `/var/run/docker.sock` (or `DOCKER_HOST`), so the daemon
+  needs read/write access to that socket (root, or the `docker` group). Without
+  Docker the daemon still starts; only those Docker-backed checks fail their
+  runs with a checker error. `command` probes and fixes run without a shell;
+  every fix is logged, and a reported fix (`report: alert`) is pushed on the
+  entry's `mode` (`tlg`, `sms` or `tlg-or-sms`).
+  `tgshd check --once` runs the probes but never runs a fix: it prints
+  `WOULD FIX <key>: …` lines instead.
 
 ## Configuration
 

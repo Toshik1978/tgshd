@@ -80,6 +80,9 @@ type Options struct {
 	Drives DriveBook
 	// Persisters keep the checks' own state in the store.
 	Persisters []Persister
+	// Fixes hand over the fix actions the checks took; they are taken after
+	// every tick's runs.
+	Fixes []FixSource
 	// Host prefixes every pushed message.
 	Host string
 	// Mode is the notifier's default delivery mode.
@@ -173,7 +176,11 @@ type cycle struct {
 	now     time.Time
 	alerts  []health.Alert
 	samples []store.SampleRow
+	fixes   []Fix
 	errs    [][2]string // checker errors as key, text
+	// before are the conditions at the start of the tick's runs; kept only
+	// when there are fix sources (see saveInterruptedFixes).
+	before []health.Condition
 }
 
 // New creates a Runner and its notifier and checker errors.
@@ -259,15 +266,22 @@ func (r *Runner) Do(ctx context.Context) error {
 	if loaded {
 		r.restoreSchedule()
 	}
+	if len(r.opts.Fixes) > 0 {
+		c.before = r.engine.Conditions()
+	}
 	if !r.runChecks(ctx, c) {
+		r.saveInterruptedFixes(ctx, c, loaded)
+
 		return fmt.Errorf("health tick interrupted: %w", ctx.Err())
 	}
+	r.takeFixes(c)
 	if loaded {
 		r.runJobs(ctx, c)
 	}
 	// Queued messages (e.g. an outage's PROBLEMs) go before this tick's news.
 	r.notifier.Flush(ctx)
 	r.dispatch(ctx, c)
+	r.dispatchFixes(ctx, c)
 	r.raise(c)
 	err := r.checkpoint(ctx, c, loaded)
 
@@ -557,6 +571,7 @@ func (r *Runner) apply(c *cycle, chk health.Check, res health.CheckResult) {
 func (r *Runner) dispatch(ctx context.Context, c *cycle) {
 	for i := range c.alerts {
 		a := &c.alerts[i]
+		// Notify queues a failed delivery and retries it; its error is always nil.
 		_ = r.notifier.Notify(ctx, notify.Message{
 			Kind:  messageKind(a.Kind),
 			Check: a.Check,
@@ -611,7 +626,8 @@ func (r *Runner) checkpoint(ctx context.Context, c *cycle, loaded bool) error {
 }
 
 // records returns the alert-log records of this tick: clears made since the
-// last tick, the engine's alerts and the checker errors that went out.
+// last tick, the engine's alerts, the fixes and the checker errors that went
+// out.
 func (r *Runner) records(c *cycle) []store.Alert {
 	r.mu.Lock()
 	alerts := r.cleared
@@ -624,6 +640,7 @@ func (r *Runner) records(c *cycle) []store.Alert {
 			At: c.now, Kind: storeKind(a.Kind), Check: a.Check, Key: a.Key, Text: a.Text,
 		})
 	}
+	alerts = append(alerts, fixRecords(c)...)
 	for _, ce := range r.checker.Drain() {
 		alerts = append(alerts, store.Alert{
 			At: ce.At, Kind: store.KindCheckerError, Check: ce.Check, Key: ce.Key, Text: ce.Text,

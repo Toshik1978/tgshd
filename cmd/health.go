@@ -57,6 +57,9 @@ type checkSet struct {
 	// Drives is set by the disks check only; nil otherwise.
 	Drives     runner.DriveBook
 	Background []background
+	// Fixes hand the fix actions of the command checks to the runner (under
+	// check --once: what would have been fixed).
+	Fixes []runner.FixSource
 }
 
 // healthSetup is the outcome of loading the health configuration and claiming
@@ -72,6 +75,9 @@ type healthSetup struct {
 	Store *store.Store
 	// Errors are raised as checker errors at start.
 	Errors []startError
+	// OneShot is set by check --once: checks only report what they would
+	// fix and never act.
+	OneShot bool
 }
 
 // healthParams are the dependencies of the health runner.
@@ -133,6 +139,11 @@ func healthCheckProviders() fx.Option {
 		fx.Annotate(disksChecks, fx.ResultTags(healthCheckGroup)),
 		fx.Annotate(tempsChecks, fx.ResultTags(healthCheckGroup)),
 		fx.Annotate(kernelChecks, fx.ResultTags(healthCheckGroup)),
+		newLazyDocker,
+		fx.Annotate(containersChecks, fx.ResultTags(healthCheckGroup)),
+		fx.Annotate(httpChecks, fx.ResultTags(healthCheckGroup)),
+		fx.Annotate(freshnessChecks, fx.ResultTags(healthCheckGroup)),
+		fx.Annotate(commandChecks, fx.ResultTags(healthCheckGroup)),
 	)
 }
 
@@ -277,6 +288,7 @@ func runnerOptions(
 	opts := runner.Options{
 		Checks:      set.Checks,
 		Persisters:  set.Persisters,
+		Fixes:       set.Fixes,
 		Drives:      set.Drives,
 		BootGrace:   g.BootGrace.Duration(),
 		Concurrency: g.Concurrency,
@@ -350,11 +362,13 @@ func registerStart(
 // first set's that has one (only the disks check does).
 func mergeCheckSets(sets []checkSet) checkSet {
 	var out checkSet
-	for _, s := range sets {
+	for i := range sets {
+		s := &sets[i]
 		out.Checks = append(out.Checks, s.Checks...)
 		out.Errors = append(out.Errors, s.Errors...)
 		out.Persisters = append(out.Persisters, s.Persisters...)
 		out.Background = append(out.Background, s.Background...)
+		out.Fixes = append(out.Fixes, s.Fixes...)
 		if out.Drives == nil && s.Drives != nil {
 			out.Drives = s.Drives
 		}

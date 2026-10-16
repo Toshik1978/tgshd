@@ -474,11 +474,16 @@ func TestRunnerOptions(t *testing.T) {
 		t.Fatal("maintenance lock configured: want a probe")
 	}
 
-	book, p := &fakeDriveBook{}, &fakePersister{}
-	set := checkSet{Checks: checks, Drives: book, Persisters: []runner.Persister{p}}
+	book, p, fixes := &fakeDriveBook{}, &fakePersister{}, &fakeFixSource{}
+	set := checkSet{
+		Checks: checks, Drives: book, Persisters: []runner.Persister{p}, Fixes: []runner.FixSource{fixes},
+	}
 	opts = runnerOptions(hs, d, set, sysfs.NewDefault(), zap.NewNop())
 	if opts.Drives != book || len(opts.Persisters) != 1 || opts.Persisters[0] != p {
 		t.Fatalf("drives = %v, persisters = %v; want the disks book and the persisters", opts.Drives, opts.Persisters)
+	}
+	if len(opts.Fixes) != 1 || opts.Fixes[0] != fixes {
+		t.Fatalf("fixes = %v, want the command checks' fix sources", opts.Fixes)
 	}
 }
 

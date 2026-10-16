@@ -115,7 +115,8 @@ func runCheck(args []string, cio cliIO) int {
 
 // runCheckOnce builds the configured checks with real adapters and runs each
 // once, printing every reading, sample and error, then a summary line. It
-// writes no state, no heartbeat and takes no lock; the stored state is opened
+// takes no fix action (it prints what it would fix), writes no state, no
+// heartbeat and takes no lock; the stored state is opened
 // read-only when it exists. Exit 1 means a configuration or setup error (the
 // checks that could be built still ran); bad verdicts and failed runs exit 0.
 func runCheckOnce(ctx context.Context, cfg *config, cio cliIO) int {
@@ -137,7 +138,9 @@ func runCheckOnce(ctx context.Context, cfg *config, cio cliIO) int {
 		return exitError
 	}
 
-	hs := &healthSetup{Config: hc, Host: hostName(cfg.HostName, os.Hostname), Errors: configErrors(entryErrs)}
+	hs := &healthSetup{
+		Config: hc, Host: hostName(cfg.HostName, os.Hostname), Errors: configErrors(entryErrs), OneShot: true,
+	}
 	closeState := attachState(ctx, hs, cio.stderr)
 	defer closeState()
 
@@ -157,7 +160,7 @@ func runCheckOnce(ctx context.Context, cfg *config, cio cliIO) int {
 	for _, e := range setupErrs {
 		writeError(cio.stdout, e.Key, e.Text, &t)
 	}
-	interrupted := runChecks(ctx, cio.stdout, set.Checks, &t)
+	interrupted := runChecks(ctx, cio.stdout, set.Checks, set.Fixes, &t)
 	fmt.Fprintln(cio.stdout, t)
 
 	switch {
@@ -296,11 +299,14 @@ func collectCheckSets(
 }
 
 // runChecks runs every check once, in order, bounded by its interval like the
-// runner does, and prints its result into t. Quiet windows, the internet gate
-// and dependencies do not apply to a one-shot run. When ctx ends (Ctrl-C) the
+// runner does, and prints its result into t, followed by the fixes it would
+// have taken (one-shot checks never fix). Quiet windows, the internet gate and
+// dependencies do not apply to a one-shot run. When ctx ends (Ctrl-C) the
 // check in flight is reported as interrupted, no further check starts, and
 // interrupted is true.
-func runChecks(ctx context.Context, w io.Writer, checks []health.Check, t *tally) (interrupted bool) {
+func runChecks(
+	ctx context.Context, w io.Writer, checks []health.Check, fixes []runner.FixSource, t *tally,
+) (interrupted bool) {
 	for _, chk := range checks {
 		if ctx.Err() != nil {
 			return true
@@ -311,6 +317,7 @@ func runChecks(ctx context.Context, w io.Writer, checks []health.Check, t *tally
 			res = health.CheckResult{Err: errInterrupted}
 		}
 		writeResult(w, chk.Name, res, t)
+		writeFixes(w, fixes)
 	}
 
 	return ctx.Err() != nil
@@ -337,6 +344,16 @@ func writeResult(w io.Writer, name string, res health.CheckResult, t *tally) {
 	}
 	if res.Err != nil {
 		writeError(w, name+"/run/error", res.Err.Error(), t)
+	}
+}
+
+// writeFixes prints the fixes a one-shot check decided on but did not take.
+// Checks run one at a time, so these are the last check's.
+func writeFixes(w io.Writer, fixes []runner.FixSource) {
+	for _, src := range fixes {
+		for _, f := range src.TakeFixes() {
+			fmt.Fprintf(w, "WOULD FIX %s: %s\n", f.Key, oneLine(f.Text))
+		}
 	}
 }
 
