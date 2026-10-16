@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"sync"
@@ -10,6 +11,7 @@ import (
 	"time"
 
 	"go.uber.org/fx/fxtest"
+	"go.uber.org/zap"
 
 	"github.com/Toshik1978/tgshd/pkg/health"
 	"github.com/Toshik1978/tgshd/pkg/health/check/disks"
@@ -20,6 +22,7 @@ import (
 	"github.com/Toshik1978/tgshd/pkg/host/edac"
 	"github.com/Toshik1978/tgshd/pkg/host/execprobe"
 	"github.com/Toshik1978/tgshd/pkg/host/hwmon"
+	"github.com/Toshik1978/tgshd/pkg/host/journal"
 	"github.com/Toshik1978/tgshd/pkg/host/kmsg"
 	"github.com/Toshik1978/tgshd/pkg/host/nvidia"
 	"github.com/Toshik1978/tgshd/pkg/host/smartctl"
@@ -81,7 +84,7 @@ func TestHardwareChecksFollowTheConfig(t *testing.T) {
 
 	for _, hs := range []*healthSetup{{}, {Config: &hcfg.Config{}}} {
 		for name, set := range map[string]checkSet{
-			"disks": disksChecks(hs), "temps": tempsChecks(hs), "kernel": kernelChecks(hs),
+			"disks": disksChecks(hs), "temps": tempsChecks(hs), "kernel": kernelChecks(hs, zap.NewNop()),
 		} {
 			if len(set.Checks)+len(set.Errors)+len(set.Persisters)+len(set.Background) != 0 || set.Drives != nil {
 				t.Fatalf("%s without a section: %+v", name, set)
@@ -100,7 +103,7 @@ func TestHardwareChecksFollowTheConfig(t *testing.T) {
 		len(set.Persisters) != 1 {
 		t.Fatalf("temperatures section: %+v", set)
 	}
-	if set := kernelChecks(hs); len(set.Checks) != 1 || set.Checks[0].Name != kernelCheckName ||
+	if set := kernelChecks(hs, zap.NewNop()); len(set.Checks) != 1 || set.Checks[0].Name != kernelCheckName ||
 		len(set.Persisters) != 1 || len(set.Background) != 1 {
 		t.Fatalf("kernel section: %+v", set)
 	}
@@ -294,6 +297,15 @@ func TestKernelAdapters(t *testing.T) {
 	if _, err = (edacSource{reader: fakeEDAC{err: readErr}}).Read(); !errors.Is(err, readErr) {
 		t.Fatalf("err = %v", err)
 	}
+
+	ctrlErr := errors.New("parse edac counter ce_count")
+	got, err = edacSource{reader: fakeEDAC{counters: []edac.Counters{
+		{Controller: "mc0", Err: ctrlErr},
+		{Controller: "mc1", Correctable: 2},
+	}}}.Read()
+	if err != nil || len(got) != 2 || !errors.Is(got[0].Err, ctrlErr) || got[1].Err != nil || got[1].Correctable != 2 {
+		t.Fatalf("per-controller counters = %+v, %v", got, err)
+	}
 }
 
 // fakeKmsg delivers its records to the reader callback, then waits for ctx.
@@ -329,7 +341,7 @@ func TestBuildKernelCheck(t *testing.T) {
 		records: []kmsg.Record{{Level: 3, Seq: 7, Message: "Buffer I/O error on dev sda, logical block 0"}},
 	}
 	now := func() time.Time { return time.Date(2026, 1, 2, 3, 0, 0, 0, time.UTC) }
-	set := buildKernelCheck(k, log, fakeEDAC{}, now)
+	set := buildKernelCheck(k, log, fakeEDAC{}, now, nil, zap.NewNop())
 	chk := set.Checks[0]
 	if chk.Name != "kernel" || chk.Interval != time.Minute || len(set.Background) != 1 ||
 		set.Background[0].Key != "kernel/kmsg/read" {
@@ -338,7 +350,7 @@ func TestBuildKernelCheck(t *testing.T) {
 
 	// The stored cursor of this boot is restored before the reader starts, so
 	// the buffered record after it is news.
-	stored := `{"cursor":{"boot_id":"00000000-0000-4000-8000-000000000001","seq":5,"seen":true}}`
+	stored := `{"cursor":{"boot_id":"00000000-0000-4000-8000-000000000001","seq":6,"seen":true}}`
 	if err := set.Persisters[0].Restore(store.State{KV: map[string]string{kernelStateKey: stored}}); err != nil {
 		t.Fatal(err)
 	}
@@ -455,7 +467,7 @@ func TestKernelCheckWaitsForItsStoredState(t *testing.T) {
 		delivered: make(chan struct{}),
 	}
 	now := func() time.Time { return time.Date(2026, 1, 2, 3, 0, 0, 0, time.UTC) }
-	set := buildKernelCheck(k, log, fakeEDAC{}, now)
+	set := buildKernelCheck(k, log, fakeEDAC{}, now, nil, zap.NewNop())
 	chk := set.Checks[0]
 
 	// The reader may start before the stored state is restored (a slow store
@@ -472,7 +484,7 @@ func TestKernelCheckWaitsForItsStoredState(t *testing.T) {
 		}
 	}
 
-	stored := `{"cursor":{"boot_id":"00000000-0000-4000-8000-000000000001","seq":5,"seen":true}}`
+	stored := `{"cursor":{"boot_id":"00000000-0000-4000-8000-000000000001","seq":6,"seen":true}}`
 	if err := set.Persisters[0].Restore(store.State{KV: map[string]string{kernelStateKey: stored}}); err != nil {
 		t.Fatal(err)
 	}
@@ -485,7 +497,7 @@ func TestKernelCheckWaitsForItsStoredState(t *testing.T) {
 func TestKernelCheckRunsAfterAFailedRestore(t *testing.T) {
 	t.Parallel()
 
-	set := buildKernelCheck(&hcfg.Kernel{}, &fakeKmsg{}, fakeEDAC{}, time.Now)
+	set := buildKernelCheck(&hcfg.Kernel{}, &fakeKmsg{}, fakeEDAC{}, time.Now, nil, zap.NewNop())
 	err := set.Persisters[0].Restore(store.State{KV: map[string]string{kernelStateKey: "{not json"}})
 	if err == nil {
 		t.Fatal("a malformed stored state must be reported")
@@ -547,7 +559,7 @@ func TestKernelChecksOneShotHasNoBackgroundReader(t *testing.T) {
 	t.Parallel()
 
 	hs := &healthSetup{Config: &hcfg.Config{Kernel: &hcfg.Kernel{}}, OneShot: true}
-	if set := kernelChecks(hs); len(set.Checks) != 1 || len(set.Background) != 0 {
+	if set := kernelChecks(hs, zap.NewNop()); len(set.Checks) != 1 || len(set.Background) != 0 {
 		t.Fatalf("one-shot kernel set: %+v", set)
 	}
 }
@@ -594,5 +606,96 @@ func TestSmartctlSourceMapsNodes(t *testing.T) {
 	runner.err = errors.New("boom")
 	if _, err = src.Drives(); !errors.Is(err, runner.err) {
 		t.Fatalf("Drives() error = %v, want the runner's", err)
+	}
+}
+
+type fakeJournal struct {
+	mu    sync.Mutex
+	calls []string
+	recs  []journal.Record
+	err   error
+}
+
+func (f *fakeJournal) Read(_ context.Context, bootID string) ([]journal.Record, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.calls = append(f.calls, bootID)
+
+	return f.recs, f.err
+}
+
+func TestJournalSourceMapsErrors(t *testing.T) {
+	t.Parallel()
+
+	boom := errors.New("boom")
+	recs := []journal.Record{{Message: "m", Priority: 3, Facility: 0, Usec: 1500000}}
+	tests := []struct {
+		name     string
+		err      error
+		want     error
+		wantRecs int
+	}{
+		{"unavailable", fmt.Errorf("run: %w", journal.ErrUnavailable), kernel.ErrNoJournal, 0},
+		{"capped", fmt.Errorf("run: %w", journal.ErrCapped), kernel.ErrJournalCapped, 1},
+		{"other", boom, boom, 0},
+		{"ok", nil, nil, 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			src := journalSource{reader: &fakeJournal{recs: recs[:tt.wantRecs], err: tt.err}}
+			got, err := src.Read(t.Context(), "b")
+			if tt.want == nil && err != nil || tt.want != nil && !errors.Is(err, tt.want) {
+				t.Fatalf("err = %v, want %v", err, tt.want)
+			}
+			if len(got) != tt.wantRecs {
+				t.Fatalf("records = %d, want %d", len(got), tt.wantRecs)
+			}
+			if tt.wantRecs == 1 {
+				want := kernel.Record{Facility: 0, Level: 3, Time: 1500 * time.Millisecond, Message: "m"}
+				if got[0] != want {
+					t.Errorf("record = %+v, want %+v", got[0], want)
+				}
+			}
+		})
+	}
+}
+
+// TestKernelCheckJournalWiring proves buildKernelCheck hands a non-nil journal reader to the
+// check, which reads the stored (previous) boot's tail on its first run, and that a nil reader
+// makes no journal call.
+func TestKernelCheckJournalWiring(t *testing.T) {
+	t.Parallel()
+
+	const oldBoot = "00000000-0000-4000-8000-0000000000aa"
+	stored := `{"cursor":{"boot_id":"` + oldBoot + `","seq":6,"seen":true}}`
+	tests := []struct {
+		name   string
+		reader func(*fakeJournal) journalReader
+		want   []string
+	}{
+		{"reader", func(f *fakeJournal) journalReader { return f }, []string{oldBoot}},
+		{"nil reader", func(*fakeJournal) journalReader { return nil }, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			fj := &fakeJournal{}
+			set := buildKernelCheck(&hcfg.Kernel{}, &fakeKmsg{}, fakeEDAC{}, time.Now, tt.reader(fj), zap.NewNop())
+			state := store.State{KV: map[string]string{kernelStateKey: stored}}
+			if err := set.Persisters[0].Restore(state); err != nil {
+				t.Fatal(err)
+			}
+			set.Checks[0].Run(t.Context())
+
+			fj.mu.Lock()
+			defer fj.mu.Unlock()
+			if !slices.Equal(fj.calls, tt.want) {
+				t.Fatalf("journal calls = %v, want %v", fj.calls, tt.want)
+			}
+		})
 	}
 }

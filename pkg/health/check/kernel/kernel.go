@@ -11,8 +11,13 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
+
+	"go.uber.org/zap"
 
 	"github.com/Toshik1978/tgshd/pkg/health"
 )
@@ -47,6 +52,9 @@ type Counters struct {
 	Controller    string `json:"controller"`
 	Correctable   uint64 `json:"correctable"`
 	Uncorrectable uint64 `json:"uncorrectable"`
+	// Err is set when this controller could not be read. Its stored counts are kept and
+	// it is not judged.
+	Err error `json:"-"`
 }
 
 // BootSource reports the current boot id.
@@ -64,9 +72,11 @@ type class struct {
 	label    string
 	maxLevel int // records with a numerically higher (less severe) level are ignored
 	re       []*regexp.Regexp
+	exclude  *regexp.Regexp // a record matching it never belongs to the class; nil for none
 }
 
-// classTable returns the anchored pattern table, one entry per error class.
+// classTable returns the pattern table, one entry per error class. The order
+// runs from specific to general and the first class that matches a record wins.
 func classTable() []class {
 	compile := func(exprs ...string) []*regexp.Regexp {
 		out := make([]*regexp.Regexp, len(exprs))
@@ -78,32 +88,42 @@ func classTable() []class {
 	}
 
 	const anyLevel = 7
-	const warning = 4
 
 	return []class{
-		{"kernel/storage-io", "storage I/O errors", anyLevel, compile(
-			`^blk_update_request: I/O error`,
-			`^(I/O|critical (medium|target|nexus)|timeout) error, dev `,
-			`^Buffer I/O error on dev `,
+		{key: "kernel/machine-check", label: "machine check errors", maxLevel: anyLevel, re: compile(
+			`\[Hardware Error\]`,
+			`Machine check events logged`,
+			`^mce: .*Machine Check`,
+		)},
+		{key: "kernel/ata", label: "ATA errors", maxLevel: anyLevel, re: compile(
+			`^ata\d+(\.\d+)?: SError: `,
+			`^ata\d+(\.\d+)?: (hard |soft )?resetting link`,
+			`^ata\d+: (COMRESET failed|link is slow to respond|limiting SATA link speed)`,
+			`^ata\d+(\.\d+)?: (exception|failed command|hard resetting)`,
 		)},
 		{
-			"kernel/nvme",
-			"NVMe errors",
-			warning,
-			compile(
+			key:      "kernel/nvme",
+			label:    "NVMe errors",
+			maxLevel: anyLevel,
+			re: compile(
 				`^nvme( nvme)?\d+: I/O .*timeout`,
 				`^nvme( nvme)?\d+: .*(resetting controller|controller is down|Device not ready|I/O error)`,
 			),
 		},
-		{"kernel/ata", "ATA errors", warning, compile(
-			`^ata\d+(\.\d+)?: (exception|failed command|hard resetting)`,
-		)},
-		{"kernel/machine-check", "machine check errors", anyLevel, compile(
-			`^mce: \[Hardware Error\]`,
-		)},
-		{"kernel/thermal-throttle", "thermal throttling", anyLevel, compile(
+		{key: "kernel/thermal-throttle", label: "thermal throttling", maxLevel: anyLevel, re: compile(
 			`^(CPU\d+: )?(Core|Package) temperature above threshold`,
 		)},
+		{
+			key:      "kernel/storage-io",
+			label:    "storage I/O errors",
+			maxLevel: anyLevel,
+			re: compile(
+				`I/O error`,
+				`^(critical (medium|target|nexus)|timeout) error, dev `,
+			),
+			// exclude covers every storage-io pattern for loop, sr, fd and zram devices.
+			exclude: regexp.MustCompile(`dev (loop|sr|fd|zram)\d`),
+		},
 	}
 }
 
@@ -113,6 +133,10 @@ type Episode struct {
 	LastAt      time.Time `json:"last_at"`
 	LastStillAt time.Time `json:"last_still_at"`
 	Count       int       `json:"count"`
+	// Unreported counts the occurrences since the last message of the episode.
+	Unreported int `json:"unreported"`
+	// Last is the latest record line, or the latest counter value of an EDAC episode.
+	Last string `json:"last"`
 }
 
 // Cursor is the position in the kernel log that was fully processed.
@@ -120,6 +144,12 @@ type Cursor struct {
 	BootID string `json:"boot_id"`
 	Seq    uint64 `json:"seq"`
 	Seen   bool   `json:"seen"` // false until a record was processed in this boot
+	// Usec is the kmsg time since boot of the record at Seq, in microseconds; it matches the
+	// journal's _SOURCE_MONOTONIC_TIMESTAMP.
+	Usec uint64 `json:"usec"`
+	// Message is the text of the record at Seq. It tells the journal records logged at Usec
+	// that were processed from those that were not.
+	Message string `json:"message,omitempty"`
 }
 
 type state struct {
@@ -142,10 +172,12 @@ type pending struct {
 
 // Check is the kernel check. It is safe for concurrent use.
 type Check struct {
-	boot  BootSource
-	edac  EDACSource
-	marks *health.RateMarks
-	now   func() time.Time
+	boot    BootSource
+	edac    EDACSource
+	journal JournalSource // nil: the previous boot's tail is skipped
+	log     *zap.Logger
+	marks   *health.RateMarks
+	now     func() time.Time
 
 	classes []class
 
@@ -157,9 +189,16 @@ type Check struct {
 	inbox   []entry // matching records consumed since the last Run
 	hasSeen bool    // any record consumed in this process
 	maxSeq  uint64  // highest Seq consumed, not yet committed to st.Cursor
-	bootOK  bool
-	bootID  string
-	bootErr error
+	maxUsec uint64  // time since boot of the record at maxSeq, in microseconds
+	maxMsg  string  // message of the record at maxSeq
+	// firstSeq is the Seq of the first record consumed in this process; firstPending
+	// is true until Run has compared it with the stored cursor.
+	firstSeq     uint64
+	firstPending bool
+	lost         uint64 // records lost since the last report
+	bootOK       bool
+	bootID       string
+	bootErr      error
 }
 
 // Option customises a Check.
@@ -178,6 +217,21 @@ func WithReplay() Option {
 	return func(c *Check) { c.replay = true }
 }
 
+// WithJournal makes the first Run after a reboot read the previous boot's kernel records
+// after the cursor from the journal. Without it the previous boot's tail is skipped.
+func WithJournal(j JournalSource) Option {
+	return func(c *Check) { c.journal = j }
+}
+
+// WithLogger sets the logger (default: no logging). A nil logger keeps the default.
+func WithLogger(log *zap.Logger) Option {
+	return func(c *Check) {
+		if log != nil {
+			c.log = log
+		}
+	}
+}
+
 // New returns a kernel check. now is the clock; marks rate-limits the "still
 // happening" messages.
 func New(
@@ -190,6 +244,7 @@ func New(
 		now:     now,
 		classes: classTable(),
 		timeout: sourceTimeout,
+		log:     zap.NewNop(),
 		st:      newState(),
 	}
 	for _, o := range opts {
@@ -214,26 +269,46 @@ func (c *Check) Consume(r Record) {
 	if c.hasSeen && r.Seq <= c.maxSeq {
 		return
 	}
+	if c.hasSeen {
+		if r.Seq > c.maxSeq+1 {
+			c.lost += r.Seq - c.maxSeq - 1
+		}
+	} else {
+		c.firstSeq, c.firstPending = r.Seq, true
+	}
 	c.hasSeen = true
-	c.maxSeq = r.Seq
+	c.maxSeq, c.maxUsec, c.maxMsg = r.Seq, usec(r.Time), r.Message
 	if r.Facility != 0 {
 		return
 	}
 
-	for _, cl := range c.classes {
+	key, ok := classify(c.classes, r)
+	switch {
+	case !ok:
+	case len(c.inbox) < maxInbox:
+		c.inbox = append(c.inbox, entry{seq: r.Seq, key: key, msg: r.Message})
+	default:
+		c.lost++
+	}
+}
+
+// classify returns the key of the first class that matches the record.
+func classify(classes []class, r Record) (string, bool) {
+	for _, cl := range classes {
 		if r.Level > cl.maxLevel {
+			continue
+		}
+		if cl.exclude != nil && cl.exclude.MatchString(r.Message) {
 			continue
 		}
 		for _, re := range cl.re {
 			if re.MatchString(r.Message) {
-				if len(c.inbox) < maxInbox {
-					c.inbox = append(c.inbox, entry{seq: r.Seq, key: cl.key, msg: r.Message})
-				}
-
-				return
+				return cl.key, true
 			}
 		}
 	}
+
+	return "", false
 }
 
 // Run turns the accumulated records and the EDAC counters into readings. When
@@ -251,16 +326,41 @@ func (c *Check) Run(ctx context.Context) health.CheckResult {
 		return health.CheckResult{Err: c.bootErr}
 	}
 
+	var (
+		readings []health.Reading
+		tailErr  error
+	)
+	if !c.replay && c.st.Cursor.BootID != "" && c.st.Cursor.BootID != c.bootID {
+		// The previous boot's tail is read once, before the cursor moves to this boot.
+		readings, tailErr = c.bootTail(ctx)
+		if err := ctx.Err(); err != nil {
+			return health.CheckResult{Err: fmt.Errorf("kernel check: %w", err)}
+		}
+	}
+
 	now := c.now()
-	var readings []health.Reading
 	if c.replay {
 		readings = c.replayReadings(c.takeInbox())
 	} else {
-		readings = c.kernelReadings(now)
+		readings = append(readings, c.kernelReadings(now)...)
 	}
 
 	edacReadings, err := c.checkEDAC(ctx)
 	readings = append(readings, edacReadings...)
+	err = errors.Join(tailErr, err)
+	if !c.replay {
+		readings = append(readings, c.stillHappening(now)...)
+	}
+
+	if c.lost > 0 {
+		lostErr := health.CheckError{
+			Subject: "kmsg",
+			Kind:    "lost",
+			Err:     fmt.Errorf("%d kernel records were lost before they could be read", c.lost),
+		}
+		c.lost = 0
+		err = errors.Join(lostErr, err)
+	}
 
 	return health.CheckResult{Readings: readings, Err: err}
 }
@@ -341,7 +441,7 @@ func (c *Check) kernelReadings(now time.Time) []health.Reading {
 		if !c.hasSeen {
 			return nil
 		}
-		c.st.Cursor = Cursor{BootID: c.bootID, Seq: c.maxSeq, Seen: true}
+		c.st.Cursor = Cursor{BootID: c.bootID, Seq: c.maxSeq, Seen: true, Usec: c.maxUsec, Message: c.maxMsg}
 
 		return nil
 	}
@@ -350,6 +450,7 @@ func (c *Check) kernelReadings(now time.Time) []health.Reading {
 	}
 
 	cur := c.st.Cursor
+	c.countLostWhileDown(cur)
 	agg := make(map[string]*pending)
 	for _, e := range inbox {
 		if cur.Seen && e.seq <= cur.Seq {
@@ -363,15 +464,34 @@ func (c *Check) kernelReadings(now time.Time) []health.Reading {
 		p.count++
 		p.sample = e.msg
 	}
-	if c.hasSeen {
-		c.st.Cursor.Seq = c.maxSeq
-		if cur.Seen {
-			c.st.Cursor.Seq = max(cur.Seq, c.maxSeq)
-		}
-		c.st.Cursor.Seen = true
-	}
+	c.advanceCursor(cur)
 
 	return c.drainRecords(now, agg)
+}
+
+// advanceCursor moves the stored cursor of this boot to the highest record consumed, unless
+// it already points further. The caller holds c.mu.
+func (c *Check) advanceCursor(cur Cursor) {
+	if !c.hasSeen {
+		return
+	}
+	if !cur.Seen || c.maxSeq > cur.Seq {
+		c.st.Cursor.Seq, c.st.Cursor.Usec, c.st.Cursor.Message = c.maxSeq, c.maxUsec, c.maxMsg
+	}
+	c.st.Cursor.Seen = true
+}
+
+// countLostWhileDown compares the first record of this process with the stored
+// cursor of the same boot: the records in between were overwritten while the
+// daemon was down. The caller holds c.mu.
+func (c *Check) countLostWhileDown(cur Cursor) {
+	if !c.firstPending {
+		return
+	}
+	c.firstPending = false
+	if cur.Seen && c.firstSeq > cur.Seq+1 {
+		c.lost += c.firstSeq - cur.Seq - 1
+	}
 }
 
 // takeInbox hands out the buffered entries and empties the buffer.
@@ -382,11 +502,10 @@ func (c *Check) takeInbox() []entry {
 	return inbox
 }
 
-// replayReadings reports every class the records match, once each, leaving the
-// cursor and the episodes alone.
-func (c *Check) replayReadings(inbox []entry) []health.Reading {
+// aggregate counts the entries per class key, keeping the latest line of each.
+func aggregate(entries []entry) map[string]*pending {
 	agg := make(map[string]*pending)
-	for _, e := range inbox {
+	for _, e := range entries {
 		p := agg[e.key]
 		if p == nil {
 			p = &pending{}
@@ -395,6 +514,14 @@ func (c *Check) replayReadings(inbox []entry) []health.Reading {
 		p.count++
 		p.sample = e.msg
 	}
+
+	return agg
+}
+
+// replayReadings reports every class the records match, once each, leaving the
+// cursor and the episodes alone.
+func (c *Check) replayReadings(inbox []entry) []health.Reading {
+	agg := aggregate(inbox)
 
 	var out []health.Reading
 	for _, cl := range c.classes {
@@ -415,14 +542,9 @@ func (c *Check) drainRecords(now time.Time, agg map[string]*pending) []health.Re
 			continue
 		}
 
-		out = append(out, c.episode(cl.key, now, p.count,
-			func() string {
-				return fmt.Sprintf("Kernel: %s started (%s). Last: %s", cl.label, records(p.count), clip(p.sample))
-			},
-			func(ep Episode) string {
-				return fmt.Sprintf("Kernel: %s still happening (%s since %s). Last: %s",
-					cl.label, records(ep.Count), ep.FirstAt.UTC().Format(time.RFC3339), clip(p.sample))
-			})...)
+		out = append(out, c.episode(cl.key, now, p.count, clip(p.sample), func() string {
+			return fmt.Sprintf("Kernel: %s started (%s). Last: %s", cl.label, records(p.count), clip(p.sample))
+		})...)
 	}
 
 	return out
@@ -430,29 +552,75 @@ func (c *Check) drainRecords(now time.Time, agg map[string]*pending) []health.Re
 
 // episode applies the shared episode rules to n new occurrences under key: one
 // message when an episode starts (none yet, or the last occurrence is at least
-// quietAfter old), then at most one "still happening" per stillWindow. The
-// caller holds c.mu.
-func (c *Check) episode(
-	key string, now time.Time, n int, start func() string, still func(Episode) string,
-) []health.Reading {
+// quietAfter old). Later occurrences are only counted; stillHappening reports
+// them. The caller holds c.mu.
+func (c *Check) episode(key string, now time.Time, n int, last string, start func() string) []health.Reading {
 	ep, ok := c.st.Episodes[key]
 	if !ok || now.Sub(ep.LastAt) >= quietAfter {
 		c.marks.Allow(key, channel, now, stillWindow)
-		c.st.Episodes[key] = Episode{FirstAt: now, LastAt: now, LastStillAt: now, Count: n}
+		c.st.Episodes[key] = Episode{FirstAt: now, LastAt: now, LastStillAt: now, Count: n, Last: last}
 
 		return []health.Reading{event(key, start())}
 	}
 
-	var out []health.Reading
 	ep.LastAt = now
 	ep.Count += n
-	if now.Sub(ep.LastStillAt) >= stillWindow && c.marks.Allow(key, channel, now, stillWindow) {
-		ep.LastStillAt = now
-		out = append(out, event(key, still(ep)))
-	}
+	ep.Unreported += n
+	ep.Last = last
 	c.st.Episodes[key] = ep
 
+	return nil
+}
+
+// stillHappening walks every episode, not only those that got a record in this
+// Run: one with unreported occurrences and a last message at least stillWindow
+// old gets a "still happening" message, and its unreported count is cleared.
+// The caller holds c.mu.
+func (c *Check) stillHappening(now time.Time) []health.Reading {
+	keys := make([]string, 0, len(c.st.Episodes))
+	for key := range c.st.Episodes {
+		keys = append(keys, key)
+	}
+	slices.Sort(keys)
+
+	var out []health.Reading
+	for _, key := range keys {
+		ep := c.st.Episodes[key]
+		if ep.Unreported <= 0 || now.Sub(ep.LastStillAt) < stillWindow {
+			continue
+		}
+		if !c.marks.Allow(key, channel, now, stillWindow) {
+			continue
+		}
+		out = append(out, event(key, c.stillText(key, ep)))
+		ep.LastStillAt = now
+		ep.Unreported = 0
+		c.st.Episodes[key] = ep
+	}
+
 	return out
+}
+
+// stillText words the "still happening" message of the episode under key.
+func (c *Check) stillText(key string, ep Episode) string {
+	since := ep.LastStillAt.UTC().Format(time.RFC3339)
+	if rest, ok := strings.CutPrefix(key, "kernel/edac/"); ok {
+		i := strings.LastIndex(rest, "/")
+		adj := map[string]string{"ce": "corrected", "ue": "uncorrected"}[rest[i+1:]]
+
+		return fmt.Sprintf("Kernel: EDAC controller %s %s memory errors still rising (%d rises since %s, now %s)",
+			rest[:i], adj, ep.Unreported, since, ep.Last)
+	}
+
+	label := key
+	for _, cl := range c.classes {
+		if cl.key == key {
+			label = cl.label
+		}
+	}
+
+	return fmt.Sprintf("Kernel: %s still happening (%s since %s). Last: %s",
+		label, records(ep.Unreported), since, ep.Last)
 }
 
 func (c *Check) checkEDAC(ctx context.Context) ([]health.Reading, error) {
@@ -470,40 +638,59 @@ func (c *Check) checkEDAC(ctx context.Context) ([]health.Reading, error) {
 
 	now := c.now()
 
-	var out []health.Reading
+	var (
+		out  []health.Reading
+		errs []error
+	)
 	for _, ctrl := range ctrls {
+		if ctrl.Err != nil {
+			// Keep the stored values, judge the other controllers and raise one
+			// checker error under this controller's own key.
+			errs = append(errs, health.CheckError{
+				Subject: ctrl.Controller,
+				Kind:    "edac-unreadable",
+				Err:     fmt.Errorf("memory controller %s counters unreadable: %w", ctrl.Controller, ctrl.Err),
+			})
+
+			continue
+		}
 		prev, known := c.st.EDAC[ctrl.Controller]
 		if known {
 			id, cur := ctrl.Controller, ctrl
 			out = append(out, c.edacRise(now, id, "ce", "corrected", prev.Correctable, cur.Correctable)...)
-			out = append(out, c.edacRise(now, id, "ue", "uncorrected", prev.Uncorrectable, cur.Uncorrectable)...)
+			if cur.Uncorrectable > prev.Uncorrectable {
+				// Uncorrectable rises bypass the episodes: each one is reported at once.
+				out = append(out, event("kernel/edac/"+id+"/ue", fmt.Sprintf(
+					"Kernel: uncorrectable memory errors on %s rose %d→%d", id, prev.Uncorrectable, cur.Uncorrectable,
+				)))
+			}
 		}
 		c.st.EDAC[ctrl.Controller] = ctrl
 	}
 
-	return out, nil
+	return out, errors.Join(errs...)
 }
 
-// edacRise runs one counter of one controller through the episode rules. A
-// counter that did not rise (or was reset) changes nothing.
+// edacRise runs one correctable counter of one controller through the episode
+// rules. A counter that did not rise (or was reset) changes nothing.
 func (c *Check) edacRise(now time.Time, ctrl, kind, adj string, prev, cur uint64) []health.Reading {
 	if cur <= prev {
 		return nil
 	}
 
-	return c.episode("kernel/edac/"+ctrl+"/"+kind, now, 1,
-		func() string {
-			return fmt.Sprintf("Kernel: EDAC controller %s %s memory errors started rising (from %d to %d)",
-				ctrl, adj, prev, cur)
-		},
-		func(ep Episode) string {
-			return fmt.Sprintf("Kernel: EDAC controller %s %s memory errors still rising (%d rises since %s, now %d)",
-				ctrl, adj, ep.Count, ep.FirstAt.UTC().Format(time.RFC3339), cur)
-		})
+	return c.episode("kernel/edac/"+ctrl+"/"+kind, now, 1, strconv.FormatUint(cur, 10), func() string {
+		return fmt.Sprintf("Kernel: EDAC controller %s %s memory errors started rising (from %d to %d)",
+			ctrl, adj, prev, cur)
+	})
 }
 
 func event(key, text string) health.Reading {
 	return health.Reading{Key: key, Verdict: health.Bad, Text: text, Kind: health.Event}
+}
+
+// usec converts a time since boot to whole microseconds.
+func usec(d time.Duration) uint64 {
+	return uint64(max(d, 0) / time.Microsecond)
 }
 
 func records(n int) string {

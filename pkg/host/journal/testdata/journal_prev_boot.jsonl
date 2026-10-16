@@ -1,0 +1,4 @@
+{"PRIORITY":"3","SYSLOG_FACILITY":"0","_SOURCE_MONOTONIC_TIMESTAMP":"1000500","MESSAGE":"EXT4-fs error (device sdz1): ext4_find_entry:1455: inode #2: comm example: reading directory lblock 0"}
+{"PRIORITY":"4","SYSLOG_FACILITY":"0","_SOURCE_MONOTONIC_TIMESTAMP":"2000750","MESSAGE":"ata9: hard resetting link"}
+{"PRIORITY":"6","SYSLOG_FACILITY":"0","_SOURCE_MONOTONIC_TIMESTAMP":"3001000","MESSAGE":[101,114,114,111,114,32,255,33]}
+{"PRIORITY":"2","SYSLOG_FACILITY":"0","_SOURCE_MONOTONIC_TIMESTAMP":"4000000","MESSAGE":"Kernel panic - not syncing: example"}

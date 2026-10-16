@@ -57,15 +57,25 @@ func TestRead(t *testing.T) {
 	}
 }
 
-func TestReadErrors(t *testing.T) {
+func TestPerControllerErr(t *testing.T) {
 	root := t.TempDir()
 	writeMC(t, root, "mc0", "x\n", "0\n")
-	if _, err := edac.New(root).Read(); err == nil {
-		t.Fatal("expected parse error")
+	writeMC(t, root, "mc1", "1\n", "")
+	writeMC(t, root, "mc2", "4\n", "6\n")
+
+	got, err := edac.New(root).Read()
+	if err != nil {
+		t.Fatalf("Read() error = %v; want per-controller errors only", err)
 	}
-	root2 := t.TempDir()
-	writeMC(t, root2, "mc0", "1\n", "")
-	if _, err := edac.New(root2).Read(); err == nil {
-		t.Fatal("expected missing ue_count error")
+	if len(got) != 3 {
+		t.Fatalf("got %d controllers, want 3: %+v", len(got), got)
+	}
+	for _, i := range []int{0, 1} {
+		if got[i].Err == nil {
+			t.Errorf("%s: Err = nil, want an error", got[i].Controller)
+		}
+	}
+	if got[2].Err != nil || got[2].Correctable != 4 || got[2].Uncorrectable != 6 {
+		t.Errorf("mc2 = %+v, want 4/6 with no error", got[2])
 	}
 }

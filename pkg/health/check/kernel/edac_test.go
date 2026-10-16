@@ -1,10 +1,12 @@
 package kernel_test
 
 import (
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/Toshik1978/tgshd/pkg/health"
 	"github.com/Toshik1978/tgshd/pkg/health/check/kernel"
 )
 
@@ -52,10 +54,11 @@ func TestEDACEpisodeLifecycle(t *testing.T) {
 		t.Fatalf("after still: %+v", res.Readings)
 	}
 
-	// No rise for over 24 h, then a new rise starts a new episode.
+	// No rise for over 24 h: the unreported rise is still announced, then a new rise
+	// starts a new episode.
 	r.clk.t = r.clk.t.Add(25 * time.Hour)
-	if res = r.run(t); len(res.Readings) != 0 {
-		t.Fatalf("quiet: %+v", res.Readings)
+	if res = r.run(t); len(res.Readings) != 1 || !strings.Contains(res.Readings[0].Text, "still") {
+		t.Fatalf("unreported: %+v", res.Readings)
 	}
 	set(8, 1)
 	res = r.run(t)
@@ -93,5 +96,60 @@ func TestRestoreLegacyState(t *testing.T) {
 	res := r.run(t)
 	if len(res.Readings) != 1 || strings.Contains(res.Readings[0].Text, "still") {
 		t.Fatalf("legacy: %+v", res.Readings)
+	}
+}
+
+func TestUncorrectableEveryRise(t *testing.T) {
+	r := newRig(t)
+	set := func(ue uint64) {
+		r.edac.ctrls = []kernel.Counters{{Controller: "mc0", Uncorrectable: ue}}
+	}
+	set(1)
+	r.run(t)
+
+	// Two rises within the hour, each reported at once with its own text.
+	want := []string{"rose 1→2", "rose 2→5"}
+	for i, ue := range []uint64{2, 5} {
+		r.clk.t = r.clk.t.Add(10 * time.Minute)
+		set(ue)
+		res := r.run(t)
+		if len(res.Readings) != 1 || res.Readings[0].Key != "kernel/edac/mc0/ue" ||
+			res.Readings[0].Kind != health.Event || !strings.Contains(res.Readings[0].Text, want[i]) ||
+			!strings.HasPrefix(res.Readings[0].Text, "Kernel: uncorrectable memory errors on mc0 ") {
+			t.Fatalf("rise %d: %+v", i, res.Readings)
+		}
+	}
+
+	// No unreported episode is left behind for a later "still" message.
+	r.clk.t = r.clk.t.Add(12 * time.Hour)
+	if res := r.run(t); len(res.Readings) != 0 {
+		t.Fatalf("after window: %+v", res.Readings)
+	}
+}
+
+func TestUnreadableController(t *testing.T) {
+	r := newRig(t)
+	r.edac.ctrls = []kernel.Counters{{Controller: "mc0", Correctable: 1}, {Controller: "mc1", Uncorrectable: 1}}
+	r.run(t)
+
+	r.edac.ctrls = []kernel.Counters{
+		{Controller: "mc0", Correctable: 1, Err: errors.New("no ce_count")},
+		{Controller: "mc1", Uncorrectable: 2},
+	}
+	res := r.run(t)
+	if len(res.Readings) != 1 || res.Readings[0].Key != "kernel/edac/mc1/ue" {
+		t.Fatalf("other controller judged: %+v", res.Readings)
+	}
+	ces := health.CheckErrors(res.Err)
+	if len(ces) != 1 || ces[0].Subject != "mc0" || ces[0].Kind != "edac-unreadable" ||
+		ces[0].Error() != "mc0/edac-unreadable: memory controller mc0 counters unreadable: no ce_count" {
+		t.Fatalf("checker errors: %v", res.Err)
+	}
+
+	// The stored values were kept: a rise against them is still seen.
+	r.edac.ctrls = []kernel.Counters{{Controller: "mc0", Correctable: 2}, {Controller: "mc1", Uncorrectable: 2}}
+	res = r.run(t)
+	if len(res.Readings) != 1 || res.Readings[0].Key != "kernel/edac/mc0/ce" || res.Err != nil {
+		t.Fatalf("after recovery: %+v", res)
 	}
 }

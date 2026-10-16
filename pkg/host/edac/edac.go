@@ -2,6 +2,7 @@
 package edac
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -16,6 +17,9 @@ type Counters struct {
 	Controller    string // e.g. "mc0"
 	Correctable   uint64
 	Uncorrectable uint64
+	// Err is set when a counter file of this controller is missing or unparsable;
+	// the counts are then meaningless.
+	Err error
 }
 
 // Reader reads EDAC counters below a configurable root.
@@ -33,8 +37,9 @@ func NewDefault() *Reader {
 	return New(defaultRoot)
 }
 
-// Read returns the counters of every memory controller, sorted by name. When the EDAC
-// directory does not exist (no ECC support) it returns nil without an error.
+// Read returns the counters of every memory controller, sorted by name. A counter file that
+// cannot be read or parsed sets Err on its controller only; the others are still returned.
+// When the EDAC directory does not exist (no ECC support) it returns nil without an error.
 func (r *Reader) Read() ([]Counters, error) {
 	dirs, err := filepath.Glob(filepath.Join(r.root, "mc[0-9]*"))
 	if err != nil {
@@ -42,15 +47,15 @@ func (r *Reader) Read() ([]Counters, error) {
 	}
 	var out []Counters
 	for _, dir := range dirs { // Glob returns lexical order
-		ce, err := readCount(filepath.Join(dir, "ce_count"))
-		if err != nil {
-			return nil, err
+		c := Counters{Controller: filepath.Base(dir)}
+		ce, ceErr := readCount(filepath.Join(dir, "ce_count"))
+		ue, ueErr := readCount(filepath.Join(dir, "ue_count"))
+		if err := errors.Join(ceErr, ueErr); err != nil {
+			c.Err = fmt.Errorf("controller %s: %w", c.Controller, err)
+		} else {
+			c.Correctable, c.Uncorrectable = ce, ue
 		}
-		ue, err := readCount(filepath.Join(dir, "ue_count"))
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, Counters{Controller: filepath.Base(dir), Correctable: ce, Uncorrectable: ue})
+		out = append(out, c)
 	}
 
 	return out, nil

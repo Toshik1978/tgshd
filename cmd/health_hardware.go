@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -21,6 +22,7 @@ import (
 	"github.com/Toshik1978/tgshd/pkg/health/store"
 	"github.com/Toshik1978/tgshd/pkg/host/edac"
 	"github.com/Toshik1978/tgshd/pkg/host/hwmon"
+	"github.com/Toshik1978/tgshd/pkg/host/journal"
 	"github.com/Toshik1978/tgshd/pkg/host/kmsg"
 	"github.com/Toshik1978/tgshd/pkg/host/nvidia"
 	"github.com/Toshik1978/tgshd/pkg/host/smartctl"
@@ -206,8 +208,8 @@ func (s nvidiaSource) GPUs(ctx context.Context) ([]temps.GPU, error) {
 }
 
 // kernelChecks provides the kernel check (/dev/kmsg and EDAC) when its
-// section is present.
-func kernelChecks(hs *healthSetup) checkSet {
+// section is present. Only the daemon check reads the previous boot's journal tail.
+func kernelChecks(hs *healthSetup, logger *zap.Logger) checkSet {
 	if hs.Config == nil || hs.Config.Kernel == nil {
 		return checkSet{}
 	}
@@ -216,7 +218,8 @@ func kernelChecks(hs *healthSetup) checkSet {
 		return buildKernelOneShot(hs.Config.Kernel, kmsg.NewDefault(), edac.NewDefault(), time.Now)
 	}
 
-	return buildKernelCheck(hs.Config.Kernel, kmsg.NewDefault(), edac.NewDefault(), time.Now)
+	return buildKernelCheck(hs.Config.Kernel, kmsg.NewDefault(), edac.NewDefault(), time.Now,
+		journal.NewDefault(), logger)
 }
 
 // kmsgSnapshotter reads the kernel buffer once, without waiting for more.
@@ -265,11 +268,20 @@ type edacReader interface {
 // values are persisted under kernelStateKey; the kernel log reader is a
 // background job, so it starts only after the stored state was restored and
 // never under check --once (which judges EDAC and what is already buffered).
-func buildKernelCheck(k *hcfg.Kernel, log kmsgReader, counters edacReader, now func() time.Time) checkSet {
+// A non-nil jr lets the first run after a reboot read the previous boot's
+// journal tail; a missing journalctl is reported by the check, not fatal.
+func buildKernelCheck(
+	k *hcfg.Kernel, log kmsgReader, counters edacReader, now func() time.Time,
+	jr journalReader, logger *zap.Logger,
+) checkSet {
 	// The check's own marks only back up Episode.LastStillAt, which is
 	// persisted in kernel.state and already spaces "still happening" messages
 	// across restarts; the runner's stored marks are not needed.
-	chk := kernel.New(log, edacSource{reader: counters}, health.NewRateMarks(), now)
+	opts := []kernel.Option{kernel.WithLogger(logger)}
+	if jr != nil {
+		opts = append(opts, kernel.WithJournal(journalSource{reader: jr}))
+	}
+	chk := kernel.New(log, edacSource{reader: counters}, health.NewRateMarks(), now, opts...)
 	gate := &kernelGate{persister: runner.KVPersister{Key: kernelStateKey, State: chk}}
 	reader := func(ctx context.Context) error {
 		if err := log.Run(ctx, func(r kmsg.Record) { chk.Consume(kernelRecord(r)) }); err != nil {
@@ -352,6 +364,53 @@ func (c noDrivesCommand) Handle(ctx context.Context, senderID int64, _ string) e
 // kernelRecord converts a kernel log record for the kernel check.
 func kernelRecord(r kmsg.Record) kernel.Record {
 	return kernel.Record(r)
+}
+
+// journalReader is the previous-boot journal read of pkg/host/journal.
+type journalReader interface {
+	Read(ctx context.Context, bootID string) ([]journal.Record, error)
+}
+
+// journalSource adapts pkg/host/journal to kernel.JournalSource, mapping its
+// sentinels onto the kernel package's so the check never imports the host layer.
+type journalSource struct {
+	reader journalReader
+}
+
+// Read implements kernel.JournalSource. The records read are returned with
+// kernel.ErrJournalCapped too.
+func (s journalSource) Read(ctx context.Context, bootID string) ([]kernel.Record, error) {
+	in, err := s.reader.Read(ctx, bootID)
+	out := make([]kernel.Record, len(in))
+	for i, r := range in {
+		out[i] = kernel.Record{
+			Facility: r.Facility,
+			Level:    r.Priority,
+			Time:     usecDuration(r.Usec),
+			Message:  r.Message,
+		}
+	}
+
+	switch {
+	case errors.Is(err, journal.ErrUnavailable):
+		return out, fmt.Errorf("%w: %w", kernel.ErrNoJournal, err)
+	case errors.Is(err, journal.ErrCapped):
+		return out, fmt.Errorf("%w: %w", kernel.ErrJournalCapped, err)
+	case err != nil:
+		return out, fmt.Errorf("read the journal: %w", err)
+	}
+
+	return out, nil
+}
+
+// usecDuration converts microseconds to a Duration, saturating instead of overflowing.
+func usecDuration(usec uint64) time.Duration {
+	const maxUsec = uint64(math.MaxInt64 / int64(time.Microsecond))
+	if usec > maxUsec {
+		usec = maxUsec
+	}
+
+	return time.Duration(usec) * time.Microsecond
 }
 
 // edacSource adapts pkg/host/edac to kernel.EDACSource.
