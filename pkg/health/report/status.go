@@ -61,14 +61,22 @@ func OpenKeys(heading string, keys []string) string {
 // Truncate fits text into one Telegram message (UTF-16 code units),
 // dropping trailing lines and appending an ellipsis when it is too long.
 func Truncate(text string) string {
-	if units(text) <= MaxMessageUnits {
+	return truncateLines(strings.Split(text, "\n"), MaxMessageUnits)
+}
+
+// truncateLines joins lines into a text of at most limit UTF-16 units,
+// keeping whole lines and appending an ellipsis when some are dropped; a first
+// line that alone is too long is cut (never inside an HTML entity).
+func truncateLines(lines []string, limit int) string {
+	text := strings.Join(lines, "\n")
+	if units(text) <= limit {
 		return text
 	}
 
-	budget := MaxMessageUnits - units(ellipsis)
+	budget := limit - units(ellipsis)
 	used := 0
 	var b strings.Builder
-	for i, l := range strings.Split(text, "\n") {
+	for i, l := range lines {
 		add := l
 		if i > 0 {
 			add = "\n" + l

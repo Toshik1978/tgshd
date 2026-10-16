@@ -424,3 +424,26 @@ func TestQueueCap(t *testing.T) {
 		t.Fatalf("queue len %d, want %d", got, MaxQueue)
 	}
 }
+
+func TestExpireDropsOldMessagesAndReportsThem(t *testing.T) {
+	var reported []QueuedMessage
+
+	now := time.Date(2026, 1, 9, 3, 0, 0, 0, time.UTC)
+	n := New(Options{Host: "h", OnDrop: func(m QueuedMessage) { reported = append(reported, m) }})
+	n.Restore([]QueuedMessage{
+		{ID: 1, CreatedAt: now.Add(-8 * 24 * time.Hour), Channel: ChannelTelegram, Text: "old"},
+		{ID: 2, CreatedAt: now.Add(-7 * 24 * time.Hour), Channel: ChannelTelegram, Text: "exactly 7 days"},
+		{ID: 3, CreatedAt: now.Add(-time.Hour), Channel: ChannelSMS, Text: "new"},
+	})
+
+	dropped := n.Expire(now, 7*24*time.Hour)
+	if len(dropped) != 1 || dropped[0].ID != 1 || len(reported) != 1 || reported[0].ID != 1 {
+		t.Fatalf("dropped = %+v, reported = %+v; want message 1", dropped, reported)
+	}
+	if got := n.Export(); len(got) != 2 || got[0].ID != 2 || got[1].ID != 3 {
+		t.Fatalf("queue = %+v", got)
+	}
+	if again := n.Expire(now, 7*24*time.Hour); len(again) != 0 || len(reported) != 1 {
+		t.Fatalf("expired twice: %+v", again)
+	}
+}

@@ -340,6 +340,9 @@ func (c *Check) judgeNVMe(r *result, name string, rep *Report) {
 		r.judged(serial, aspectSpare, *spare <= *th,
 			fmt.Sprintf("%s: available spare %d%% at or below its threshold %d%%", name, *spare, *th))
 	}
+	if spare := rep.AvailableSpare; spare != nil {
+		r.sample("drive."+serial+".spare", float64(*spare))
+	}
 	if used := rep.PercentageUsed; used != nil {
 		r.judged(serial, aspectWear, *used > c.cfg.WearPercent,
 			fmt.Sprintf("%s: wear %d%% above %d%%", name, *used, c.cfg.WearPercent))
@@ -351,6 +354,8 @@ func (c *Check) judgeNVMe(r *result, name string, rep *Report) {
 // is older than selftest_max_age in power-on hours, or when there is none and
 // the drive was first seen longer than selftest_max_age ago. Otherwise, when
 // there is no self-test yet or its age cannot be computed, it is not judged.
+// The newest finished self-test's age in power-on hours is sampled as
+// drive.<serial>.selftest_age_h whenever it can be computed.
 func (c *Check) judgeSelfTest(r *result, now time.Time, b *baseline, rep *Report) {
 	serial, name := rep.Serial, label(b)
 	maxAge := c.cfg.SelftestMaxAge.Duration()
@@ -365,11 +370,14 @@ func (c *Check) judgeSelfTest(r *result, now time.Time, b *baseline, rep *Report
 		return
 	}
 	b.noteSelfTest(now, st)
+	age, ok := selfTestAge(rep)
+	if ok {
+		r.sample("drive."+serial+".selftest_age_h", float64(age))
+	}
 	if st.Failed {
 		r.judged(serial, aspectSelfTest, true, fmt.Sprintf("%s: newest self-test failed (%s)", name, st.Description))
 		return
 	}
-	age, ok := selfTestAge(rep)
 	if !ok {
 		return
 	}

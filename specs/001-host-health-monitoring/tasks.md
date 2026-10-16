@@ -146,10 +146,10 @@ and its rate limit, dependency skip
 **Independent Test**: spec US5 — seeded history spanning months; command replies, retention,
 roll-up, summary content and length limit
 
-- [ ] T040 [US5] History queries and retention in pkg/health/store/history.go: alerts by check/key prefix and period newest first; samples current + 7-day min/avg/max (raw and `samples_daily`); daily job per data-model "Retention" (alerts > 365 d deleted, samples > 90 d rolled up then deleted, queue > 7 d dropped and logged); runner daily hook
-- [ ] T041 [P] [US5] `/history` in pkg/health/report/history.go and pkg/command/command_history.go per contracts/telegram-commands.md (args `[check] [period]`, default `7d`, `No alerts in <period>`)
-- [ ] T042 [P] [US5] `/temp` and `/disks` in pkg/health/report/readings.go, pkg/command/command_temp.go and pkg/command/command_disks.go per contracts/telegram-commands.md (drives shown by bus, model and last 4 serial characters)
-- [ ] T043 [US5] Weekly summary in pkg/health/report/summary.go plus the runner weekly hook: per-drive lines (health, wear, data written this week), services block, open problems; one message within the length limit cut with `…`; a section that cannot be built reads "unavailable"
+- [x] T040 [US5] History queries and retention in pkg/health/store/history.go: alerts by check/key prefix and period newest first; samples current + 7-day min/avg/max (raw and `samples_daily`); daily job per data-model "Retention" (alerts > 365 d deleted, samples > 90 d rolled up then deleted, queue > 7 d dropped and logged); runner daily hook
+- [x] T041 [P] [US5] `/history` in pkg/health/report/history.go and pkg/command/command_history.go per contracts/telegram-commands.md (args `[check] [period]`, default `7d`, `No alerts in <period>`)
+- [x] T042 [P] [US5] `/temp` and `/disks` in pkg/health/report/readings.go, pkg/command/command_temp.go and pkg/command/command_disks.go per contracts/telegram-commands.md (drives shown by bus, model and last 4 serial characters)
+- [x] T043 [US5] Weekly summary in pkg/health/report/summary.go plus the runner weekly hook: per-drive lines (health, wear, data written this week), services block, open problems; one message within the length limit cut with `…`; a section that cannot be built reads "unavailable"
 
 **Checkpoint**: All user stories functional
 

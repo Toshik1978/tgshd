@@ -161,7 +161,9 @@ type Runner struct {
 	mu        sync.Mutex
 	quiet     string
 	lastCycle time.Time
-	cleared   []store.Alert
+	// logged are alert-log records made outside a tick's dispatch (clears,
+	// retires, pushes); the next checkpoint takes them.
+	logged []store.Alert
 }
 
 // outcome is the result of one check in a batch; started is false when the
@@ -275,13 +277,19 @@ func (r *Runner) Do(ctx context.Context) error {
 		return fmt.Errorf("health tick interrupted: %w", ctx.Err())
 	}
 	r.takeFixes(c)
+	// The daily job runs before the flush, so a queued message it expires is
+	// never sent.
 	if loaded {
-		r.runJobs(ctx, c)
+		r.runDaily(ctx, c)
 	}
 	// Queued messages (e.g. an outage's PROBLEMs) go before this tick's news.
 	r.notifier.Flush(ctx)
 	r.dispatch(ctx, c)
 	r.dispatchFixes(ctx, c)
+	// The weekly job pushes the summary after the older news.
+	if loaded {
+		r.runWeekly(ctx, c)
+	}
 	r.raise(c)
 	err := r.checkpoint(ctx, c, loaded)
 
@@ -365,7 +373,7 @@ func (r *Runner) Clear(key string) bool {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
-	r.cleared = append(r.cleared, store.Alert{
+	r.logged = append(r.logged, store.Alert{
 		At: r.opts.Now(), Kind: store.KindCleared, Check: cond.Check, Key: key, Text: cond.LastText,
 	})
 
@@ -376,6 +384,29 @@ func (r *Runner) Clear(key string) bool {
 // configuration entry found at start.
 func (r *Runner) CheckerError(key, text string) {
 	r.checker.CheckerError(key, text)
+}
+
+// Push sends text as a pushed event of check through the notifier, like the
+// tick's own events: host prefix, default mode, and a failed delivery queued
+// and retried (silently while the outside is known down). The alert log gets
+// an event keyed by check with the one-line record instead of text, at the
+// next checkpoint.
+func (r *Runner) Push(ctx context.Context, check, text, record string) {
+	// Notify queues a failed delivery and retries it; its error is always nil.
+	_ = r.notifier.Notify(ctx, notify.Message{Kind: notify.KindEvent, Check: check, Key: check, Text: text})
+
+	r.mu.Lock()
+	r.logged = append(r.logged, store.Alert{
+		At: r.opts.Now(), Kind: store.KindEvent, Check: check, Key: check, Text: record,
+	})
+	r.mu.Unlock()
+}
+
+// ExpireQueue drops the queued messages created more than maxAge before now;
+// each is logged as dropped. It returns them. The next checkpoint stores the
+// queue without them.
+func (r *Runner) ExpireQueue(now time.Time, maxAge time.Duration) []notify.QueuedMessage {
+	return r.notifier.Expire(now, maxAge)
 }
 
 // raiseLoadFailure reports the last failed Load and the persister restore
@@ -630,8 +661,8 @@ func (r *Runner) checkpoint(ctx context.Context, c *cycle, loaded bool) error {
 // out.
 func (r *Runner) records(c *cycle) []store.Alert {
 	r.mu.Lock()
-	alerts := r.cleared
-	r.cleared = nil
+	alerts := r.logged
+	r.logged = nil
 	r.mu.Unlock()
 
 	for i := range c.alerts {
@@ -658,7 +689,7 @@ func (r *Runner) bad(key string) bool {
 }
 
 func (r *Runner) logDrop(m notify.QueuedMessage) {
-	r.opts.Logger.Warn("health message dropped from the full retry queue",
+	r.opts.Logger.Warn("health message dropped from the retry queue",
 		zap.Int64("id", m.ID), zap.String("channel", m.Channel),
 		zap.Time("created_at", m.CreatedAt), zap.Int("attempts", m.Attempts))
 }

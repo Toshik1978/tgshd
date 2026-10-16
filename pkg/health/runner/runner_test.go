@@ -1094,7 +1094,7 @@ func TestQueueDropsAreLogged(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	entries := logs.FilterMessage("health message dropped from the full retry queue").All()
+	entries := logs.FilterMessage("health message dropped from the retry queue").All()
 	if len(entries) != 1 || entries[0].ContextMap()["id"] != int64(1) {
 		t.Fatalf("drop log = %+v, want the oldest message (id 1) logged", entries)
 	}

@@ -236,9 +236,10 @@ func closeState(st *store.Store, inst *lockfile.Instance) error {
 	return errors.Join(errs...)
 }
 
-// newHealth builds the runner and its /status, /clear and /retire commands,
-// and runs the checks' background jobs. When the configuration could not be
-// parsed it only reports that as a checker error.
+// newHealth builds the runner, its daily and weekly jobs and its /status,
+// /clear, /retire, /history, /temp and /disks commands, and runs the checks'
+// background jobs. When the configuration could not be parsed it only reports
+// that as a checker error.
 func newHealth(p healthParams) healthOut {
 	d := newDelivery(p.Config, p.Publisher, p.SMS)
 	errs := slices.Concat(p.Setup.Errors, d.errors)
@@ -259,7 +260,11 @@ func newHealth(p healthParams) healthOut {
 	}
 
 	set := mergeCheckSets(p.Sets)
-	r := runner.New(runnerOptions(p.Setup, d, set, p.Uptime, p.Logger))
+	reports := newHealthReports(p.Setup, set, p.Logger)
+	opts := runnerOptions(p.Setup, d, set, p.Uptime, p.Logger)
+	reports.hook(&opts)
+	r := runner.New(opts)
+	reports.bind(r)
 	registerStart(p.Lifecycle, r.Load, startLoadTimeout, r.CheckerError, slices.Concat(errs, set.Errors))
 	// After registerStart: the stored state is restored before a job (the
 	// kernel log reader) starts.
@@ -272,11 +277,11 @@ func newHealth(p healthParams) healthOut {
 
 	return healthOut{
 		Workers: []app.Worker{r},
-		Handlers: []telegram.Handler{
+		Handlers: append([]telegram.Handler{
 			command.NewStatusCommand(p.Logger, p.Publisher, r),
 			command.NewClearCommand(p.Logger, p.Publisher, r),
 			retire,
-		},
+		}, reports.handlers(p.Logger, p.Publisher)...),
 	}
 }
 

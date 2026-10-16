@@ -751,7 +751,7 @@ func TestNewHealthEnabledRegistersRunnerAndCommands(t *testing.T) {
 	for _, h := range out.Handlers {
 		names = append(names, h.Name())
 	}
-	if !slices.Equal(names, []string{"status", "clear", "retire"}) {
+	if !slices.Equal(names, []string{"status", "clear", "retire", "history", "temp", "disks"}) {
 		t.Fatalf("handlers = %v", names)
 	}
 

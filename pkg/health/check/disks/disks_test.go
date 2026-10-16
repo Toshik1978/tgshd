@@ -706,11 +706,14 @@ func TestSamples(t *testing.T) {
 	res := newLoaded(src, disksCfg(), nil, newClock().now).Run(t.Context())
 
 	want := map[string]float64{
-		"temp.drive." + serialSATA:               34,
-		"drive." + serialSATA + ".written_bytes": 1000 * 512,
-		"temp.drive." + serialNVMe:               38,
-		"drive." + serialNVMe + ".wear":          1,
-		"drive." + serialNVMe + ".written_bytes": 2000 * 512000,
+		"temp.drive." + serialSATA:                34,
+		"drive." + serialSATA + ".written_bytes":  1000 * 512,
+		"temp.drive." + serialNVMe:                38,
+		"drive." + serialNVMe + ".wear":           1,
+		"drive." + serialNVMe + ".written_bytes":  2000 * 512000,
+		"drive." + serialSATA + ".selftest_age_h": 10,
+		"drive." + serialNVMe + ".selftest_age_h": 10,
+		"drive." + serialNVMe + ".spare":          100,
 	}
 	for metric, v := range want {
 		if got, ok := sample(res, metric); !ok || got != v {
@@ -720,8 +723,29 @@ func TestSamples(t *testing.T) {
 	if _, ok := sample(res, "drive."+serialSATA+".wear"); ok {
 		t.Error("SATA wear sampled, want not reported")
 	}
+	if _, ok := sample(res, "drive."+serialSATA+".spare"); ok {
+		t.Error("SATA spare sampled, want not reported")
+	}
 	if len(res.Samples) != len(want) {
 		t.Errorf("samples = %+v", res.Samples)
+	}
+}
+
+func TestSelfTestAgeSample(t *testing.T) {
+	failed := sata(serialSATA)
+	failed.testBad = true
+	none := nvme(serialNVMe)
+	none.noTest = true
+
+	src := &fakeSource{}
+	src.set("sda", failed)
+	src.set("nvme0n1", none)
+	res := newLoaded(src, disksCfg(), nil, newClock().now).Run(t.Context())
+	if v, ok := sample(res, "drive."+serialSATA+".selftest_age_h"); !ok || v != 10 {
+		t.Errorf("failed self-test age = %v, %v; want 10 (the newest finished test)", v, ok)
+	}
+	if _, ok := sample(res, "drive."+serialNVMe+".selftest_age_h"); ok {
+		t.Error("self-test age sampled without a finished self-test")
 	}
 }
 

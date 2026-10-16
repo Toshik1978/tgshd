@@ -92,7 +92,7 @@ func (r *Runner) Retire(ctx context.Context, serial string) (RetireResult, error
 	text := "Drive retired: " + d.Label()
 
 	r.mu.Lock()
-	r.cleared = append(r.cleared, store.Alert{
+	r.logged = append(r.logged, store.Alert{
 		At: r.opts.Now(), Kind: store.KindRetired, Check: retireCheck, Key: retirePrefix + d.Serial, Text: text,
 	})
 	r.mu.Unlock()

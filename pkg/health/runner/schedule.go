@@ -131,15 +131,20 @@ func (r *Runner) scheduleKV() map[string]string {
 	return kv
 }
 
-// runJobs runs the daily and weekly hooks when due. A hook counts as done once
-// attempted (no hammering a failing job); its error is a checker error. A
-// weekly job with no history is seeded with the latest slot, so nothing runs
-// on install and the next slot fires. A hook that fails only because ctx ended
-// is not counted as done and is retried next tick.
-func (r *Runner) runJobs(ctx context.Context, c *cycle) {
+// runDaily runs the daily hook when due. A hook counts as done once attempted
+// (no hammering a failing job); its error is a checker error. A hook that
+// fails only because ctx ended is not counted as done and is retried next
+// tick.
+func (r *Runner) runDaily(ctx context.Context, c *cycle) {
 	if r.opts.Daily != nil && dailyDue(r.dailyLast, c.now, r.opts.Location) {
 		attempt(ctx, c, &r.dailyLast, r.opts.Daily, "health/daily/error", "daily job failed: ")
 	}
+}
+
+// runWeekly runs the weekly hook when due, with runDaily's rules. A weekly job
+// with no history is seeded with the latest slot, so nothing runs on install
+// and the next slot fires.
+func (r *Runner) runWeekly(ctx context.Context, c *cycle) {
 	if r.opts.Weekly == nil || r.opts.WeeklySlot == nil {
 		return
 	}

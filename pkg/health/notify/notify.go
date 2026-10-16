@@ -251,6 +251,29 @@ func (n *Notifier) Merge(stored []QueuedMessage) {
 	n.reportDropped(dropped)
 }
 
+// Expire drops the queued messages created more than maxAge before now,
+// reports each through OnDrop and returns them. The store's retention drops
+// the same rows, so memory and the stored queue agree.
+func (n *Notifier) Expire(now time.Time, maxAge time.Duration) []QueuedMessage {
+	cutoff := now.Add(-maxAge)
+
+	n.mu.Lock()
+	var dropped, kept []QueuedMessage
+	for _, item := range n.queue {
+		if item.CreatedAt.Before(cutoff) {
+			dropped = append(dropped, item)
+		} else {
+			kept = append(kept, item)
+		}
+	}
+	n.queue = kept
+	n.mu.Unlock()
+
+	n.reportDropped(dropped)
+
+	return dropped
+}
+
 func (n *Notifier) send(ctx context.Context, channel, text string) error {
 	sender := n.opts.Telegram
 	if channel == ChannelSMS {

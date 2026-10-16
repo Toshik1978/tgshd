@@ -22,6 +22,9 @@ monitoring and control.
 | `/sms <phone> <message>` | Sends an SMS through gammu-smsd | gammu is configured |
 | `/status` | Lists open health problems, or confirms all checks are OK | `BOT_HEALTH_CONFIG` is set |
 | `/clear <condition key>` | Clears an open health condition without sending RESOLVED | `BOT_HEALTH_CONFIG` is set |
+| `/history [check] [24h\|7d\|30d]` | Lists past health alerts, newest first (default 7d) | `BOT_HEALTH_CONFIG` is set |
+| `/temp` | Shows each temperature sensor now and its 7-day min/avg/max | `BOT_HEALTH_CONFIG` is set |
+| `/disks` | Shows each drive's health, wear, spare, temperature, data written in 7 days and self-test age | `BOT_HEALTH_CONFIG` is set |
 | *custom* | Names/executes commands from your own script | `TELEGRAM_UNKNOWN_SCRIPT` is set |
 
 **Background workers**
@@ -114,18 +117,37 @@ Durations use Go syntax plus `d` for days (`8d`). Each check accepts `interval`,
 `threshold`, `mode` (`tlg`, `sms` or `tlg-or-sms`) and `needs_internet`.
 Checker errors are also emailed when `BOT_SMTP_ADDR` is set.
 
-**Checks.** The health file can configure these check types: `network`, `ups`,
-`disks`, `temperatures`, `kernel`, `containers`, `http`, `freshness`, `command`
-and `modem_probe`, plus a weekly `summary`. Currently the daemon runs `network`
-(connectivity, evaluated first every cycle) and `ups` (NUT power, using the
-`BOT_NUT_*` settings). The other sections are accepted and validated but do not
-run yet; the hardware checks will bring their own host requirements (such as
-smartmontools or nvidia-smi) when they land.
+**Checks.** Each check type runs when its section is configured: `network`
+(connectivity, evaluated first every cycle), `ups` (NUT power, using the
+`BOT_NUT_*` settings), `disks` (SMART via smartmontools), `temperatures`
+(hwmon sensors, and GPUs via nvidia-smi), `kernel` (EDAC counters and the
+kernel log), `containers` (Docker), `http` (endpoint probes), `freshness`
+(age of a status file: its mtime or a Unix time it holds), `command` (custom
+probe commands with optional fix actions) and `modem_probe` (a weekly SMS round
+trip; it needs `BOT_GAMMU_DSN`). A `summary` section adds the weekly summary
+described below.
 
 **Telegram commands.** `/status` lists open problems (or `All checks OK`) and
 notes a degraded store or quiet window; `/clear <condition key>` drops an open
-condition without sending RESOLVED. Both are accepted only from
-`TELEGRAM_CHAT_ID` and `TELEGRAM_ALLOWED_IDS`.
+condition without sending RESOLVED. `/history [check] [24h|7d|30d]` lists the
+alert log newest first (a check name or condition key prefix filters it; the
+default period is 7d), `/temp` shows each sensor's current value next to its
+7-day min/avg/max, and `/disks` shows each drive by bus, model and the last 4
+serial characters with its health (OK, FAILING or missing), wear, spare (NVMe),
+temperature, data written in the last 7 days and the age of its newest
+self-test. These three read the state database; while the daemon runs from
+memory they reply that history is unavailable. All commands are accepted only
+from `TELEGRAM_CHAT_ID` and `TELEGRAM_ALLOWED_IDS`.
+
+**Weekly summary.** With a `summary` section (default Monday 09:00, host local
+time) the daemon pushes one message, prefixed with the host name, listing each
+drive (health, wear, data written this week), a services block (containers,
+http, freshness and command checks: OK or how many problems are open) and the
+open problems. It fits one Telegram message and is cut with `…` when longer; a
+section that cannot be built reads "unavailable". Once a day the daemon also
+prunes the state database: alerts after 365 days, raw samples after 90 days
+(rolled up into daily min/avg/max that `/temp` and `/disks` keep using) and
+undelivered messages after 7 days (each dropped one is logged).
 
 **CLI subcommands.**
 

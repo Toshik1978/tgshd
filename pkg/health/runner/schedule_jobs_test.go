@@ -338,14 +338,14 @@ func TestJobCancelledByShutdownIsRetried(t *testing.T) {
 		return ctx.Err()
 	}
 	c := &cycle{now: f.now}
-	f.r.runJobs(ctx, c)
+	f.r.runDaily(ctx, c)
 
 	if len(c.errs) != 0 || !f.r.dailyLast.IsZero() {
 		t.Fatalf("cancelled job: errs %v, dailyLast %v; want neither", c.errs, f.r.dailyLast)
 	}
 
 	f.r.opts.Daily = func(context.Context, time.Time) error { j.daily = append(j.daily, f.now); return nil }
-	f.r.runJobs(context.Background(), c)
+	f.r.runDaily(context.Background(), c)
 
 	if len(j.daily) != 1 {
 		t.Fatalf("daily retried %d times, want 1", len(j.daily))
