@@ -130,10 +130,10 @@ and its rate limit, dependency skip
 
 **Independent Test**: spec US4 — fake inbox with single/multipart messages and a probe reply
 
-- [ ] T036 [P] [US4] gammu inbox repository in pkg/sms/gammu/inbox.go: select rows with `"Processed" = false` (`ID`, `SenderNumber`, `TextDecoded`, `UDH`, `ReceivingDateTime`), mark a set of IDs processed in one statement
-- [ ] T037 [US4] Inbox worker in pkg/sms/inbox.go (research R14): every 15 s group parts by sender + UDH concatenation reference, forward when complete or after 10 minutes with the parts present, same Telegram format as the ZTE worker, then mark processed; a `ProbeMatcher` is consulted first and matched replies are not forwarded
-- [ ] T038 [US4] Modem probe in pkg/health/check/modemprobe/modemprobe.go: weekly at `weekday`/`time`, random 12-hex token text, send via the SMS sender to the number in `phone_env`; match "sender compared by digits; by the last 9 digits when the two lengths differ" and exact text; PROBLEM at once on send failure, after `reply_within` (30 m) without reply, or when none returned for `max_silence` (8 d, counted from first run when never); RESOLVED by the next returned probe; state per data-model "ProbeState"
-- [ ] T039 [US4] Wire the inbox worker and modem probe under `BOT_GAMMU_DSN` in cmd/main.go and document removing gammu's `runonreceive` hook in README.md
+- [x] T036 [P] [US4] gammu inbox repository in pkg/sms/gammu/inbox.go: select rows with `"Processed" = false` (`ID`, `SenderNumber`, `TextDecoded`, `UDH`, `ReceivingDateTime`), mark a set of IDs processed in one statement
+- [x] T037 [US4] Inbox worker in pkg/sms/inbox.go (research R14): every 15 s group parts by sender + UDH concatenation reference, forward when complete or after 10 minutes with the parts present, same Telegram format as the ZTE worker, then mark processed; a `ProbeMatcher` is consulted first and matched replies are not forwarded
+- [x] T038 [US4] Modem probe in pkg/health/check/modemprobe/modemprobe.go: weekly at `weekday`/`time`, random 12-hex token text, send via the SMS sender to the number in `phone_env`; match "sender compared by digits; by the last 9 digits when the two lengths differ" and exact text; PROBLEM at once on send failure, after `reply_within` (30 m) without reply, or when none returned for `max_silence` (8 d, counted from first run when never); RESOLVED by the next returned probe; state per data-model "ProbeState"
+- [x] T039 [US4] Wire the inbox worker and modem probe under `BOT_GAMMU_DSN` in cmd/main.go and document removing gammu's `runonreceive` hook in README.md
 
 **Checkpoint**: US1–US4 work independently
 

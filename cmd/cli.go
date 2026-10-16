@@ -131,7 +131,7 @@ func runCheckOnce(ctx context.Context, cfg *config, cio cliIO) int {
 
 		return exitError
 	}
-	logger, err := newLogger(cfg)
+	logger, err := newOneShotLogger(cfg)
 	if err != nil {
 		fmt.Fprintf(cio.stderr, "tgshd check: %v\n", err)
 

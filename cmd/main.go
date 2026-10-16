@@ -73,7 +73,7 @@ func appOptions(getenv func(string) string) []fx.Option {
 		options = append(options, zteProviders(), zteWorkers())
 	}
 	if getenv("BOT_GAMMU_DSN") != "" {
-		options = append(options, gammuProviders())
+		options = append(options, gammuProviders(), gammuInboxProviders())
 	}
 	if getenv("BOT_HEALTH_CONFIG") != "" {
 		options = append(options, healthProviders())
@@ -202,6 +202,25 @@ func newLogger(cfg *config) (*zap.Logger, error) {
 	return logger, nil
 }
 
+// newOneShotLogger builds the logger for `check --once`: errors only, so
+// adapter warnings do not interleave with the verdict lines on the output.
+func newOneShotLogger(cfg *config) (*zap.Logger, error) {
+	config := zap.NewProductionConfig()
+	config.Level = zap.NewAtomicLevelAt(zapcore.ErrorLevel)
+	config.Encoding = "console"
+	config.EncoderConfig.EncodeLevel = zapcore.CapitalLevelEncoder
+	if cfg.AppEnv == "development" {
+		config.EncoderConfig.EncodeLevel = zapcore.CapitalColorLevelEncoder
+	}
+
+	logger, err := config.Build()
+	if err != nil {
+		return nil, fmt.Errorf("failed to build logger: %w", err)
+	}
+
+	return logger, nil
+}
+
 type config struct {
 	AppEnv        string   `env:"APP_ENV"`
 	TelegramToken string   `env:"TELEGRAM_TOKEN"`
@@ -246,6 +265,10 @@ func newTelegramBot(cfg *config) (*telebot.Bot, error) {
 		// telebot takes no context, so this bounds every Bot API call,
 		// including health messages sent with a deadline-less context.
 		Client: &http.Client{Timeout: telegramTimeout},
+		// Do not call getMe while constructing: with no network at boot that
+		// would stop the daemon and health monitoring with it. The consumer
+		// connects in the background instead.
+		Offline: true,
 	}
 
 	bot, err := telebot.NewBot(pref)

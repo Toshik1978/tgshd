@@ -105,7 +105,7 @@ func (s telegramSender) Send(ctx context.Context, text string) error {
 // smsSender sends health messages to the operator's phone through the gammu
 // outbox, each send bounded by smsSendTimeout.
 type smsSender struct {
-	sender command.SmsSender
+	sender boundedSMS
 	phone  string
 }
 
@@ -115,19 +115,12 @@ func newSMSSender(sender command.SmsSender, phone string) *smsSender {
 		return nil
 	}
 
-	return &smsSender{sender: sender, phone: phone}
+	return &smsSender{sender: boundedSMS{sender: sender}, phone: phone}
 }
 
 // Send implements notify.Sender.
 func (s *smsSender) Send(ctx context.Context, text string) error {
-	ctx, cancel := context.WithTimeout(ctx, smsSendTimeout)
-	defer cancel()
-
-	if err := s.sender.Publish(ctx, s.phone, text); err != nil {
-		return fmt.Errorf("send health sms: %w", err)
-	}
-
-	return nil
+	return s.sender.Publish(ctx, s.phone, text)
 }
 
 // heartbeatFile is the heartbeat path as a runner.Heartbeat.

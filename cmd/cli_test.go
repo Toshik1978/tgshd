@@ -15,6 +15,7 @@ import (
 
 	"go.uber.org/fx"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 
 	"github.com/Toshik1978/tgshd/pkg/health"
 	hcfg "github.com/Toshik1978/tgshd/pkg/health/config"
@@ -131,6 +132,21 @@ func TestParseHeartbeatArgs(t *testing.T) {
 				t.Fatalf("seconds = %d, want %d", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestNewOneShotLoggerLogsOnlyErrors(t *testing.T) {
+	for _, env := range []string{"", "production", "development"} {
+		logger, err := newOneShotLogger(&config{AppEnv: env})
+		if err != nil {
+			t.Fatalf("env %q: newOneShotLogger() = %v", env, err)
+		}
+		if logger.Core().Enabled(zapcore.WarnLevel) {
+			t.Errorf("env %q: warnings are enabled, want errors only", env)
+		}
+		if !logger.Core().Enabled(zapcore.ErrorLevel) {
+			t.Errorf("env %q: errors are disabled", env)
+		}
 	}
 }
 

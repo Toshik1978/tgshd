@@ -144,6 +144,7 @@ func healthCheckProviders() fx.Option {
 		fx.Annotate(httpChecks, fx.ResultTags(healthCheckGroup)),
 		fx.Annotate(freshnessChecks, fx.ResultTags(healthCheckGroup)),
 		fx.Annotate(commandChecks, fx.ResultTags(healthCheckGroup)),
+		modemProbeChecks,
 	)
 }
 

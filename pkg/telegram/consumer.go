@@ -2,9 +2,12 @@ package telegram
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
+	"time"
 
 	"go.uber.org/zap"
 	"gopkg.in/telebot.v4"
@@ -25,7 +28,17 @@ type consumer struct {
 	bot      *telebot.Bot
 	access   *AccessList
 	handlers []Handler
+
+	mu      sync.Mutex
+	cancel  context.CancelFunc
+	done    chan struct{}
+	polling bool
 }
+
+const (
+	connectInitialDelay = 2 * time.Second
+	connectMaxDelay     = time.Minute
+)
 
 // NewConsumer initializes new consumer for telegram messages.
 func NewConsumer(logger *zap.Logger, bot *telebot.Bot, access *AccessList, handlers []Handler) *consumer {
@@ -65,15 +78,41 @@ func (c *consumer) Start(ctx context.Context) error {
 		return c.handleCommands(ctx, enabled, tctx)
 	})
 
-	go c.bot.Start()
+	// The bot is created offline, so Telegram being unreachable at boot must
+	// not stop the daemon: connect and start polling in the background.
+	runCtx, cancel := context.WithCancel(context.Background())
+	c.mu.Lock()
+	c.cancel = cancel
+	c.done = make(chan struct{})
+	done := c.done
+	c.mu.Unlock()
+
+	go func() {
+		defer close(done)
+		c.connectAndPoll(runCtx)
+	}()
 
 	return nil
 }
 
 func (c *consumer) Stop(ctx context.Context) error {
+	// Cancelling under the lock means the connect goroutine either already
+	// marked itself polling or will see the cancellation and never start.
+	c.mu.Lock()
+	done, polling := c.done, c.polling
+	if c.cancel != nil {
+		c.cancel()
+	}
+	c.mu.Unlock()
+
 	shutdownChannel := make(chan any)
 	go func() {
-		c.bot.Stop()
+		if polling {
+			c.bot.Stop()
+		}
+		if done != nil {
+			<-done
+		}
 		close(shutdownChannel)
 		c.logger.Info("Telegram bot gracefully stopped")
 	}()
@@ -83,6 +122,48 @@ func (c *consumer) Stop(ctx context.Context) error {
 	case <-ctx.Done():
 		return context.DeadlineExceeded
 	}
+
+	return nil
+}
+
+// connectAndPoll waits until Telegram answers getMe, then polls until stopped.
+func (c *consumer) connectAndPoll(ctx context.Context) {
+	err := retryUntil(ctx, connectInitialDelay, connectMaxDelay, c.fetchMe, func(err error, delay time.Duration) {
+		c.logger.Warn("Telegram is unreachable, will retry", zap.Error(err), zap.Duration("retry_in", delay))
+	})
+	if err != nil {
+		return
+	}
+	c.logger.Info("Telegram connected")
+
+	c.mu.Lock()
+	if ctx.Err() != nil {
+		c.mu.Unlock()
+		return
+	}
+	c.polling = true
+	c.mu.Unlock()
+
+	c.bot.Start()
+}
+
+// fetchMe asks Telegram who the bot is and stores the answer, which telebot
+// would otherwise have fetched while constructing an online bot.
+func (c *consumer) fetchMe() error {
+	data, err := c.bot.Raw("getMe", nil)
+	if err != nil {
+		return fmt.Errorf("failed to call getMe: %w", err)
+	}
+	var resp struct {
+		Result *telebot.User `json:"result"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return fmt.Errorf("failed to decode getMe: %w", err)
+	}
+	if resp.Result == nil {
+		return errors.New("getMe returned no bot user")
+	}
+	c.bot.Me = resp.Result
 
 	return nil
 }

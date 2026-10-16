@@ -6,6 +6,8 @@ import (
 	"errors"
 
 	"go.uber.org/zap"
+
+	"github.com/Toshik1978/tgshd/pkg/sms"
 )
 
 var errBadRequest = errors.New("phone and message can't be empty")
@@ -32,7 +34,7 @@ func (g *gammu) Publish(ctx context.Context, phone, msg string) error {
 	if phone == "" || msg == "" {
 		return errBadRequest
 	}
-	g.logger.With(zap.String("phone", phone)).Info("Publish SMS")
+	g.logger.With(zap.String("phone", sms.MaskPhone(phone))).Info("Publish SMS")
 
 	parts := g.builder.Do(ctx, msg)
 	if len(parts) == 1 {

@@ -28,6 +28,8 @@ monitoring and control.
 
 - **Incoming SMS forwarding** — polls the ZTE MC888 modem for new SMS and
   forwards them to your Telegram chat (enabled when the ZTE modem is configured).
+  With gammu configured, SMS received by gammu-smsd are forwarded the same way
+  (see [Incoming SMS through gammu](#incoming-sms-through-gammu)).
 
 - **Host health monitoring** — scheduled checks with PROBLEM/RESOLVED alerts that
   survive restarts (see [Host health monitoring](#host-health-monitoring)).
@@ -42,7 +44,7 @@ that feature is simply inactive and the daemon still runs.
 - Optional, per feature: a [NUT](https://networkupstools.org/) server (power),
   a ZTE MC888 modem (network switching + incoming SMS), and a
   [gammu-smsd](https://wammu.eu/smsd/) instance with a **PostgreSQL** backend
-  (outgoing SMS).
+  (outgoing and incoming SMS, modem probe).
 - Host health monitoring (`BOT_HEALTH_CONFIG`), hardware checks: the `disks`
   check needs **[smartmontools](https://www.smartmontools.org/)** (`smartctl`
   7.0+ for JSON output) on `PATH`; GPU temperatures use `nvidia-smi` when it is
@@ -80,7 +82,7 @@ Configuration is read from the environment (a local `.env` is auto-loaded; see
 | `BOT_NUT_WARN` / `BOT_NUT_ERR` | Voltage warning/error thresholds |
 | `BOT_ZTE_HOST` | ZTE MC888 modem address — enables the modem features |
 | `BOT_ZTE_PASS` | ZTE modem admin password |
-| `BOT_GAMMU_DSN` | PostgreSQL DSN for the gammu-smsd outbox — enables `/sms` |
+| `BOT_GAMMU_DSN` | PostgreSQL DSN of the gammu-smsd database — enables `/sms`, incoming SMS forwarding from its inbox and the `modem_probe` check |
 | `BOT_HEALTH_CONFIG` | Path to the health YAML — enables host health monitoring (unset: off) |
 | `BOT_HOST_NAME` | Prefix for every health message (default: the OS host name) |
 | `BOT_SMTP_ADDR` | `host:port` of an SMTP relay — checker errors are also sent by email |
@@ -154,6 +156,53 @@ missing file or an old `ts` as "daemon quiet", unless `now < planned_until`.
 **Host requirements.** Run tgshd as root on the host itself (not in the
 distroless container) so it can read host state; the state database and
 instance lock live in `general.state_dir` (default `/var/lib/tgshd`).
+
+## Incoming SMS through gammu
+
+With `BOT_GAMMU_DSN` set, tgshd reads the gammu-smsd `inbox` table every 15
+seconds, forwards each received SMS to `TELEGRAM_CHAT_ID` (multi-part texts
+joined; parts still missing after 10 minutes are forwarded as incomplete) and
+marks its rows `Processed`. This runs with or without health monitoring. If
+PostgreSQL is unreachable the daemon still starts; each poll logs an error and
+the messages are forwarded once the database is back.
+
+**Remove gammu-smsd's `runonreceive` hook.** tgshd now owns incoming SMS. Delete
+the `RunOnReceive` line from the gammu-smsd configuration (its `[smsd]`
+section) and restart gammu-smsd; otherwise every message is delivered twice,
+once by the hook and once by tgshd.
+
+**Modem probe.** With health monitoring on, a `modem_probe` section proves the
+modem and SIM still work: once a week (`weekday`, `time`) tgshd sends an SMS
+with a random token to the modem's own number, and the inbox poll recognises
+the reply (sender compared by digits, by the last 9 digits when the lengths
+differ; exact text) and does not forward it. A PROBLEM is raised at once when
+the send fails, when the reply has not come back within `reply_within`, or when
+no probe has come back for `max_silence`; the next returned probe resolves it.
+`phone_env` names the environment variable holding the modem's number, so the
+number stays out of the YAML:
+
+```yaml
+modem_probe:
+  phone_env: MODEM_PHONE   # MODEM_PHONE=+10000000000 in the service environment
+  weekday: sunday
+  time: "11:02"
+  reply_within: 30m
+  max_silence: 8d
+```
+
+The probe needs `BOT_GAMMU_DSN`; without it the section is reported as a
+checker error and not run. Its state survives restarts. `tgshd check --once`
+never sends the probe: it prints the stored probe state instead.
+
+**Verifying it.**
+
+1. Remove `RunOnReceive` from the gammu-smsd configuration and restart
+   gammu-smsd.
+2. Send an SMS to the modem: it is forwarded to Telegram once, and its `inbox`
+   row has `Processed = true`.
+3. Set the probe's `weekday`/`time` a few minutes ahead and restart tgshd: the
+   probe is sent and comes back, it is not forwarded, and `/status` stays
+   green (a passing probe sends no alert).
 
 ## Build & run
 
