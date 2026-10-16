@@ -1168,3 +1168,91 @@ func TestQueueDropsAreLogged(t *testing.T) {
 		t.Fatalf("drop log = %+v, want the oldest message (id 1) logged", entries)
 	}
 }
+
+func TestDistinctCheckerErrors(t *testing.T) {
+	ce := func(subject, kind, msg string) error {
+		return health.CheckError{Subject: subject, Kind: kind, Err: errors.New(msg)}
+	}
+	c := newFakeCheck(nil, "disks", health.CheckResult{Err: errors.Join(
+		ce("TEST0000000001", "no-verdict", "no verdict"),
+		ce("TEST0000000002", "no-temperature", "no temperature"),
+		ce("", "discovery", "scan failed"),
+		errors.New("plain failure"),
+	)})
+	f := newFixture(t, &fakeStore{}, checkOf(c))
+	f.tick(t)
+
+	tlg := f.tlg.texts()
+	for _, sub := range []string{
+		"TEST0000000001/no-verdict: no verdict",
+		"TEST0000000002/no-temperature: no temperature",
+		"discovery: scan failed",
+		"plain failure",
+	} {
+		if n := countContaining(tlg, sub); n != 1 {
+			t.Fatalf("%q delivered %d times in %q, want 1", sub, n, tlg)
+		}
+	}
+	keys := make([]string, 0, len(f.st.alerts))
+	for _, a := range f.st.alerts {
+		keys = append(keys, a.Key)
+	}
+	want := []string{
+		"disks/TEST0000000001/no-verdict", "disks/TEST0000000002/no-temperature",
+		"disks/discovery", "disks/run/error",
+	}
+	if !slices.Equal(keys, want) {
+		t.Fatalf("alert keys = %v, want %v", keys, want)
+	}
+
+	// Same faults again, plus one new key: only the new one is delivered
+	// while the others are inside their 24 h window.
+	c.set(health.CheckResult{Err: errors.Join(
+		ce("TEST0000000001", "no-verdict", "no verdict"),
+		ce("TEST0000000003", "no-verdict", "third drive"),
+	)})
+	f.next(t)
+
+	tlg = f.tlg.texts()
+	if n := countContaining(tlg, "TEST0000000003/no-verdict: third drive"); n != 1 {
+		t.Fatalf("new key delivered %d times in %q, want 1", n, tlg)
+	}
+	if n := countContaining(tlg, "TEST0000000001/no-verdict"); n != 1 {
+		t.Fatalf("old key delivered %d times in %q, want 1 (rate limited)", n, tlg)
+	}
+}
+
+func TestNestedPlainErrorKeepsRunErrorKey(t *testing.T) {
+	ce := func(subject string) error {
+		return health.CheckError{Subject: subject, Kind: "lost", Err: errors.New("lost " + subject)}
+	}
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{"nested join", errors.Join(errors.Join(ce("a"), errors.New("plain one")), ce("b"), errors.New("plain two"))},
+		{"wrapped join", fmt.Errorf("scan: %w", errors.Join(
+			ce("a"), errors.New("plain one"), ce("b"), errors.New("plain two"),
+		))},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := newFakeCheck(nil, "disks", health.CheckResult{Err: tt.err})
+			f := newFixture(t, &fakeStore{}, checkOf(c))
+			f.tick(t)
+
+			keys := make([]string, 0, len(f.st.alerts))
+			for _, a := range f.st.alerts {
+				keys = append(keys, a.Key)
+			}
+			want := []string{"disks/a/lost", "disks/b/lost", "disks/run/error"}
+			if !slices.Equal(keys, want) {
+				t.Fatalf("alert keys = %v, want %v", keys, want)
+			}
+			tlg := f.tlg.texts()
+			if countContaining(tlg, "plain one") != 1 || countContaining(tlg, "plain two") != 1 {
+				t.Fatalf("a plain error was lost: %q", tlg)
+			}
+		})
+	}
+}

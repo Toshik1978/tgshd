@@ -3,7 +3,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"database/sql"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"slices"
@@ -799,5 +801,88 @@ func TestRunCheckOnceInterruptedExitsOne(t *testing.T) {
 	}
 	if !strings.Contains(stderr.String(), "tgshd check: interrupted") {
 		t.Fatalf("stderr = %q", stderr)
+	}
+}
+
+func TestWriteResultPrintsOneLinePerDistinctCheckerError(t *testing.T) {
+	t.Parallel()
+
+	var (
+		buf bytes.Buffer
+		tl  tally
+	)
+	err := errors.Join(
+		health.CheckError{Subject: "TEST0000000001", Kind: "smart", Err: errors.New("read failed")},
+		health.CheckError{Subject: "TEST0000000001", Kind: "smart", Err: errors.New("read failed again")},
+		health.CheckError{Subject: "TEST0000000002", Kind: "smart", Err: errors.New("no\nanswer")},
+		health.CheckError{Kind: "scan", Err: errors.New("lsblk failed")},
+		errors.New("plain trouble"),
+	)
+	writeResult(&buf, "disks", health.CheckResult{Err: fmt.Errorf("run: %w", err)}, &tl)
+
+	want := "ERROR disks/TEST0000000001/smart: TEST0000000001/smart: read failed\n" +
+		"ERROR disks/TEST0000000002/smart: TEST0000000002/smart: no answer\n" +
+		"ERROR disks/scan: scan: lsblk failed\n" +
+		"ERROR disks/run/error: plain trouble\n"
+	if got := buf.String(); got != want {
+		t.Fatalf("output:\n%s\nwant:\n%s", got, want)
+	}
+	if tl.errors != 4 {
+		t.Fatalf("errors = %d, want 4", tl.errors)
+	}
+}
+
+// setUserVersion creates the state database of a one-shot run at the given
+// schema version, with no tables.
+func setUserVersion(t *testing.T, stateDir string, version int) {
+	t.Helper()
+
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", "file:"+filepath.Join(stateDir, store.FileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = db.Close() }()
+	if _, err = db.ExecContext(t.Context(), "PRAGMA user_version = "+strconv.Itoa(version)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestRunCheckOnceSchemaVersionFallback(t *testing.T) {
+	t.Parallel()
+
+	const v1Notice = "state database is at schema version 1; run the daemon once to migrate"
+	tests := []struct {
+		name       string
+		version    int
+		wantNotice bool
+		wantWarn   string
+	}{
+		{name: "version one", version: 1, wantNotice: true},
+		{name: "version zero is not claimed as one", version: 0, wantWarn: "stored state not used"},
+		{name: "newer than the build", version: 99, wantWarn: "stored state not used"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			path, stateDir := writeHealthConfig(t, "")
+			setUserVersion(t, stateDir, tt.version)
+			cio, stdout, stderr := testIO(nil, time.Unix(0, 0))
+			if code := runCheckOnce(t.Context(), &config{HealthConfig: path}, cio); code != exitOK {
+				t.Fatalf("code = %d, stderr %q", code, stderr)
+			}
+			if !strings.Contains(stdout.String(), "SUMMARY ") {
+				t.Fatalf("the run did not finish: %q", stdout)
+			}
+			if got := strings.Contains(stderr.String(), v1Notice); got != tt.wantNotice {
+				t.Fatalf("v1 notice = %v, want %v: %q", got, tt.wantNotice, stderr)
+			}
+			if tt.wantWarn != "" && !strings.Contains(stderr.String(), tt.wantWarn) {
+				t.Fatalf("stderr = %q, want %q", stderr, tt.wantWarn)
+			}
+		})
 	}
 }

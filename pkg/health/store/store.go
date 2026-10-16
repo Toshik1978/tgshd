@@ -24,6 +24,22 @@ const (
 // ErrSchemaTooNew is returned when the database was written by a newer version.
 var ErrSchemaTooNew = errors.New("database schema is newer than this build supports")
 
+// ErrSchemaOld is returned by OpenReadOnly for a database that the daemon has
+// not migrated to the current schema yet.
+var ErrSchemaOld = errors.New("database schema is older than this build expects")
+
+// OldSchemaError reports the user_version of a database that OpenReadOnly found
+// below the current schema. It wraps ErrSchemaOld.
+type OldSchemaError struct {
+	Version int
+}
+
+func (e *OldSchemaError) Error() string {
+	return fmt.Sprintf("schema version %d, want %d: %s", e.Version, len(migrations()), ErrSchemaOld)
+}
+
+func (e *OldSchemaError) Unwrap() error { return ErrSchemaOld }
+
 // Store is the SQLite-backed state store.
 type Store struct {
 	db   *sql.DB
@@ -80,7 +96,7 @@ func OpenReadOnly(ctx context.Context, stateDir string) (*Store, error) {
 
 	version, err := userVersion(ctx, db)
 	if err == nil && version != len(migrations()) {
-		err = fmt.Errorf("schema version %d, want %d", version, len(migrations()))
+		err = &OldSchemaError{Version: version}
 		if version > len(migrations()) {
 			err = fmt.Errorf("schema version %d: %w", version, ErrSchemaTooNew)
 		}
@@ -174,7 +190,7 @@ func applyStep(ctx context.Context, db *sql.DB, version int, ddl string) error {
 
 // migrations returns the ordered schema steps; step N brings user_version to N.
 func migrations() []string {
-	return []string{schemaV1}
+	return []string{schemaV1, schemaV2}
 }
 
 const schemaV1 = `
@@ -210,4 +226,10 @@ CREATE TABLE queue (
   channel TEXT NOT NULL CHECK (channel IN ('tlg','sms','email')),
   text TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0
 );
+`
+
+const schemaV2 = `
+ALTER TABLE queue ADD COLUMN kind TEXT NOT NULL DEFAULT 'event';
+ALTER TABLE queue ADD COLUMN check_name TEXT NOT NULL DEFAULT '';
+ALTER TABLE queue ADD COLUMN key TEXT NOT NULL DEFAULT '';
 `

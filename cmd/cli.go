@@ -45,6 +45,10 @@ const (
 	labelGood    = "GOOD"
 	labelBad     = "BAD"
 	labelUnknown = "UNKNOWN"
+
+	// schemaV1Notice is printed when the daemon has not migrated the state
+	// database since the upgrade; the run goes on without stored state.
+	schemaV1Notice = "state database is at schema version 1; run the daemon once to migrate"
 )
 
 var (
@@ -199,7 +203,12 @@ func parseCheckArgs(args []string) error {
 func attachState(ctx context.Context, hs *healthSetup, stderr io.Writer) (closeState func()) {
 	st, err := openStateReadOnly(ctx, hs.Config.General.StateDir)
 	if err != nil {
-		fmt.Fprintf(stderr, "tgshd check: stored state not used: %v\n", err)
+		var old *store.OldSchemaError
+		if errors.As(err, &old) && old.Version == 1 {
+			fmt.Fprintln(stderr, schemaV1Notice)
+		} else {
+			fmt.Fprintf(stderr, "tgshd check: stored state not used: %v\n", err)
+		}
 	}
 	if st == nil {
 		return func() {}
@@ -344,8 +353,28 @@ func writeResult(w io.Writer, name string, res health.CheckResult, t *tally) {
 		t.samples++
 		fmt.Fprintf(w, "SAMPLE %s: %s\n", s.Metric, strconv.FormatFloat(s.Value, 'g', -1, 64))
 	}
-	if res.Err != nil {
-		writeError(w, name+"/run/error", res.Err.Error(), t)
+	writeCheckErrors(w, name, res.Err, t)
+}
+
+// writeCheckErrors prints one ERROR line per distinct key of err, keyed as the
+// runner keys them: a health.CheckError under its own key, everything else
+// joined under "<check>/run/error".
+func writeCheckErrors(w io.Writer, check string, err error, t *tally) {
+	if err == nil {
+		return
+	}
+	checks, plain := health.SplitErrors(err)
+	seen := make(map[string]bool, len(checks))
+	for _, ce := range checks {
+		key := ce.Key(check)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		writeError(w, key, ce.Error(), t)
+	}
+	if len(plain) > 0 {
+		writeError(w, check+"/run/error", errors.Join(plain...).Error(), t)
 	}
 }
 

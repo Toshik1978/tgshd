@@ -637,9 +637,7 @@ func (r *Runner) runOne(tickCtx context.Context, idx int) health.CheckResult {
 // changes no state.
 func (r *Runner) apply(c *cycle, chk health.Check, res health.CheckResult) {
 	res.Readings = r.dropRetired(chk.Name, res.Readings)
-	if res.Err != nil {
-		c.fail(chk.Name+"/run/error", res.Err.Error())
-	}
+	r.failErr(c, chk.Name, res.Err)
 	for _, rd := range res.Readings {
 		if rd.Kind != health.State || rd.Verdict != health.Unknown {
 			continue
@@ -659,6 +657,23 @@ func (r *Runner) apply(c *cycle, chk health.Check, res health.CheckResult) {
 	r.forget(c, chk.Name, res.Forget)
 	for _, s := range res.Samples {
 		c.samples = append(c.samples, store.SampleRow{At: c.now, Metric: s.Metric, Value: s.Value})
+	}
+}
+
+// failErr raises one checker error per distinct key: each health.CheckError in
+// err under its own key, anything else under the 001 key "<check>/run/error"
+// so a plain error keeps its old key. Rate limiting is per key (RateMarks), so
+// a new key is delivered while another key of the check is inside its window.
+func (r *Runner) failErr(c *cycle, check string, err error) {
+	if err == nil {
+		return
+	}
+	checks, plain := health.SplitErrors(err)
+	for _, ce := range checks {
+		c.fail(ce.Key(check), ce.Error())
+	}
+	if len(plain) > 0 {
+		c.fail(check+"/run/error", errors.Join(plain...).Error())
 	}
 }
 

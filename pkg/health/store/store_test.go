@@ -94,8 +94,8 @@ func TestOpenCreatesSchema(t *testing.T) {
 			t.Errorf("index %s missing", n)
 		}
 	}
-	if v := pragma(t, s.db, "user_version"); v != "1" {
-		t.Errorf("user_version = %s, want 1", v)
+	if v := pragma(t, s.db, "user_version"); v != "2" {
+		t.Errorf("user_version = %s, want 2", v)
 	}
 	if v := pragma(t, s.db, "journal_mode"); v != "wal" {
 		t.Errorf("journal_mode = %s, want wal", v)
@@ -154,8 +154,8 @@ func TestOpenIsIdempotentAndKeepsData(t *testing.T) {
 	if got := kvValue(t, s.db, "a"); got != "b" {
 		t.Errorf("kv a = %q, want b", got)
 	}
-	if got := pragma(t, s.db, "user_version"); got != "1" {
-		t.Errorf("user_version = %s, want 1", got)
+	if got := pragma(t, s.db, "user_version"); got != "2" {
+		t.Errorf("user_version = %s, want 2", got)
 	}
 }
 
@@ -334,5 +334,57 @@ func TestOpenReadOnlyUnmigrated(t *testing.T) {
 	}
 	if errors.Is(err, ErrSchemaTooNew) {
 		t.Errorf("user_version 0 reported as too new: %v", err)
+	}
+}
+
+// seedV1 creates a version-1 database holding one queued message.
+func seedV1(t *testing.T, dir string) {
+	t.Helper()
+	raw, err := sql.Open(driverName, "file:"+filepath.Join(dir, FileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = raw.Close() }()
+	ctx := context.Background()
+	for _, q := range []string{
+		schemaV1,
+		`INSERT INTO queue (id, created_at, channel, text, attempts) VALUES (3, 100, 'tlg', 'old', 1)`,
+		"PRAGMA user_version = 1",
+	} {
+		if _, err = raw.ExecContext(ctx, q); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+func TestMigrateV1ToV2(t *testing.T) {
+	dir := t.TempDir()
+	ctx := context.Background()
+	seedV1(t, dir)
+
+	ro, err := OpenReadOnly(ctx, dir)
+	if err == nil {
+		_ = ro.Close()
+		t.Fatal("OpenReadOnly accepted a version-1 database")
+	}
+	if !errors.Is(err, ErrSchemaOld) || errors.Is(err, ErrSchemaTooNew) {
+		t.Errorf("OpenReadOnly error = %v, want ErrSchemaOld", err)
+	}
+
+	s, err := Open(ctx, dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+	if v := pragma(t, s.db, "user_version"); v != "2" {
+		t.Errorf("user_version = %s, want 2", v)
+	}
+	st, err := s.Load(ctx)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(st.Queue) != 1 || st.Queue[0].ID != 3 || st.Queue[0].Kind != "event" ||
+		st.Queue[0].Check != "" || st.Queue[0].Key != "" {
+		t.Errorf("queue = %+v, want the 001 row read back as event", st.Queue)
 	}
 }

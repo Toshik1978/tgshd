@@ -88,6 +88,11 @@ type QueuedMessage struct {
 	Channel   string
 	Text      string
 	Attempts  int
+	// Kind is "problem", "resolved" or "event"; the zero value reads as "event".
+	Kind string
+	// Check and Key identify the condition a problem or resolved message is about.
+	Check string
+	Key   string
 }
 
 // Options configures a Notifier.

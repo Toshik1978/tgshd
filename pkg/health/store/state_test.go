@@ -41,7 +41,9 @@ func sampleState() State {
 		}},
 		KV:        map[string]string{"kernel.cursor": "abc", "first_run": "done"},
 		RateMarks: []health.RateMark{{Key: "checker/disks", Channel: "tlg", LastSentAt: ts(900)}},
-		Queue:     []notify.QueuedMessage{{ID: 7, CreatedAt: ts(1100), Channel: "sms", Text: "hello", Attempts: 2}},
+		Queue: []notify.QueuedMessage{
+			{ID: 7, CreatedAt: ts(1100), Channel: "sms", Text: "hello", Attempts: 2, Kind: "event"},
+		},
 	}
 }
 
@@ -326,5 +328,48 @@ func TestLoadCorruptRateMarks(t *testing.T) {
 	}
 	if len(got.RateMarks) != 0 {
 		t.Errorf("rate marks = %+v, want none", got.RateMarks)
+	}
+}
+
+func TestQueueKindRoundTrip(t *testing.T) {
+	s := openTemp(t)
+	ctx := context.Background()
+	want := []notify.QueuedMessage{
+		{
+			ID:        1,
+			CreatedAt: ts(10),
+			Channel:   "tlg",
+			Text:      "p",
+			Kind:      "problem",
+			Check:     "disks",
+			Key:       "disks/TEST0000000001/wear",
+		},
+		{
+			ID:        2,
+			CreatedAt: ts(11),
+			Channel:   "sms",
+			Text:      "r",
+			Kind:      "resolved",
+			Check:     "disks",
+			Key:       "disks/TEST0000000001/wear",
+		},
+		{ID: 3, CreatedAt: ts(12), Channel: "email", Text: "e", Kind: "event"},
+		{ID: 4, CreatedAt: ts(13), Channel: "tlg", Text: "unset"},
+	}
+	if err := s.Checkpoint(ctx, State{Queue: want}, nil, nil); err != nil {
+		t.Fatalf("Checkpoint: %v", err)
+	}
+	got, err := s.Load(ctx)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want[3].Kind = "event" // the zero value is stored as event
+	if !reflect.DeepEqual(got.Queue, want) {
+		t.Errorf("queue = %+v, want %+v", got.Queue, want)
+	}
+
+	bad := State{Queue: []notify.QueuedMessage{{ID: 9, CreatedAt: ts(1), Channel: "tlg", Kind: "bogus"}}}
+	if err = s.Checkpoint(ctx, bad, nil, nil); err == nil || errors.Is(err, ErrDegraded) {
+		t.Fatalf("bad kind = %v, want plain error", err)
 	}
 }

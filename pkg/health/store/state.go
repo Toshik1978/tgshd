@@ -177,6 +177,11 @@ func validate(st State, alerts []Alert) error {
 		default:
 			return fmt.Errorf("invalid queue channel %q", st.Queue[i].Channel)
 		}
+		switch st.Queue[i].Kind {
+		case "", "problem", "resolved", "event":
+		default:
+			return fmt.Errorf("invalid queue kind %q", st.Queue[i].Kind)
+		}
 	}
 
 	return nil
@@ -303,9 +308,14 @@ func writeQueue(ctx context.Context, tx *sql.Tx, queue []notify.QueuedMessage) e
 		return fmt.Errorf("clear queue: %w", err)
 	}
 	for _, m := range queue {
+		kind := m.Kind
+		if kind == "" {
+			kind = "event"
+		}
 		_, err := tx.ExecContext(ctx,
-			`INSERT INTO queue (id, created_at, channel, text, attempts) VALUES (?, ?, ?, ?, ?)`,
-			m.ID, m.CreatedAt.Unix(), m.Channel, m.Text, m.Attempts)
+			`INSERT INTO queue (id, created_at, channel, text, attempts, kind, check_name, key)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			m.ID, m.CreatedAt.Unix(), m.Channel, m.Text, m.Attempts, kind, m.Check, m.Key)
 		if err != nil {
 			return fmt.Errorf("write queue message %d: %w", m.ID, err)
 		}
@@ -417,7 +427,7 @@ func (s *Store) loadKV(ctx context.Context) (map[string]string, error) {
 
 func (s *Store) loadQueue(ctx context.Context) ([]notify.QueuedMessage, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, created_at, channel, text, attempts FROM queue ORDER BY id`)
+		`SELECT id, created_at, channel, text, attempts, kind, check_name, key FROM queue ORDER BY id`)
 	if err != nil {
 		return nil, fmt.Errorf("load queue: %w", err)
 	}
@@ -427,7 +437,7 @@ func (s *Store) loadQueue(ctx context.Context) ([]notify.QueuedMessage, error) {
 	for rows.Next() {
 		var m notify.QueuedMessage
 		var created int64
-		if err := rows.Scan(&m.ID, &created, &m.Channel, &m.Text, &m.Attempts); err != nil {
+		if err := rows.Scan(&m.ID, &created, &m.Channel, &m.Text, &m.Attempts, &m.Kind, &m.Check, &m.Key); err != nil {
 			return nil, fmt.Errorf("scan queue message: %w", err)
 		}
 		m.CreatedAt = time.Unix(created, 0).UTC()
