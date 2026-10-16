@@ -350,24 +350,24 @@ services line per check or group with freshness ages and the modem probe; a defi
 attribute 177), mounts, freshness stamps of various ages and a modem probe result; build the
 summary with and without a length overflow; verify each line and the cut order (quickstart §6)
 
-- [ ] T058 [P] [US6] Raw mount and block topology reads in pkg/host/sysfs/sysfs.go (tests in pkg/host/sysfs/sysfs_test.go: `TestMountInfo`, `TestBlockTopology`) (FR-044, R27)
+- [x] T058 [P] [US6] Raw mount and block topology reads in pkg/host/sysfs/sysfs.go (tests in pkg/host/sysfs/sysfs_test.go: `TestMountInfo`, `TestBlockTopology`) (FR-044, R27)
     - `MountInfo()` returns the `/proc/self/mountinfo` entries (device number, mount point) and `BlockTopology()` returns each block device's partitions and `holders` (md, dm) from `/sys/block`; raw data only, no aggregation; tested on literal fixtures and a temp-dir tree
-- [ ] T059 [P] [US6] `summary_group` common key in pkg/health/config/types.go, pkg/health/config/checks.go and pkg/health/config/validate.go (tests in pkg/health/config/config_test.go) (FR-046)
+- [x] T059 [P] [US6] `summary_group` common key in pkg/health/config/types.go, pkg/health/config/checks.go and pkg/health/config/validate.go (tests in pkg/health/config/config_test.go) (FR-046)
     - Every check: `summary_group` string, default none (one summary line per check), "`summary_group` matches `[a-z0-9-]+`"
-- [ ] T060 [P] [US6] Keep freshness stamps for the summary in pkg/health/check/freshness/freshness.go (tests in pkg/health/check/freshness/freshness_test.go) (FR-047, R27)
+- [x] T060 [P] [US6] Keep freshness stamps for the summary in pkg/health/check/freshness/freshness.go (tests in pkg/health/check/freshness/freshness_test.go) (FR-047, R27)
     - The existing `KVState` (the `State` passed to `freshness.New`) is extended to hold per entry `freshness.<name>.stamp` (Unix seconds) and `freshness.<name>.read_ok` (`0`/`1`), updated by every run
-- [ ] T061 [P] [US6] Pure mount aggregation per drive in pkg/health/report/mounts.go (tests in pkg/health/report/mounts_test.go, new: `TestDriveMountsPartitions`, `TestDriveMountsHolders`) (FR-044, R27)
+- [x] T061 [P] [US6] Pure mount aggregation per drive in pkg/health/report/mounts.go (tests in pkg/health/report/mounts_test.go, new: `TestDriveMountsPartitions`, `TestDriveMountsHolders`) (FR-044, R27)
     - `DriveMounts(node, entries, topology)` returns the mount points of the drive, its partitions and their holders, sorted; empty ⇒ `-`; a read error passed in ⇒ `?`
-- [ ] T062 [US6] Drive lines in pkg/health/report/summary.go (tests in pkg/health/report/summary_test.go: `TestSummaryDriveLine` proves US6 acc. 1, `TestSummaryAsleepSince` US6 acc. 2, `TestSummarySATAWear` US6 acc. 3) (FR-044, FR-045, FR-009)
+- [x] T062 [US6] Drive lines in pkg/health/report/summary.go (tests in pkg/health/report/summary_test.go: `TestSummaryDriveLine` proves US6 acc. 1, `TestSummaryAsleepSince` US6 acc. 2, `TestSummarySATAWear` US6 acc. 3) (FR-044, FR-045, FR-009)
     - `sda (/, /home) 41°C, self-test passed 12 d ago, wear 8%`: device node; mounts from `DriveMounts` ("`-` none, `?` unknown"); temperature; newest self-test result (`passed`, `failed`, `aborted`, `in progress`, `not readable`, `none`) and the calendar age of the last passed test; wear (NVMe or SATA SSD)
     - `asleep since Tue 14:00` / `unreadable since …` / `missing` when the last attempt did not read the drive
-- [ ] T063 [US6] Services lines with groups, freshness ages and the modem probe in pkg/health/report/summary.go (depends on T059, T060) (tests in pkg/health/report/summary_test.go: `TestSummaryFreshnessAge` proves US6 acc. 4, `TestSummaryModemProbe` US6 acc. 5) (FR-046, FR-047, FR-048, R27)
+- [x] T063 [US6] Services lines with groups, freshness ages and the modem probe in pkg/health/report/summary.go (depends on T059, T060) (tests in pkg/health/report/summary_test.go: `TestSummaryFreshnessAge` proves US6 acc. 4, `TestSummaryModemProbe` US6 acc. 5) (FR-046, FR-047, FR-048, R27)
     - One line per configured check or per `summary_group`, including network, UPS and the modem probe: `ok` or the open problems' texts joined with `; `
     - Freshness ages: `<1 h`, `N h` below 48 h, `N d`, `none` when missing, `?` when unreadable; prefixed by the check name inside a group
     - Modem probe: `last round trip <age> ago` or `never`, or its failure text, and whether a probe is outstanding (`modem_probe: last round trip 3 d ago, no probe outstanding`)
-- [ ] T064 [US6] Cut order to one message in pkg/health/report/summary.go (tests in pkg/health/report/summary_test.go: `TestSummaryCutOrder`, `TestSummaryOpenProblemsKept`, prove US6 acc. 6 and SC-010) (FR-049, R27)
+- [x] T064 [US6] Cut order to one message in pkg/health/report/summary.go (tests in pkg/health/report/summary_test.go: `TestSummaryCutOrder`, `TestSummaryOpenProblemsKept`, prove US6 acc. 6 and SC-010) (FR-049, R27)
     - Services first (ok lines fold into `… and N more ok`, then lines from the end become `… N more`), then drives (`… N more drives`), then open problems with a trailing `…`; the open-problems section is never dropped and stays whole while it fits; the result fits 4 096 UTF-16 units with the host prefix
-- [ ] T065 [US6] Feed the summary from drive status, mounts, freshness kv, groups and the probe state in cmd/health_reports.go and cmd/health_services.go (depends on T058) (tests in cmd/health_reports_test.go and cmd/health_services_test.go) (FR-044, FR-045, FR-046, FR-047, FR-048)
+- [x] T065 [US6] Feed the summary from drive status, mounts, freshness kv, groups and the probe state in cmd/health_reports.go and cmd/health_services.go (depends on T058) (tests in cmd/health_reports_test.go and cmd/health_services_test.go) (FR-044, FR-045, FR-046, FR-047, FR-048)
     - `disks.Check.Status()` plus `report.DriveMounts` over `sysfs.MountInfo()` and `sysfs.BlockTopology()` at report time (read error ⇒ `?`); freshness state persisted through a `KVPersister`; `modemprobe.State` for the probe line
 
 **Checkpoint**: All user stories functional; quickstart §6 passes

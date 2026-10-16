@@ -591,3 +591,37 @@ func TestRestartAfterGoodDoesNotRepeatIt(t *testing.T) {
 		t.Fatalf("Good repeated after restart: %+v", r)
 	}
 }
+
+// TestStatus: Status is the probe's state for the weekly summary, the last
+// round trip and whether a probe is outstanding, and shares nothing with it.
+func TestStatus(t *testing.T) {
+	s, c := &fakeSender{}, wednesday()
+	p := newProbe(t, s, c)
+
+	if st := p.Status(); !st.LastOKAt.IsZero() || st.Outstanding() {
+		t.Fatalf("fresh status = %+v, want never returned and nothing outstanding", st)
+	}
+
+	p.Run(t.Context())
+	c.now = sunday(11, 2)
+	p.Run(t.Context())
+
+	if st := p.Status(); !st.Outstanding() || !st.LastOKAt.IsZero() {
+		t.Fatalf("status after send = %+v, want outstanding", st)
+	}
+
+	c.add(time.Minute)
+	if !p.Match(phone, s.texts[0], c.now) {
+		t.Fatal("did not match")
+	}
+
+	st := p.Status()
+	if st.Outstanding() || !st.LastOKAt.Equal(c.now) {
+		t.Fatalf("status after return = %+v, want last round trip %v and nothing outstanding", st, c.now)
+	}
+
+	st.LastOKAt = time.Time{}
+	if p.Status().LastOKAt.IsZero() {
+		t.Fatal("Status shares its state with the probe")
+	}
+}

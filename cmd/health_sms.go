@@ -166,7 +166,8 @@ func modemProbeChecks(p modemProbeParams) modemProbeOut {
 }
 
 // buildModemProbeCheck builds the probe check; its state is persisted under
-// modemProbeStateKey and it refuses to run until that was restored. matcher
+// modemProbeStateKey, it refuses to run until that was restored, and the
+// weekly summary reads it. matcher
 // is the probe for the inbox worker, nil when the section cannot be used.
 func buildModemProbeCheck(
 	mp *hcfg.ModemProbe, sender modemprobe.Sender, lookup modemprobe.LookupEnv, now func() time.Time,
@@ -181,6 +182,7 @@ func buildModemProbeCheck(
 	return checkSet{
 		Checks:     []health.Check{newCheck(modemProbeCheckName, common, st.run)},
 		Persisters: []runner.Persister{runner.KVPersister{Key: modemProbeStateKey, State: st}},
+		Probe:      st,
 	}, st
 }
 
@@ -224,6 +226,11 @@ func (s *probeState) Restore(data string) error {
 	}
 
 	return nil
+}
+
+// Status returns the probe's state for the weekly summary.
+func (s *probeState) Status() modemprobe.State {
+	return s.probe.Status()
 }
 
 // run is the probe's Run, failing until Restore was called.

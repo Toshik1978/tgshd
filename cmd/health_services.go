@@ -18,6 +18,7 @@ import (
 	"github.com/Toshik1978/tgshd/pkg/health/check/containers"
 	"github.com/Toshik1978/tgshd/pkg/health/check/freshness"
 	"github.com/Toshik1978/tgshd/pkg/health/check/httpcheck"
+	"github.com/Toshik1978/tgshd/pkg/health/check/network"
 	hcfg "github.com/Toshik1978/tgshd/pkg/health/config"
 	"github.com/Toshik1978/tgshd/pkg/health/runner"
 	"github.com/Toshik1978/tgshd/pkg/health/store"
@@ -30,6 +31,10 @@ const (
 	// check per entry, named by its condition key (<type>/<name>).
 	containersCheckName = "containers"
 	commandCheckName    = "command"
+	// httpCheckPrefix and freshnessCheckPrefix start the names of the per-entry
+	// http and freshness checks.
+	httpCheckPrefix      = "http/"
+	freshnessCheckPrefix = "freshness/"
 
 	// kv keys of the checks' persisted state; a command entry's state is kept
 	// under command.<name>.state.
@@ -41,6 +46,8 @@ const (
 	// freshness.<name>.first_missing (freshness.KVState).
 	freshnessKeyPrefix = "freshness."
 	freshnessKeySuffix = ".first_missing"
+	// The stamp (Unix seconds) and read_ok keys feed the weekly summary.
+	freshnessStampSuffix = ".stamp"
 
 	// maxStampBytes bounds the read of a freshness timestamp file.
 	maxStampBytes = 4096
@@ -113,7 +120,8 @@ func buildHTTPChecks(entries []hcfg.HTTP, ctrs httpcheck.Containers) checkSet {
 }
 
 // freshnessChecks provides one freshness check per configured entry. Their
-// first-missing marks share one state, persisted in the store's kv.
+// first-missing marks and stamps share one state, persisted in the store's
+// kv; the weekly summary reads the stamps from it.
 func freshnessChecks(hs *healthSetup) checkSet {
 	if hs.Config == nil || len(hs.Config.Freshness) == 0 {
 		return checkSet{}
@@ -123,10 +131,10 @@ func freshnessChecks(hs *healthSetup) checkSet {
 		names = append(names, hs.Config.Freshness[i].Name)
 	}
 	state := newFreshnessState(names)
-	set := checkSet{Persisters: []runner.Persister{state}}
+	set := checkSet{Persisters: []runner.Persister{state}, Stamps: state}
 	for _, e := range hs.Config.Freshness {
 		chk := freshness.New(e, osFiles{}, state, time.Now)
-		set.Checks = append(set.Checks, newCheck("freshness/"+e.Name, e.Common, chk.Run))
+		set.Checks = append(set.Checks, newCheck(freshnessCheckPrefix+e.Name, e.Common, chk.Run))
 	}
 
 	return set
@@ -248,6 +256,22 @@ func (s *freshnessState) SetFirstMissing(name string, t time.Time) {
 	s.state().SetFirstMissing(name, t)
 }
 
+// RecordStamp implements freshness.State.
+func (s *freshnessState) RecordStamp(name string, stamp time.Time) {
+	s.state().RecordStamp(name, stamp)
+}
+
+// RecordNoStamp implements freshness.State.
+func (s *freshnessState) RecordNoStamp(name string, readOK bool) {
+	s.state().RecordNoStamp(name, readOK)
+}
+
+// Stamp returns the entry's last seen timestamp for the weekly summary
+// (freshness.KVState.Stamp).
+func (s *freshnessState) Stamp(name string) (stamp time.Time, present, readOK bool) {
+	return s.state().Stamp(name)
+}
+
 // ClearFirstMissing implements freshness.State.
 func (s *freshnessState) ClearFirstMissing(name string) {
 	s.state().ClearFirstMissing(name)
@@ -266,15 +290,19 @@ func (s *freshnessState) Restore(st store.State) error {
 }
 
 // Save implements runner.Persister. The store's kv is upsert-only, so an
-// entry without a mark is saved as an empty value (which reads as no mark):
-// a cleared mark would otherwise come back after a restart and skip the
-// max_age grace of the next missing file.
+// entry without a mark or stamp is saved as an empty value (which reads as
+// absent): a cleared mark would otherwise come back after a restart and skip
+// the max_age grace of the next missing file, and a dropped stamp would show
+// an old age.
 func (s *freshnessState) Save(st *store.State) error {
 	state := s.state()
 	kv := state.Export()
 	for _, name := range s.names {
 		if _, ok := state.FirstMissing(name); !ok {
 			kv[freshnessKey(name)] = ""
+		}
+		if _, ok := kv[freshnessKeyPrefix+name+freshnessStampSuffix]; !ok {
+			kv[freshnessKeyPrefix+name+freshnessStampSuffix] = ""
 		}
 	}
 	if len(kv) == 0 {
@@ -300,6 +328,42 @@ func (s *freshnessState) state() *freshness.KVState {
 // freshness.KVState documents it.
 func freshnessKey(name string) string {
 	return freshnessKeyPrefix + name + freshnessKeySuffix
+}
+
+// summaryGroups maps the service checks' names to their summary_group; a
+// check without one is left out. The hardware checks are not listed: the
+// summary's services block leaves them out, and the modem probe has no
+// common keys.
+func summaryGroups(c *hcfg.Config) map[string]string {
+	groups := map[string]string{}
+	if c == nil {
+		return groups
+	}
+	add := func(name string, common hcfg.Common) {
+		if common.SummaryGroup != "" {
+			groups[name] = common.SummaryGroup
+		}
+	}
+	if c.Network != nil {
+		add(network.Name, c.Network.Common)
+	}
+	if c.UPS != nil {
+		add(upsCheckName, c.UPS.Common)
+	}
+	if c.Containers != nil {
+		add(containersCheckName, c.Containers.Common)
+	}
+	for i := range c.HTTP {
+		add(httpCheckPrefix+c.HTTP[i].Name, c.HTTP[i].Common)
+	}
+	for i := range c.Freshness {
+		add(freshnessCheckPrefix+c.Freshness[i].Name, c.Freshness[i].Common)
+	}
+	for i := range c.Command {
+		add(commandCheckName+"/"+c.Command[i].Name, c.Command[i].Common)
+	}
+
+	return groups
 }
 
 // osFiles is the freshness check's file access.

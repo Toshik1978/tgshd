@@ -610,3 +610,118 @@ func (f *fakeFixSource) TakeFixes() []runner.Fix {
 
 	return out
 }
+
+func TestFreshnessStateKeepsStamps(t *testing.T) {
+	t.Parallel()
+
+	s := newFreshnessState([]string{"backup", "sync"})
+	at := time.Unix(1_700_000_000, 0)
+	s.RecordStamp("backup", at)
+	s.RecordNoStamp("sync", false)
+
+	saved := store.State{}
+	if err := s.Save(&saved); err != nil {
+		t.Fatal(err)
+	}
+	// Upsert-only kv: an entry without a stamp is saved empty.
+	if saved.KV["freshness.backup.stamp"] != "1700000000" || saved.KV["freshness.backup.read_ok"] != "1" ||
+		saved.KV["freshness.sync.stamp"] != "" || saved.KV["freshness.sync.read_ok"] != "0" {
+		t.Fatalf("saved kv = %v", saved.KV)
+	}
+
+	restarted := newFreshnessState([]string{"backup", "sync"})
+	if err := restarted.Restore(saved); err != nil {
+		t.Fatal(err)
+	}
+	got := store.State{}
+	if err := restarted.Save(&got); err != nil {
+		t.Fatal(err)
+	}
+	if got.KV["freshness.backup.stamp"] != "1700000000" || got.KV["freshness.sync.read_ok"] != "0" {
+		t.Fatalf("stamps lost across a restart: %v", got.KV)
+	}
+}
+
+// TestSummaryGroups: each service check's summary_group, keyed by its check
+// name; checks without one are left out.
+func TestSummaryGroups(t *testing.T) {
+	t.Parallel()
+
+	group := func(g string) hcfg.Common { return hcfg.Common{SummaryGroup: g} }
+	cfg := &hcfg.Config{
+		Network:    &hcfg.Network{Common: group("base")},
+		UPS:        &hcfg.UPS{Common: group("base")},
+		Containers: &hcfg.Containers{},
+		HTTP: []hcfg.HTTP{
+			{Name: "api", URL: "https://api.example.org/", Common: group("web")},
+			{Name: "plain", URL: "https://plain.example.org/"},
+		},
+		Freshness: []hcfg.Freshness{{Name: "db-dump", Path: "/var/lib/example/db.stamp", Common: group("backups")}},
+		Command: []hcfg.Command{{
+			Name: "port-guard", Run: []string{"/usr/local/bin/port-ok"}, Timeout: hcfg.Duration(time.Second),
+			Common: group("jobs"),
+		}},
+	}
+	want := map[string]string{
+		"network": "base", "ups": "base", "http/api": "web", "freshness/db-dump": "backups",
+		"command/port-guard": "jobs",
+	}
+	if got := summaryGroups(cfg); !maps.Equal(got, want) {
+		t.Errorf("groups = %v, want %v", got, want)
+	}
+	if got := summaryGroups(nil); len(got) != 0 {
+		t.Errorf("no config: groups = %v", got)
+	}
+
+	// Drift guard: every grouped name is the name of a check built from the
+	// same configuration.
+	hs := &healthSetup{Config: cfg}
+	d := lazyOver(&fakeDocker{}, nil)
+	set := mergeCheckSets([]checkSet{
+		buildNetworkCheck(cfg.Network, fakeGateway{}, fakePinger{}),
+		buildUPSCheck(cfg.UPS, true, nil, "ups"),
+		containersChecks(hs, d), httpChecks(hs, d), freshnessChecks(hs), commandChecks(hs, d, zap.NewNop()),
+	})
+	if len(set.Errors) != 0 {
+		t.Fatalf("start errors: %+v", set.Errors)
+	}
+	for name := range summaryGroups(cfg) {
+		if !slices.ContainsFunc(set.Checks, func(c health.Check) bool { return c.Name == name }) {
+			t.Errorf("group key %q names no built check", name)
+		}
+	}
+}
+
+// TestFreshnessChecksFeedTheSummaryStamps: the freshness checks hand their
+// shared state to the summary, which reads each entry's stamp from it.
+func TestFreshnessChecksFeedTheSummaryStamps(t *testing.T) {
+	t.Parallel()
+
+	hs := &healthSetup{Config: &hcfg.Config{Freshness: []hcfg.Freshness{{Name: "backup"}}}}
+	set := freshnessChecks(hs)
+	state, ok := set.Stamps.(*freshnessState)
+	if !ok || len(set.Persisters) != 1 || set.Persisters[0] != state {
+		t.Fatalf("stamps = %#v, want the persisted freshness state", set.Stamps)
+	}
+	at := time.Unix(1_700_000_000, 0)
+	state.RecordStamp("backup", at)
+	if stamp, present, readOK := set.Stamps.Stamp("backup"); !stamp.Equal(at) || !present || !readOK {
+		t.Errorf("stamp = %v %v %v", stamp, present, readOK)
+	}
+	if empty := freshnessChecks(&healthSetup{Config: &hcfg.Config{}}); empty.Stamps != nil {
+		t.Errorf("no freshness checks: stamps = %v, want a nil interface", empty.Stamps)
+	}
+}
+
+func TestMergeCheckSetsKeepsSummaryFeeds(t *testing.T) {
+	t.Parallel()
+
+	stamps, probe := newFreshnessState(nil), &probeState{}
+	set := mergeCheckSets([]checkSet{{}, {Stamps: stamps}, {Probe: probe}, {}})
+	if set.Stamps != stamps || set.Probe != probe {
+		t.Fatalf("stamps = %v, probe = %v", set.Stamps, set.Probe)
+	}
+	if empty := mergeCheckSets(nil); empty.Stamps != nil || empty.Probe != nil {
+		t.Fatalf("no feeds: stamps = %v, probe = %v, want nil interfaces", empty.Stamps, empty.Probe)
+	}
+}

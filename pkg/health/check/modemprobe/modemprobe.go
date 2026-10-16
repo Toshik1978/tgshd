@@ -51,6 +51,11 @@ type State struct {
 	GoodForOKAt time.Time `json:"good_for_ok_at,omitzero"`
 }
 
+// Outstanding reports whether a probe was sent and has not returned yet.
+func (s State) Outstanding() bool {
+	return s.Token != "" && !s.SentAt.IsZero()
+}
+
 // Probe is the modem round-trip check. It is safe for concurrent use: Match
 // is called from the inbox worker and Run from the runner.
 type Probe struct {
@@ -101,6 +106,15 @@ func (p *Probe) Export() ([]byte, error) {
 	}
 
 	return data, nil
+}
+
+// Status returns a copy of the probe state, for the weekly summary's last
+// round trip and outstanding probe.
+func (p *Probe) Status() State {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	return p.state
 }
 
 // Restore loads state produced by Export. Empty input is a no-op.
@@ -281,7 +295,7 @@ func (p *Probe) goodDue() bool {
 // outstanding reports whether a probe was sent and has not returned yet.
 // Callers hold p.mu.
 func (p *Probe) outstanding() bool {
-	return p.state.Token != "" && !p.state.SentAt.IsZero()
+	return p.state.Outstanding()
 }
 
 // silenceRef is the moment silence is counted from. Callers hold p.mu.

@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -13,11 +12,13 @@ import (
 
 	"github.com/Toshik1978/tgshd/pkg/command"
 	"github.com/Toshik1978/tgshd/pkg/health/check/disks"
+	"github.com/Toshik1978/tgshd/pkg/health/check/modemprobe"
 	"github.com/Toshik1978/tgshd/pkg/health/check/temps"
 	"github.com/Toshik1978/tgshd/pkg/health/notify"
 	"github.com/Toshik1978/tgshd/pkg/health/report"
 	"github.com/Toshik1978/tgshd/pkg/health/runner"
 	"github.com/Toshik1978/tgshd/pkg/health/store"
+	"github.com/Toshik1978/tgshd/pkg/host/sysfs"
 	"github.com/Toshik1978/tgshd/pkg/telegram"
 )
 
@@ -33,20 +34,12 @@ const (
 	queueMaxAge = 7 * 24 * time.Hour
 
 	diskKeyPrefix  = disksCheckName + "/"
-	healthSuffix   = "/health"
 	missingSuffix  = "/missing"
 	driveMetricsOf = "drive."
-	spareSuffix    = ".spare"
-	selfTestSuffix = ".selftest_age_h"
 )
 
-var (
-	// errNoHistory makes the summary's drives section read "unavailable" when
-	// there is no state database to read the drive metrics from.
-	errNoHistory = errors.New("no state database")
-	// errNotBound means the weekly job ran before the runner was bound.
-	errNotBound = errors.New("health reports not bound to the runner")
-)
+// errNotBound means the weekly job ran before the runner was bound.
+var errNotBound = errors.New("health reports not bound to the runner")
 
 // reportStore is the state store as the reports read and prune it;
 // *store.Store satisfies it.
@@ -72,6 +65,27 @@ type driveStatuses interface {
 
 var _ driveStatuses = (*disks.Check)(nil)
 
+// topologyReader is what the summary reads of the host's mounts and block
+// devices at report time; *sysfs.Reader satisfies it.
+type topologyReader interface {
+	MountInfo() ([]sysfs.MountEntry, error)
+	BlockTopology() ([]sysfs.BlockDevice, error)
+}
+
+var _ topologyReader = (*sysfs.Reader)(nil)
+
+// freshnessStamps is the freshness checks' state as the summary reads it;
+// *freshnessState satisfies it.
+type freshnessStamps interface {
+	Stamp(name string) (stamp time.Time, present, readOK bool)
+}
+
+// probeStatus is the modem probe as the summary reads it; *probeState
+// satisfies it.
+type probeStatus interface {
+	Status() modemprobe.State
+}
+
 // reportRunner is the runner as the reports use it; *runner.Runner satisfies it.
 type reportRunner interface {
 	Snapshot() runner.Snapshot
@@ -81,20 +95,25 @@ type reportRunner interface {
 
 // healthReports serves /history, /temp and /disks, and the runner's daily
 // retention and weekly summary jobs. It is also the drive source of /disks
-// (the disks check's status with the runner's open missing conditions) and of
-// the summary (the baselines joined with the open conditions and the stored
-// drive metrics).
+// and of the summary: the disks check's status with the runner's open missing
+// conditions (and, for the summary, the mounts and the stored wear).
 type healthReports struct {
 	// store is nil without a state database (memory only).
 	store reportStore
-	// book is nil without the disks check.
-	book runner.DriveBook
 	// sensors is the temperatures check's sensors; nil without it.
 	sensors tempSensors
 	// statuses is the disks check's status; nil without it.
 	statuses driveStatuses
-	checks   []string
-	host     string
+	// topology reads the mounts for the summary; nil shows them as unknown.
+	topology topologyReader
+	// checks are the configured check names and groups their summary_group.
+	checks []string
+	groups map[string]string
+	// stamps and probe feed the summary's freshness and modem probe lines;
+	// nil without those checks.
+	stamps freshnessStamps
+	probe  probeStatus
+	host   string
 	// loc is the host's zone retention takes local days in.
 	loc    *time.Location
 	logger *zap.Logger
@@ -112,14 +131,18 @@ type runnerHooks struct {
 	expire   func(now time.Time, maxAge time.Duration) []notify.QueuedMessage
 }
 
-// newHealthReports builds the reports over the setup's store and the checks.
-func newHealthReports(hs *healthSetup, set checkSet, logger *zap.Logger) *healthReports {
+// newHealthReports builds the reports over the setup's store, the checks and
+// the host's mount and block topology.
+func newHealthReports(hs *healthSetup, set checkSet, topology topologyReader, logger *zap.Logger) *healthReports {
 	h := &healthReports{
-		book:   set.Drives,
-		host:   hs.Host,
-		loc:    time.Local, //nolint:gosmopolitan // retention rolls samples up by the host's local day
-		logger: logger,
-		now:    time.Now,
+		topology: topology,
+		groups:   summaryGroups(hs.Config),
+		stamps:   set.Stamps,
+		probe:    set.Probe,
+		host:     hs.Host,
+		loc:      time.Local, //nolint:gosmopolitan // retention rolls samples up by the host's local day
+		logger:   logger,
+		now:      time.Now,
 	}
 	if hs.Store != nil {
 		h.store = hs.Store
@@ -138,25 +161,7 @@ func newHealthReports(hs *healthSetup, set checkSet, logger *zap.Logger) *health
 // Drives implements command.DriveSource: the active drives as the disks
 // check last saw them, with "missing" from the open missing condition.
 func (h *healthReports) Drives() []command.Drive {
-	if h.statuses == nil {
-		return nil
-	}
-	missing := map[string]bool{}
-	for _, c := range h.open() {
-		if s, ok := strings.CutPrefix(c.Key, diskKeyPrefix); ok {
-			if serial, ok := strings.CutSuffix(s, missingSuffix); ok {
-				missing[serial] = true
-			}
-		}
-	}
-	now := h.now()
-	statuses := h.statuses.Status()
-	out := make([]command.Drive, 0, len(statuses))
-	for i := range statuses {
-		out = append(out, statusDrive(&statuses[i], missing[statuses[i].Serial], now))
-	}
-
-	return out
+	return h.drives(h.open())
 }
 
 // TempSensors implements command.TempSensorSource: the temperature sensors
@@ -169,6 +174,30 @@ func (h *healthReports) TempSensors() []report.Sensor {
 	out := make([]report.Sensor, len(in))
 	for i, s := range in {
 		out[i] = report.Sensor{Metric: s.Metric, Label: s.Label, Limit: s.Limit, Since: s.Since}
+	}
+
+	return out
+}
+
+// drives maps the disks check's status to drives, missing while their
+// disks/<serial>/missing condition is open; nil without the disks check.
+func (h *healthReports) drives(open []runner.OpenCondition) []command.Drive {
+	if h.statuses == nil {
+		return nil
+	}
+	missing := map[string]bool{}
+	for _, c := range open {
+		if s, ok := strings.CutPrefix(c.Key, diskKeyPrefix); ok {
+			if serial, ok := strings.CutSuffix(s, missingSuffix); ok {
+				missing[serial] = true
+			}
+		}
+	}
+	now := h.now()
+	statuses := h.statuses.Status()
+	out := make([]command.Drive, 0, len(statuses))
+	for i := range statuses {
+		out = append(out, statusDrive(&statuses[i], missing[statuses[i].Serial], now))
 	}
 
 	return out
@@ -281,32 +310,130 @@ func (h *healthReports) weekly(ctx context.Context, now time.Time) error {
 		return errNotBound
 	}
 	open := rh.snapshot().Open
-	in := report.SummaryInput{Host: h.host, Checks: h.checks, Open: open}
-	if h.book != nil {
-		bases := h.book.Baselines()
-		if slices.ContainsFunc(bases, func(b store.Baseline) bool { return !b.Retired }) {
-			in.DriveStats, in.DrivesErr = h.driveStats(ctx, now)
-		}
-		in.Drives = driveList(bases, open, in.DriveStats)
+	in := report.SummaryInput{Host: h.host, Services: h.services(), Now: now, Open: open}
+	in.Drives = h.summaryDrives(open)
+	if len(in.Drives) > 0 {
+		in.DriveStats = h.driveStats(ctx, now)
 	}
 	rh.push(ctx, summaryCheck, report.Summary(in), summaryRecord)
 
 	return nil
 }
 
-// driveStats reads the drive.* metrics (wear, data written, spare, self-test age).
-func (h *healthReports) driveStats(ctx context.Context, now time.Time) ([]store.MetricStats, error) {
+// summaryDrives is the drives with their mount points, read at report time;
+// a failed read shows them as unknown ("?"), as it does for a missing drive.
+func (h *healthReports) summaryDrives(open []runner.OpenCondition) []command.Drive {
+	drives := h.drives(open)
+	if len(drives) == 0 || h.topology == nil {
+		return drives
+	}
+	mounts, mountErr := h.topology.MountInfo()
+	blocks, blockErr := h.topology.BlockTopology()
+	readErr := errors.Join(mountErr, blockErr)
+	if readErr != nil {
+		h.logger.Warn("cannot read the mounts for the weekly summary", zap.Error(readErr))
+	}
+	entries, topology := reportMounts(mounts), reportTopology(blocks)
+	for i := range drives {
+		// A missing drive's node is stale: another drive may hold it now.
+		// Its Mounts stay empty, which the summary shows as "?".
+		if drives[i].Missing {
+			continue
+		}
+		drives[i].Mounts = report.DriveMounts(drives[i].Node, entries, topology, readErr)
+	}
+
+	return drives
+}
+
+// reportMounts converts the mount entries to the report's, dropping those
+// without a device number.
+func reportMounts(in []sysfs.MountEntry) []report.MountEntry {
+	out := make([]report.MountEntry, 0, len(in))
+	for _, e := range in {
+		if isZeroDev(e.Dev) {
+			continue
+		}
+		out = append(out, report.MountEntry{Dev: e.Dev.String(), MountPoint: e.MountPoint})
+	}
+
+	return out
+}
+
+// reportTopology converts the block topology to the report's. A device,
+// partition or holder with a zero device number ("0:0", its dev file was not
+// readable) is dropped so it never matches a mount entry.
+func reportTopology(in []sysfs.BlockDevice) []report.BlockDevice {
+	out := make([]report.BlockDevice, 0, len(in))
+	for i := range in {
+		d := &in[i]
+		if isZeroDev(d.Dev) {
+			continue
+		}
+		bd := report.BlockDevice{Name: d.Name, Dev: d.Dev.String(), Holders: reportHolders(d.Holders)}
+		for _, p := range d.Partitions {
+			if isZeroDev(p.Dev) {
+				continue
+			}
+			bd.Partitions = append(bd.Partitions, report.BlockPartition{
+				Name: p.Name, Dev: p.Dev.String(), Holders: reportHolders(p.Holders),
+			})
+		}
+		out = append(out, bd)
+	}
+
+	return out
+}
+
+func reportHolders(in []sysfs.Holder) []report.BlockHolder {
+	var out []report.BlockHolder
+	for _, h := range in {
+		if !isZeroDev(h.Dev) {
+			out = append(out, report.BlockHolder{Name: h.Name, Dev: h.Dev.String()})
+		}
+	}
+
+	return out
+}
+
+func isZeroDev(d sysfs.DevNum) bool { return d == sysfs.DevNum{} }
+
+// services maps the configured checks onto the summary's services block,
+// which leaves the hardware checks out itself: each with its summary_group,
+// a freshness check with its stamp and the modem probe with its state.
+func (h *healthReports) services() []report.ServiceCheck {
+	out := make([]report.ServiceCheck, len(h.checks))
+	for i, name := range h.checks {
+		c := report.ServiceCheck{Name: name, Group: h.groups[name]}
+		if entry, ok := strings.CutPrefix(name, freshnessCheckPrefix); ok && h.stamps != nil {
+			at, present, readOK := h.stamps.Stamp(entry)
+			c.Freshness = &report.FreshnessStamp{At: at, Present: present, ReadOK: readOK}
+		}
+		if name == modemProbeCheckName && h.probe != nil {
+			st := h.probe.Status()
+			c.Modem = &report.ModemState{LastOK: st.LastOKAt, Outstanding: st.Outstanding()}
+		}
+		out[i] = c
+	}
+
+	return out
+}
+
+// driveStats reads the drive.* metrics, whose wear stands in for a drive not
+// read since the start; none without a state database or when it cannot be
+// read.
+func (h *healthReports) driveStats(ctx context.Context, now time.Time) []store.MetricStats {
 	if h.store == nil {
-		return nil, errNoHistory
+		return nil
 	}
 	stats, err := h.store.Metrics(ctx, driveMetricsOf, now)
 	if err != nil {
 		h.logger.Warn("cannot read drive metrics for the weekly summary", zap.Error(err))
 
-		return nil, fmt.Errorf("read drive metrics: %w", err)
+		return nil
 	}
 
-	return stats, nil
+	return stats
 }
 
 // bound returns the runner's methods; nil before bind.
@@ -325,50 +452,6 @@ func (h *healthReports) open() []runner.OpenCondition {
 	}
 
 	return rh.snapshot().Open
-}
-
-// driveList maps the active (not retired) baselines to drives ordered by
-// serial. A drive is healthy unless its disks/<serial>/health condition is
-// open, and missing while its disks/<serial>/missing condition is. Spare and self-test age come from the current
-// drive.<serial>.spare
-// and drive.<serial>.selftest_age_h samples; without one they stay unknown.
-func driveList(bases []store.Baseline, open []runner.OpenCondition, stats []store.MetricStats) []command.Drive {
-	openKeys := make(map[string]bool, len(open))
-	for _, c := range open {
-		if strings.HasPrefix(c.Key, diskKeyPrefix) {
-			openKeys[c.Key] = true
-		}
-	}
-	latest := make(map[string]float64, len(stats))
-	for _, m := range stats {
-		if m.HasCurrent {
-			latest[m.Metric] = m.Current
-		}
-	}
-
-	var out []command.Drive
-	for i := range bases {
-		b := &bases[i]
-		if b.Retired {
-			continue
-		}
-		d := command.Drive{
-			Bus: b.Bus, Model: b.Model, Serial: b.Serial,
-			HealthOK: !openKeys[diskKeyPrefix+b.Serial+healthSuffix],
-			Missing:  openKeys[diskKeyPrefix+b.Serial+missingSuffix],
-		}
-		if v, ok := latest[driveMetricsOf+b.Serial+spareSuffix]; ok {
-			d.SparePct = &v
-		}
-		if v, ok := latest[driveMetricsOf+b.Serial+selfTestSuffix]; ok {
-			age := time.Duration(v * float64(time.Hour))
-			d.SelfTestAge = &age
-		}
-		out = append(out, d)
-	}
-	slices.SortFunc(out, func(a, b command.Drive) int { return strings.Compare(a.Serial, b.Serial) })
-
-	return out
 }
 
 // replyCommand answers a command with a fixed reply.

@@ -203,6 +203,14 @@ func TestEntryErrors(t *testing.T) {
 		{"interval below tick", "ups: {interval: 10s}", "ups", "interval"},
 		{"negative threshold", "ups: {threshold: -5m}", "ups", "threshold"},
 		{"bad mode", "ups: {mode: pigeon}", "ups", "mode"},
+		{"summary group upper", "ups: {summary_group: Backups}", "ups", "summary_group"},
+		{"summary group underscore", "ups: {summary_group: back_ups}", "ups", "summary_group"},
+		{
+			"summary group on http",
+			"http: [{name: a, url: " + okURL + ", summary_group: \"a b\"}]",
+			"http/a",
+			"summary_group",
+		},
 		{"unknown key in section", "ups: {bogus: 1}", "ups", "bogus"},
 		{"wrong type", "disks: {wear_percent: lots}", "disks", "cannot unmarshal"},
 		{"wear range", "disks: {wear_percent: 150}", "disks", "wear_percent"},
@@ -508,5 +516,22 @@ func TestTemperatureNewKeys(t *testing.T) {
 		if g.Chip != w.chip || g.Label != w.label || g.Limit == nil || *g.Limit != w.limit {
 			t.Errorf("board_sensors[%d] = %+v, want %+v", i, g, w)
 		}
+	}
+}
+
+func TestSummaryGroup(t *testing.T) {
+	cfg := mustParse(t, `
+ups: {summary_group: power-1}
+http:
+  - {name: a, url: "https://a.example.org/", summary_group: web}
+  - {name: b, url: "https://b.example.org/"}
+freshness:
+  - {name: f, path: /x, max_age: 1h, summary_group: backups}
+command:
+  - {name: c, run: [x], summary_group: backups}
+`)
+	if cfg.UPS.SummaryGroup != "power-1" || cfg.HTTP[0].SummaryGroup != "web" || cfg.HTTP[1].SummaryGroup != "" ||
+		cfg.Freshness[0].SummaryGroup != "backups" || cfg.Command[0].SummaryGroup != "backups" {
+		t.Errorf("groups = %+v %+v %+v %+v", cfg.UPS, cfg.HTTP, cfg.Freshness, cfg.Command)
 	}
 }

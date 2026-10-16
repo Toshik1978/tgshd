@@ -5,6 +5,8 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"io"
+	"log"
 	"os"
 	"slices"
 	"strings"
@@ -451,7 +453,10 @@ func TestInboxWorkerWithoutHealthHasNoMatcher(t *testing.T) {
 }
 
 func TestAppOptionsWireTheInboxAndProbe(t *testing.T) {
-	t.Parallel()
+	// The fx error hook logs through the standard logger. This test is not
+	// parallel, so silencing it cannot hide the output of another test.
+	log.SetOutput(io.Discard)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
 
 	needsInbox := fx.Invoke(func(sms.Inbox) {})
 	needsMatcher := fx.Invoke(func(sms.ProbeMatcher) {})
@@ -469,8 +474,6 @@ func TestAppOptionsWireTheInboxAndProbe(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			t.Parallel()
-
 			getenv := func(k string) string { return tt.env[k] }
 			if err := fx.ValidateApp(appOptions(getenv)...); err != nil {
 				t.Fatalf("fx graph: %v", err)
@@ -546,5 +549,23 @@ func TestRunCheckOnceModemProbeWithoutGammu(t *testing.T) {
 	if !strings.Contains(stdout.String(), "ERROR modem_probe/config/missing: modem_probe requires BOT_GAMMU_DSN") ||
 		!strings.Contains(stdout.String(), "SUMMARY 0 checks") {
 		t.Fatalf("stdout = %q", stdout)
+	}
+}
+
+// TestBuildModemProbeCheckFeedsTheSummary: the probe's state reaches the
+// weekly summary through the check set.
+func TestBuildModemProbeCheckFeedsTheSummary(t *testing.T) {
+	t.Parallel()
+
+	set, probe := buildModemProbeCheck(testModemProbeConfig(), &fakeSMS{}, lookupPhone, time.Now)
+	if set.Probe == nil || set.Probe != probe {
+		t.Fatalf("probe feed = %v, want the probe", set.Probe)
+	}
+	ok := time.Date(2026, 10, 11, 11, 3, 0, 0, time.UTC)
+	if err := set.Persisters[0].Restore(probeStore(t, modemprobe.State{LastOKAt: ok})); err != nil {
+		t.Fatal(err)
+	}
+	if st := set.Probe.Status(); !st.LastOKAt.Equal(ok) || st.Outstanding() {
+		t.Errorf("status = %+v, want the restored round trip", st)
 	}
 }

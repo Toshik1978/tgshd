@@ -80,6 +80,10 @@ func (p *problems) common(c *Common) {
 	p.interval("interval", c.Interval)
 	p.nonNegative("threshold", c.Threshold)
 	p.oneOf("mode", string(c.Mode), string(ModeTLG), string(ModeSMS), string(ModeTLGOrSMS))
+
+	if c.SummaryGroup != "" && !validName(c.SummaryGroup) {
+		p.addf("summary_group %q must match [a-z0-9-]+", c.SummaryGroup)
+	}
 }
 
 func (p *problems) schedule(weekdayName, clock string) (time.Weekday, bool) {

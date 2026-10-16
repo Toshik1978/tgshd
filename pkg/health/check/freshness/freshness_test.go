@@ -133,7 +133,7 @@ func TestMissingFile(t *testing.T) {
 	if r := run(t, cfg, present, st, base().Add(28*time.Hour)); r.Verdict != health.Good {
 		t.Fatalf("reappeared = %v, want Good", r.Verdict)
 	}
-	if len(st.Export()) != 0 {
+	if _, ok := st.FirstMissing("db-dump"); ok {
 		t.Fatalf("mark not cleared: %v", st.Export())
 	}
 	noReading(t, cfg, missing, st, base().Add(60*time.Hour))
@@ -185,5 +185,60 @@ func TestKVStateRoundTrip(t *testing.T) {
 	st.ClearFirstMissing("a")
 	if _, ok := st.FirstMissing("a"); ok {
 		t.Fatal("not cleared")
+	}
+}
+
+func TestRunKeepsStamp(t *testing.T) {
+	stamp := base().Add(-3 * time.Hour)
+	tests := []struct {
+		name      string
+		src       fakeSource
+		wantStamp string
+		wantOK    string
+	}{
+		{"mtime", fakeSource{mtime: stamp}, "1768035600", "1"},
+		{"epoch", fakeSource{data: "1768028400\n"}, "1768028400", "1"},
+		{"stale is still stamped", fakeSource{mtime: base().Add(-300 * time.Hour)}, "1766966400", "1"},
+		{"missing", fakeSource{mtimeErr: fs.ErrNotExist}, "", "1"},
+		{"unreadable", fakeSource{mtimeErr: fs.ErrPermission}, "", "0"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			st := freshness.NewKVState(nil)
+			// A previous good run must be replaced, not kept, by a failing one.
+			runAll(entry(config.ContentMtime), &fakeSource{mtime: base().Add(-time.Hour)}, st, base())
+			cfg := entry(config.ContentMtime)
+			if tt.src.data != "" {
+				cfg = entry(config.ContentEpoch)
+			}
+			runAll(cfg, &tt.src, st, base())
+
+			got := st.Export()
+			if got["freshness.db-dump.stamp"] != tt.wantStamp || got["freshness.db-dump.read_ok"] != tt.wantOK {
+				t.Fatalf("kv = %v, want stamp %q read_ok %q", got, tt.wantStamp, tt.wantOK)
+			}
+		})
+	}
+}
+
+func TestKVStateStamp(t *testing.T) {
+	st := freshness.NewKVState(map[string]string{
+		"freshness.a.stamp":   "200",
+		"freshness.a.read_ok": "1",
+		"freshness.b.read_ok": "0",
+		"freshness.c.stamp":   "junk",
+		"other.a.stamp":       "9",
+	})
+	if ts, present, ok := st.Stamp("a"); !present || !ok || ts.Unix() != 200 {
+		t.Fatalf("a = %v %v %v", ts, present, ok)
+	}
+	if _, present, ok := st.Stamp("b"); present || ok {
+		t.Fatalf("b = %v %v", present, ok)
+	}
+	if _, present, _ := st.Stamp("c"); present {
+		t.Fatal("corrupt stamp must read as absent")
+	}
+	if _, ok := st.Export()["other.a.stamp"]; ok {
+		t.Fatal("foreign key restored")
 	}
 }

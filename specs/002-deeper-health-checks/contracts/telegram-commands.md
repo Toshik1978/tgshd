@@ -76,8 +76,8 @@ http/api: status 502, expected 200-399 (since 08:12)
   the last attempt did not read it.
 - Services: one line per configured check, or per `summary_group`; `ok` or the open problems'
   texts joined with `; `. Freshness checks show their stamp age (`<1 h`, `N h` below 48 h, `N d`,
-  `none` when missing, `?` when unreadable), prefixed by the check name inside a group. The modem
-  probe shows `last round trip <age> ago` or `never`, or its failure text, and whether a probe is
+  `in the future` for a stamp dated after now, `none` when missing, `?` when unreadable),
+  prefixed by the check name inside a group. The modem probe shows `last round trip <age> ago` or `never`, or its failure text, and whether a probe is
   outstanding.
 - Cut order when too long: services first (ok lines fold into `… and N more ok`, then
   `… N more`), then drives (`… N more drives`), then open problems with a trailing `…`. The

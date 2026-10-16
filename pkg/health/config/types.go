@@ -41,6 +41,9 @@ type Common struct {
 	Threshold     Duration `yaml:"threshold"`
 	Mode          Mode     `yaml:"mode"`
 	NeedsInternet bool     `yaml:"needs_internet"`
+	// SummaryGroup merges the checks that name the same group into one line
+	// of the weekly summary; empty keeps one line per check.
+	SummaryGroup string `yaml:"summary_group"`
 }
 
 // Network is the connectivity check, evaluated first every cycle.

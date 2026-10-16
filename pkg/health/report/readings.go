@@ -25,23 +25,20 @@ const (
 
 // Drive is the per-drive facts shown by /disks that are not metrics.
 type Drive struct {
-	Node   string
+	Node string
+	// Mounts is the drive's mount points as DriveMounts renders them; empty
+	// reads "?" in the summary.
+	Mounts string
 	Bus    string
 	Model  string
 	Serial string
 	// Transport is nvme, sata, sas, usb or other; empty when unknown.
 	Transport string
-	// Health is the last read's verdict: ok, failing or unknown. When empty,
-	// HealthOK decides (the summary sets only that).
-	Health   string
-	HealthOK bool
+	// Health is the last read's verdict: ok, failing or unknown.
+	Health string
 	// Missing is set for a known drive that is no longer found; its health
 	// then reads "missing".
 	Missing bool
-	// SparePct and SelfTestAge are nil when unknown (the summary's values).
-	SparePct    *float64
-	SelfTestAge *time.Duration
-
 	// Temp, Wear, Spare and SpareThreshold are the last read's values; nil
 	// reads "unknown", never 0. SpareFloor is the configured floor.
 	Temp, Wear, Spare, SpareThreshold *int
@@ -202,9 +199,9 @@ func (d *Drive) health() string {
 	switch {
 	case d.Missing:
 		return "missing"
-	case d.Health == "ok", d.Health == "" && d.HealthOK:
+	case d.Health == "ok":
 		return "OK"
-	case d.Health == "failing", d.Health == "":
+	case d.Health == "failing":
 		return "FAILING"
 	default:
 		return "unknown"

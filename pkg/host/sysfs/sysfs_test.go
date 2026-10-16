@@ -3,6 +3,7 @@ package sysfs_test
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"testing"
 	"time"
 
@@ -103,5 +104,112 @@ func TestReaderFromFiles(t *testing.T) {
 func TestNewDefault(t *testing.T) {
 	if sysfs.NewDefault() == nil {
 		t.Fatal("nil reader")
+	}
+}
+
+const mountInfoFixture = `22 28 0:21 / /proc rw,nosuid shared:13 - proc proc rw
+28 1 8:1 / / rw,relatime shared:1 - ext4 /dev/sda1 rw
+40 28 9:0 / /srv/data rw,relatime shared:20 - ext4 /dev/md0 rw
+41 28 253:0 /sub /mnt/with\040space rw,relatime - ext4 /dev/mapper/vg-lv rw
+`
+
+func TestMountInfo(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "mountinfo")
+	if err := os.WriteFile(path, []byte(mountInfoFixture), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := sysfs.NewDefault().WithTopologyPaths(path, dir).MountInfo()
+	if err != nil {
+		t.Fatalf("MountInfo: %v", err)
+	}
+	want := []sysfs.MountEntry{
+		{Dev: sysfs.DevNum{Major: 0, Minor: 21}, MountPoint: "/proc"},
+		{Dev: sysfs.DevNum{Major: 8, Minor: 1}, MountPoint: "/"},
+		{Dev: sysfs.DevNum{Major: 9, Minor: 0}, MountPoint: "/srv/data"},
+		{Dev: sysfs.DevNum{Major: 253, Minor: 0}, MountPoint: "/mnt/with space"},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %+v, want %+v", got, want)
+	}
+
+	if _, err := sysfs.NewDefault().WithTopologyPaths(filepath.Join(dir, "none"), dir).MountInfo(); err == nil {
+		t.Fatal("missing mountinfo: want error")
+	}
+}
+
+func TestParseMountInfoMalformed(t *testing.T) {
+	if _, err := sysfs.ParseMountInfo("1 2 notadev / /x rw - ext4 x rw\n"); err == nil {
+		t.Fatal("bad device number: want error")
+	}
+	if _, err := sysfs.ParseMountInfo("1 2 8:1\n"); err == nil {
+		t.Fatal("short line: want error")
+	}
+	if got, err := sysfs.ParseMountInfo("\n"); err != nil || len(got) != 0 {
+		t.Fatalf("blank input: got %v, %v", got, err)
+	}
+}
+
+func writeFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(content), 0o600); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestBlockTopology(t *testing.T) {
+	dir := t.TempDir()
+	// sda with partitions sda1 (held by md0) and sda2; md0 is a top-level device.
+	writeFile(t, filepath.Join(dir, "sda", "dev"), "8:0\n")
+	writeFile(t, filepath.Join(dir, "sda", "sda1", "dev"), "8:1\n")
+	writeFile(t, filepath.Join(dir, "sda", "sda1", "partition"), "1\n")
+	writeFile(t, filepath.Join(dir, "sda", "sda2", "dev"), "8:2\n")
+	writeFile(t, filepath.Join(dir, "sda", "sda2", "partition"), "2\n")
+	writeFile(t, filepath.Join(dir, "sda", "queue", "rotational"), "1\n")
+	if err := os.MkdirAll(filepath.Join(dir, "sda", "sda1", "holders"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(dir, "md0"), filepath.Join(dir, "sda", "sda1", "holders", "md0")); err != nil {
+		t.Fatal(err)
+	}
+	// sdb is held by dm-0 directly.
+	writeFile(t, filepath.Join(dir, "sdb", "dev"), "8:16\n")
+	if err := os.MkdirAll(filepath.Join(dir, "sdb", "holders"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(filepath.Join(dir, "dm-0"), filepath.Join(dir, "sdb", "holders", "dm-0")); err != nil {
+		t.Fatal(err)
+	}
+	writeFile(t, filepath.Join(dir, "md0", "dev"), "9:0\n")
+	writeFile(t, filepath.Join(dir, "dm-0", "dev"), "253:0\n")
+
+	got, err := sysfs.NewDefault().WithTopologyPaths("", dir).BlockTopology()
+	if err != nil {
+		t.Fatalf("BlockTopology: %v", err)
+	}
+	md0 := sysfs.Holder{Name: "md0", Dev: sysfs.DevNum{Major: 9}}
+	dm0 := sysfs.Holder{Name: "dm-0", Dev: sysfs.DevNum{Major: 253}}
+	want := []sysfs.BlockDevice{
+		{Name: "dm-0", Dev: sysfs.DevNum{Major: 253}},
+		{Name: "md0", Dev: sysfs.DevNum{Major: 9}},
+		{
+			Name: "sda", Dev: sysfs.DevNum{Major: 8},
+			Partitions: []sysfs.Partition{
+				{Name: "sda1", Dev: sysfs.DevNum{Major: 8, Minor: 1}, Holders: []sysfs.Holder{md0}},
+				{Name: "sda2", Dev: sysfs.DevNum{Major: 8, Minor: 2}},
+			},
+		},
+		{Name: "sdb", Dev: sysfs.DevNum{Major: 8, Minor: 16}, Holders: []sysfs.Holder{dm0}},
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("got %+v\nwant %+v", got, want)
+	}
+
+	if _, err := sysfs.NewDefault().WithTopologyPaths("", filepath.Join(dir, "none")).BlockTopology(); err == nil {
+		t.Fatal("missing block dir: want error")
 	}
 }

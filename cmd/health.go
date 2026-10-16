@@ -62,6 +62,10 @@ type checkSet struct {
 	// Fixes hand the fix actions of the command checks to the runner (under
 	// check --once: what would have been fixed).
 	Fixes []runner.FixSource
+	// Stamps (the freshness checks) and Probe (the modem probe) feed the
+	// weekly summary's services block; nil without those checks.
+	Stamps freshnessStamps
+	Probe  probeStatus
 }
 
 // healthSetup is the outcome of loading the health configuration and claiming
@@ -279,7 +283,7 @@ func newHealth(p healthParams) healthOut {
 	}
 
 	set := mergeCheckSets(p.Sets)
-	reports := newHealthReports(p.Setup, set, p.Logger)
+	reports := newHealthReports(p.Setup, set, p.Uptime, p.Logger)
 	opts := runnerOptions(p.Setup, d, set, p.Uptime, p.Logger)
 	reports.hook(&opts)
 	r := runner.New(opts)
@@ -384,8 +388,8 @@ func registerStart(
 }
 
 // mergeCheckSets joins the check sets, ordering checks by name so the
-// runner's order does not depend on fx's value-group order. Drives is the
-// first set's that has one (only the disks check does).
+// runner's order does not depend on fx's value-group order. Drives, Stamps
+// and Probe are the first set's that has one (only one check type sets each).
 func mergeCheckSets(sets []checkSet) checkSet {
 	var out checkSet
 	for i := range sets {
@@ -400,6 +404,12 @@ func mergeCheckSets(sets []checkSet) checkSet {
 		}
 		if out.Drives == nil && s.Drives != nil {
 			out.Drives = s.Drives
+		}
+		if out.Stamps == nil && s.Stamps != nil {
+			out.Stamps = s.Stamps
+		}
+		if out.Probe == nil && s.Probe != nil {
+			out.Probe = s.Probe
 		}
 	}
 	slices.SortStableFunc(out.Checks, func(a, b health.Check) int { return strings.Compare(a.Name, b.Name) })

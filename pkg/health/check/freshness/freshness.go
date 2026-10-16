@@ -20,6 +20,11 @@ import (
 const (
 	kvPrefix = "freshness."
 	kvSuffix = ".first_missing"
+
+	// stampSuffix and readOKSuffix key the data the weekly summary shows: the
+	// file's timestamp (Unix seconds) and whether the last run could read it.
+	stampSuffix  = ".stamp"
+	readOKSuffix = ".read_ok"
 )
 
 // Source is the file access the check needs. Implementations must return
@@ -29,15 +34,24 @@ type Source interface {
 	ReadFile(path string) ([]byte, error)
 }
 
-// State persists, per entry, the time a file was first seen missing.
+// State persists, per entry, the time a file was first seen missing and the
+// stamp the last run saw, for the weekly summary.
 type State interface {
+	// RecordStamp stores the file's timestamp and marks the read as ok.
+	RecordStamp(name string, stamp time.Time)
+	// RecordNoStamp drops the stored timestamp: readOK is true when the file
+	// is missing and false when it could not be read.
+	RecordNoStamp(name string, readOK bool)
+
 	FirstMissing(name string) (time.Time, bool)
 	SetFirstMissing(name string, t time.Time)
 	ClearFirstMissing(name string)
 }
 
 // KVState is a State backed by a string map shaped like the store's KV map.
-// Entry values live under "freshness.<name>.first_missing" as Unix seconds.
+// Entry values live under "freshness.<name>.first_missing" as Unix seconds;
+// "freshness.<name>.stamp" holds the file's timestamp (Unix seconds, absent
+// when missing or unreadable) and "freshness.<name>.read_ok" is "1" or "0".
 // The runner builds it with NewKVState from the loaded KV and persists
 // Export() back after each run. It is safe for concurrent use.
 type KVState struct {
@@ -50,12 +64,16 @@ type KVState struct {
 func NewKVState(kv map[string]string) *KVState {
 	s := &KVState{kv: make(map[string]string)}
 	for k, v := range kv {
-		if strings.HasPrefix(k, kvPrefix) && strings.HasSuffix(k, kvSuffix) {
+		if strings.HasPrefix(k, kvPrefix) && isStateKey(k) {
 			s.kv[k] = v
 		}
 	}
 
 	return s
+}
+
+func isStateKey(k string) bool {
+	return strings.HasSuffix(k, kvSuffix) || strings.HasSuffix(k, stampSuffix) || strings.HasSuffix(k, readOKSuffix)
 }
 
 // Export returns a copy of the freshness keys, to merge into the persisted KV.
@@ -98,6 +116,43 @@ func (s *KVState) ClearFirstMissing(name string) {
 	delete(s.kv, key(name))
 }
 
+// RecordStamp stores the entry's file timestamp and a successful read.
+func (s *KVState) RecordStamp(name string, stamp time.Time) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.kv[kvPrefix+name+stampSuffix] = strconv.FormatInt(stamp.Unix(), 10)
+	s.kv[kvPrefix+name+readOKSuffix] = "1"
+}
+
+// RecordNoStamp forgets the entry's timestamp and records whether the file
+// was readable (missing) or not.
+func (s *KVState) RecordNoStamp(name string, readOK bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	delete(s.kv, kvPrefix+name+stampSuffix)
+	s.kv[kvPrefix+name+readOKSuffix] = "0"
+	if readOK {
+		s.kv[kvPrefix+name+readOKSuffix] = "1"
+	}
+}
+
+// Stamp returns the entry's last seen timestamp: present is false when it is
+// missing or corrupt, readOK is true when the last run could read the file.
+func (s *KVState) Stamp(name string) (stamp time.Time, present, readOK bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	readOK = s.kv[kvPrefix+name+readOKSuffix] == "1"
+	sec, err := strconv.ParseInt(s.kv[kvPrefix+name+stampSuffix], 10, 64)
+	if err != nil {
+		return time.Time{}, false, readOK
+	}
+
+	return time.Unix(sec, 0), true, readOK
+}
+
 func key(name string) string { return kvPrefix + name + kvSuffix }
 
 // Check judges one configured freshness entry.
@@ -128,14 +183,17 @@ func (c *Check) Run(_ context.Context) health.CheckResult {
 	case errors.Is(err, fs.ErrNotExist):
 		var judged bool
 
+		c.state.RecordNoStamp(c.cfg.Name, true)
 		if reading, judged = c.judgeMissing(reading, now); !judged {
 			return health.CheckResult{}
 		}
 	case err != nil:
+		c.state.RecordNoStamp(c.cfg.Name, false)
 		reading.Verdict = health.Unknown
 		reading.Text = fmt.Sprintf("freshness %s: cannot read %s: %v", c.cfg.Name, c.cfg.Path, err)
 	default:
 		c.state.ClearFirstMissing(c.cfg.Name)
+		c.state.RecordStamp(c.cfg.Name, stamp)
 		reading = c.judgeAge(reading, now.Sub(stamp))
 	}
 

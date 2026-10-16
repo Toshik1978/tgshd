@@ -19,12 +19,14 @@ import (
 	"github.com/Toshik1978/tgshd/pkg/command"
 	"github.com/Toshik1978/tgshd/pkg/health"
 	"github.com/Toshik1978/tgshd/pkg/health/check/disks"
+	"github.com/Toshik1978/tgshd/pkg/health/check/modemprobe"
 	"github.com/Toshik1978/tgshd/pkg/health/check/temps"
 	hcfg "github.com/Toshik1978/tgshd/pkg/health/config"
 	"github.com/Toshik1978/tgshd/pkg/health/notify"
 	"github.com/Toshik1978/tgshd/pkg/health/report"
 	"github.com/Toshik1978/tgshd/pkg/health/runner"
 	"github.com/Toshik1978/tgshd/pkg/health/store"
+	"github.com/Toshik1978/tgshd/pkg/host/sysfs"
 	"github.com/Toshik1978/tgshd/pkg/telegram"
 )
 
@@ -118,48 +120,6 @@ func testBook() bookOf {
 		{Serial: testSerial2, Model: "Example SATA SSD", Bus: "SATA"},
 		{Serial: testSerial3, Model: "Example HDD", Bus: "SATA", Retired: true},
 		{Serial: testSerial1, Model: "Example NVMe SSD", Bus: "NVMe"},
-	}
-}
-
-func TestDriveList(t *testing.T) {
-	t.Parallel()
-
-	open := []runner.OpenCondition{
-		{Key: "disks/" + testSerial2 + "/health", Text: "SMART overall health FAILED"},
-		{Key: "disks/" + testSerial1 + "/wear", Text: "worn"},
-		{Key: "disks/" + testSerial1 + "/missing", Text: "gone"},
-	}
-	stats := []store.MetricStats{
-		{Metric: "drive." + testSerial1 + ".spare", Current: 98, HasCurrent: true},
-		{Metric: "drive." + testSerial1 + ".selftest_age_h", Current: 30, HasCurrent: true},
-		// Only rolled-up rows: no current value, so unknown.
-		{Metric: "drive." + testSerial2 + ".selftest_age_h", Min: 5, Max: 9},
-		{Metric: "drive." + testSerial3 + ".spare", Current: 50, HasCurrent: true},
-	}
-	got := driveList(testBook().Baselines(), open, stats)
-	want := []command.Drive{
-		{Bus: "NVMe", Model: "Example NVMe SSD", Serial: testSerial1, HealthOK: true, Missing: true},
-		{Bus: "SATA", Model: "Example SATA SSD", Serial: testSerial2, HealthOK: false},
-	}
-	if len(got) != len(want) {
-		t.Fatalf("got %+v, want %+v", got, want)
-	}
-	for i := range want {
-		g := got[i]
-		if g.Bus != want[i].Bus || g.Model != want[i].Model || g.Serial != want[i].Serial ||
-			g.HealthOK != want[i].HealthOK || g.Missing != want[i].Missing {
-			t.Errorf("drive %d = %+v, want %+v", i, g, want[i])
-		}
-	}
-	if got[0].SparePct == nil || *got[0].SparePct != 98 ||
-		got[0].SelfTestAge == nil || *got[0].SelfTestAge != 30*time.Hour {
-		t.Errorf("drive 1 spare %v, self-test age %v; want 98 and 30h", got[0].SparePct, got[0].SelfTestAge)
-	}
-	if got[1].SparePct != nil || got[1].SelfTestAge != nil {
-		t.Errorf("drive 2 spare %v, self-test age %v; want unknown", got[1].SparePct, got[1].SelfTestAge)
-	}
-	if got := driveList(nil, open, stats); len(got) != 0 {
-		t.Errorf("no baselines: %+v", got)
 	}
 }
 
@@ -312,78 +272,236 @@ func TestHealthReportsWithoutStoreHasNoDailyJob(t *testing.T) {
 	}
 }
 
-func weeklyReports(st *fakeReportStore, r *fakeRunner) *healthReports {
+// fakeTopology serves fixed mounts and block devices.
+type fakeTopology struct {
+	mounts   []sysfs.MountEntry
+	blocks   []sysfs.BlockDevice
+	mountErr error
+	blockErr error
+}
+
+func (f fakeTopology) MountInfo() ([]sysfs.MountEntry, error) { return f.mounts, f.mountErr }
+
+func (f fakeTopology) BlockTopology() ([]sysfs.BlockDevice, error) { return f.blocks, f.blockErr }
+
+func dev(major, minor uint32) sysfs.DevNum { return sysfs.DevNum{Major: major, Minor: minor} }
+
+// testTopology: nvme0n1p2 holds /, sda1 is under md0 which holds /data.
+func testTopology() fakeTopology {
+	return fakeTopology{
+		mounts: []sysfs.MountEntry{
+			{Dev: dev(259, 2), MountPoint: "/"},
+			{Dev: dev(9, 0), MountPoint: "/data"},
+			{Dev: dev(0, 25), MountPoint: "/proc"},
+		},
+		blocks: []sysfs.BlockDevice{
+			{Name: "md0", Dev: dev(9, 0)},
+			{
+				Name: "nvme0n1", Dev: dev(259, 0),
+				Partitions: []sysfs.Partition{{Name: "nvme0n1p2", Dev: dev(259, 2)}},
+			},
+			{
+				Name: "sda", Dev: dev(8, 0),
+				Partitions: []sysfs.Partition{{
+					Name: "sda1", Dev: dev(8, 1), Holders: []sysfs.Holder{{Name: "md0", Dev: dev(9, 0)}},
+				}},
+			},
+		},
+	}
+}
+
+// fakeStamps serves fixed freshness stamps.
+type fakeStamps map[string]report.FreshnessStamp
+
+func (f fakeStamps) Stamp(name string) (stamp time.Time, present, readOK bool) {
+	s := f[name]
+
+	return s.At, s.Present, s.ReadOK
+}
+
+// fakeProbeStatus serves a fixed modem probe state.
+type fakeProbeStatus modemprobe.State
+
+func (f fakeProbeStatus) Status() modemprobe.State { return modemprobe.State(f) }
+
+func weeklyReports(st *fakeReportStore, r *fakeRunner, now time.Time) *healthReports {
 	h := &healthReports{
-		book: testBook(), checks: []string{"containers", "disks", "http/web-app"},
-		host: "box", logger: zap.NewNop(), now: time.Now,
+		checks: []string{
+			"containers", "disks", "freshness/db-dump", "freshness/offsite", "http/web-app", "modem_probe",
+		},
+		groups: map[string]string{"freshness/db-dump": "backups", "freshness/offsite": "backups"},
+		host:   "box", logger: zap.NewNop(), now: func() time.Time { return now },
+		topology: testTopology(),
+		stamps: fakeStamps{
+			"db-dump": {At: now.Add(-30 * time.Hour), Present: true, ReadOK: true},
+			"offsite": {ReadOK: true},
+		},
+		probe: fakeProbeStatus{LastOKAt: now.Add(-3 * 24 * time.Hour)},
 		statuses: statusesOf{
 			{
-				Serial: testSerial1,
-				Model:  "Example NVMe SSD",
-				Bus:    disks.BusNVMe,
-				Node:   "nvme0n1",
-				Health: "ok",
-				Wear:   new(4),
+				Serial: testSerial1, Model: "Example NVMe SSD", Bus: disks.BusNVMe, Transport: "nvme",
+				Node: "nvme0n1", Health: "ok", Temperature: new(48), Wear: new(4),
+				SelfTestFormat: disks.SelfTestFormatOK, SelfTestNewest: &disks.SelfTestNewest{Result: "passed"},
+				SelfTestPassAge: 2 * 24 * time.Hour, SelfTestPassObserved: true,
 			},
-			{Serial: testSerial2, Model: "Example SATA SSD", Bus: disks.BusATA, Node: "sda", Health: "ok"},
+			{
+				Serial: testSerial2, Model: "Example SATA SSD", Bus: disks.BusATA, Transport: "sata", Node: "sda",
+				Health: "ok", AsleepSince: time.Date(2026, 10, 13, 14, 0, 0, 0, time.UTC),
+				SelfTestFormat: disks.SelfTestFormatOK, SelfTestNewest: &disks.SelfTestNewest{Result: "passed"},
+				SelfTestPassAge: 30 * 24 * time.Hour, SelfTestPassObserved: true,
+			},
 		},
 	}
 	if st != nil {
 		h.store = st
 	}
-	r.open = []runner.OpenCondition{{Key: "http/web-app", Text: "HTTP 500 <x>"}}
+	r.open = []runner.OpenCondition{{Key: "http/web-app", Text: "HTTP 500 <x>", Since: now.Add(-50 * time.Minute)}}
 	h.bind(r)
 
 	return h
 }
 
+// TestHealthReportsWeeklyPushesTheSummary: the summary is fed from the disks
+// check's status with the mounts read at report time, the stored wear of a
+// drive not read since the start, the summary groups, the freshness stamps
+// and the modem probe state.
 func TestHealthReportsWeeklyPushesTheSummary(t *testing.T) {
 	t.Parallel()
 
+	now := time.Date(2026, 10, 18, 9, 0, 0, 0, time.UTC)
 	st := &fakeReportStore{metrics: []store.MetricStats{
-		{Metric: "drive." + testSerial1 + ".wear", Current: 4, HasCurrent: true},
-		{Metric: "drive." + testSerial1 + ".written_bytes", Current: 3e9, Min: 1e9, HasCurrent: true},
+		{Metric: "drive." + testSerial2 + ".wear", Current: 7, HasCurrent: true},
 		{Metric: "temp.cpu", Current: 40, HasCurrent: true},
 	}}
 	r := &fakeRunner{}
-	if err := weeklyReports(st, r).weekly(t.Context(), time.Now()); err != nil {
+	if err := weeklyReports(st, r, now).weekly(t.Context(), now); err != nil {
 		t.Fatal(err)
 	}
 	if len(r.pushed) != 1 || r.pushed[0][0] != "summary" || r.pushed[0][2] != "Weekly summary sent" {
 		t.Fatalf("pushed = %q, want the summary with a one-line record", r.pushed)
 	}
-	got := r.pushed[0][1]
-	for _, want := range []string{
-		"Weekly summary\nDrives:\n",
-		"NVMe Example NVMe SSD …0001: health OK, wear 4%, written 7d 2.0 GB\n",
-		"SATA Example SATA SSD …0002: health OK, wear n/a, written 7d n/a\n",
-		"Services:\ncontainers: OK (1 check)\nhttp: 1 open (0 of 1 checks OK)\n",
-		"Open problems:\nhttp/web-app: HTTP 500 <x>",
-	} {
-		if !strings.Contains(got, want) {
-			t.Errorf("summary lacks %q:\n%s", want, got)
-		}
-	}
-	if strings.HasPrefix(got, "box") || strings.Contains(got, testSerial3[len(testSerial3)-4:]) ||
-		strings.Contains(got, testSerial1) {
-		t.Errorf("host prefix (the notifier adds it), retired drive or full serial shown:\n%s", got)
+	want := "Weekly summary\n" +
+		"Drives:\n" +
+		"nvme0n1 (/) 48°C, self-test passed 2 d ago, wear 4%\n" +
+		"sda (/data) asleep since Tue 14:00, self-test passed 30 d ago, wear 7%\n" +
+		"Services:\n" +
+		"containers: ok\n" +
+		"backups: db-dump 30 h ago; offsite none\n" +
+		"http/web-app: HTTP 500 <x>\n" +
+		"modem_probe: last round trip 3 d ago, no probe outstanding\n" +
+		"Open problems:\n" +
+		"http/web-app: HTTP 500 <x> (since 2026-10-18 08:10)"
+	if got := r.pushed[0][1]; got != want {
+		t.Errorf("got\n%s\nwant\n%s", got, want)
 	}
 	if !slices.Equal(st.prefixes, []string{"drive."}) {
 		t.Errorf("metrics read = %v", st.prefixes)
 	}
 }
 
+// TestHealthReportsWeeklyWithoutHistory: the drive lines come from the disks
+// check, so without a state database (or when it cannot be read) they are
+// still shown, only without the stored wear.
 func TestHealthReportsWeeklyWithoutHistory(t *testing.T) {
 	t.Parallel()
 
+	now := time.Date(2026, 10, 18, 9, 0, 0, 0, time.UTC)
 	for _, st := range []*fakeReportStore{nil, {metricsErr: errors.New("locked")}} {
 		r := &fakeRunner{}
-		if err := weeklyReports(st, r).weekly(t.Context(), time.Now()); err != nil {
+		if err := weeklyReports(st, r, now).weekly(t.Context(), now); err != nil {
 			t.Fatal(err)
 		}
-		if len(r.pushed) != 1 || !strings.Contains(r.pushed[0][1], "\nDrives: unavailable\nServices:\n") {
-			t.Fatalf("pushed = %q, want the drives section unavailable and the rest sent", r.pushed)
+		want := "\nsda (/data) asleep since Tue 14:00, self-test passed 30 d ago\nServices:\n"
+		if len(r.pushed) != 1 || !strings.Contains(r.pushed[0][1], want) {
+			t.Fatalf("pushed = %q, want %q", r.pushed, want)
 		}
+	}
+}
+
+// TestHealthReportsWeeklyMountsUnknown: a failed mount or topology read shows
+// "?" for every drive; without the disks check the section reads "none".
+func TestHealthReportsWeeklyMountsUnknown(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 10, 18, 9, 0, 0, 0, time.UTC)
+	for _, topo := range []fakeTopology{
+		{mountErr: errors.New("no procfs")},
+		{blockErr: errors.New("no sysfs")},
+	} {
+		r := &fakeRunner{}
+		h := weeklyReports(nil, r, now)
+		h.topology = topo
+		if err := h.weekly(t.Context(), now); err != nil {
+			t.Fatal(err)
+		}
+		got := r.pushed[0][1]
+		if !strings.Contains(got, "\nnvme0n1 (?) 48°C") || !strings.Contains(got, "\nsda (?) asleep") {
+			t.Errorf("got\n%s\nwant both drives' mounts unknown", got)
+		}
+	}
+
+	r := &fakeRunner{}
+	h := weeklyReports(nil, r, now)
+	h.statuses = nil
+	if err := h.weekly(t.Context(), now); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(r.pushed[0][1], "\nDrives: none\n") {
+		t.Errorf("got %q, want no drives", r.pushed[0][1])
+	}
+}
+
+// TestHealthReportsWeeklyMissingDriveMountsUnknown: a missing drive's node
+// is stale (the kernel may have given it to another drive), so its mounts
+// read "?" rather than those of whatever holds the node now.
+func TestHealthReportsWeeklyMissingDriveMountsUnknown(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 10, 18, 9, 0, 0, 0, time.UTC)
+	r := &fakeRunner{}
+	h := weeklyReports(nil, r, now)
+	r.open = append(r.open, runner.OpenCondition{Key: "disks/" + testSerial2 + "/missing", Text: "gone", Since: now})
+	if err := h.weekly(t.Context(), now); err != nil {
+		t.Fatal(err)
+	}
+	got := r.pushed[0][1]
+	if !strings.Contains(got, "\nsda (?) missing, asleep since") || !strings.Contains(got, "\nnvme0n1 (/) 48°C") {
+		t.Errorf("got\n%s\nwant the missing sda's mounts unknown and nvme0n1's read", got)
+	}
+}
+
+// TestReportTopologyDropsZeroDevices: a device, partition or holder whose
+// device number could not be read ("0:0") never matches a mount entry.
+func TestReportTopologyDropsZeroDevices(t *testing.T) {
+	t.Parallel()
+
+	got := reportTopology([]sysfs.BlockDevice{
+		{Name: "loop0"},
+		{
+			Name: "sda", Dev: dev(8, 0), Holders: []sysfs.Holder{{Name: "dm-9"}, {Name: "dm-0", Dev: dev(253, 0)}},
+			Partitions: []sysfs.Partition{
+				{Name: "sda1", Dev: dev(8, 1), Holders: []sysfs.Holder{{Name: "md0"}, {Name: "md1", Dev: dev(9, 1)}}},
+				{Name: "sda2"},
+			},
+		},
+	})
+	want := []report.BlockDevice{{
+		Name: "sda", Dev: "8:0", Holders: []report.BlockHolder{{Name: "dm-0", Dev: "253:0"}},
+		Partitions: []report.BlockPartition{
+			{Name: "sda1", Dev: "8:1", Holders: []report.BlockHolder{{Name: "md1", Dev: "9:1"}}},
+		},
+	}}
+	if fmt.Sprint(got) != fmt.Sprint(want) {
+		t.Errorf("got %+v, want %+v", got, want)
+	}
+
+	entries := reportMounts([]sysfs.MountEntry{{Dev: dev(8, 1), MountPoint: "/"}, {MountPoint: "/x"}})
+	if len(entries) != 1 || entries[0] != (report.MountEntry{Dev: "8:1", MountPoint: "/"}) {
+		t.Errorf("mount entries = %+v, want only 8:1 on /", entries)
+	}
+	// A zero device in the mount table would otherwise match a zero holder.
+	if m := report.DriveMounts("sda", entries, got, nil); m != "/" {
+		t.Errorf("mounts = %q", m)
 	}
 }
 
@@ -418,7 +536,7 @@ func TestHealthReportsHandlers(t *testing.T) {
 		},
 	}
 	pub := &fakePublisher{}
-	h := weeklyReports(st, &fakeRunner{})
+	h := weeklyReports(st, &fakeRunner{}, time.Now())
 	hs := h.handlers(zap.NewNop(), pub)
 	for _, c := range []struct{ name, want string }{
 		{"history", "PROBLEM http/web-app: HTTP 500"},
@@ -439,7 +557,7 @@ func TestHealthReportsHandlersWithoutStore(t *testing.T) {
 	t.Parallel()
 
 	pub := &fakePublisher{}
-	hs := weeklyReports(nil, &fakeRunner{}).handlers(zap.NewNop(), pub)
+	hs := weeklyReports(nil, &fakeRunner{}, time.Now()).handlers(zap.NewNop(), pub)
 	names := make([]string, 0, len(hs))
 	for _, h := range hs {
 		names = append(names, h.Name())
@@ -459,7 +577,11 @@ func TestHealthReportsHandlersWithoutStore(t *testing.T) {
 		}
 	}
 
-	failing := weeklyReports(nil, &fakeRunner{}).handlers(zap.NewNop(), &fakePublisher{err: errors.New("down")})
+	failing := weeklyReports(
+		nil,
+		&fakeRunner{},
+		time.Now(),
+	).handlers(zap.NewNop(), &fakePublisher{err: errors.New("down")})
 	if err := failing[0].Handle(t.Context(), 42, "/history"); err == nil {
 		t.Fatal("a failed reply must be returned")
 	}
@@ -471,21 +593,26 @@ func TestNewHealthReportsTakesTheDisksCheckStatus(t *testing.T) {
 	t.Parallel()
 
 	set := buildDisksCheck(&hcfg.Disks{}, nil, nil, time.Now, zap.NewNop(), false)
-	h := newHealthReports(&healthSetup{Host: "box"}, set, zap.NewNop())
-	if h.statuses == nil {
-		t.Fatal("statuses = nil, want the disks check")
+	h := newHealthReports(&healthSetup{Host: "box"}, set, testTopology(), zap.NewNop())
+	if h.statuses == nil || h.topology == nil {
+		t.Fatalf("statuses = %v, topology = %v; want the disks check and the reader", h.statuses, h.topology)
 	}
 }
 
 func TestNewHealthReportsFromSetup(t *testing.T) {
 	t.Parallel()
 
+	stamps, probe := fakeStamps{}, fakeProbeStatus{}
 	set := checkSet{
 		Checks: []health.Check{{Name: "containers"}, {Name: "http/web-app"}},
 		Drives: testBook(),
+		Stamps: stamps,
+		Probe:  probe,
 	}
-	h := newHealthReports(&healthSetup{Host: "box"}, set, zap.NewNop())
-	if h.store != nil || h.host != "box" || h.loc == nil || h.now == nil || h.book == nil ||
+	cfg := &hcfg.Config{Containers: &hcfg.Containers{SummaryGroup: "apps"}}
+	h := newHealthReports(&healthSetup{Host: "box", Config: cfg}, set, nil, zap.NewNop())
+	if h.store != nil || h.host != "box" || h.loc == nil || h.now == nil || h.statuses != nil ||
+		h.topology != nil || h.stamps == nil || h.probe == nil || h.groups["containers"] != "apps" ||
 		!slices.Equal(h.checks, []string{"containers", "http/web-app"}) {
 		t.Fatalf("reports = %+v", h)
 	}
@@ -539,7 +666,7 @@ func TestHealthReportsTempSensors(t *testing.T) {
 	since := time.Date(2026, 3, 2, 9, 30, 0, 0, time.UTC)
 	h := newHealthReports(&healthSetup{}, checkSet{Temps: fakeTempSensors{
 		{Metric: "temp.gpu.0", Label: "gpu 0", Limit: 80, Since: since},
-	}}, zap.NewNop())
+	}}, nil, zap.NewNop())
 	want := []report.Sensor{{Metric: "temp.gpu.0", Label: "gpu 0", Limit: 80, Since: since}}
 	if got := h.TempSensors(); !slices.Equal(got, want) {
 		t.Fatalf("TempSensors = %+v, want %+v", got, want)

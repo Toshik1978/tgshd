@@ -8,7 +8,9 @@
 #
 # Durations use Go syntax (30s, 15m, 6h) plus d for days (8d).
 # Per-check common keys: interval, threshold, mode (tlg | sms | tlg-or-sms,
-# default tlg) and needs_internet (default false).
+# default tlg), needs_internet (default false) and summary_group (default none:
+# one weekly-summary line per check; checks naming the same group, [a-z0-9-]+,
+# share one line).
 
 general:
   state_dir: /var/lib/tgshd                 # state database and instance lock
@@ -86,6 +88,7 @@ freshness:
     path: /var/lib/backup-status/db
     content: epoch                          # epoch (file holds a Unix time) | mtime
     max_age: 26h
+    summary_group: backups                  # optional: merged with other checks of this group
 
 command:
   - name: port-guard
