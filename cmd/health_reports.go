@@ -13,6 +13,7 @@ import (
 
 	"github.com/Toshik1978/tgshd/pkg/command"
 	"github.com/Toshik1978/tgshd/pkg/health/check/disks"
+	"github.com/Toshik1978/tgshd/pkg/health/check/temps"
 	"github.com/Toshik1978/tgshd/pkg/health/notify"
 	"github.com/Toshik1978/tgshd/pkg/health/report"
 	"github.com/Toshik1978/tgshd/pkg/health/runner"
@@ -55,6 +56,14 @@ type reportStore interface {
 	Retention(ctx context.Context, now time.Time) (store.RetentionResult, error)
 }
 
+// tempSensors is what the reports read of the temperatures check;
+// *temps.Check satisfies it.
+type tempSensors interface {
+	Sensors() []temps.SensorStatus
+}
+
+var _ tempSensors = (*temps.Check)(nil)
+
 // driveStatuses is what the reports read of the disks check; *disks.Check
 // satisfies it.
 type driveStatuses interface {
@@ -80,6 +89,8 @@ type healthReports struct {
 	store reportStore
 	// book is nil without the disks check.
 	book runner.DriveBook
+	// sensors is the temperatures check's sensors; nil without it.
+	sensors tempSensors
 	// statuses is the disks check's status; nil without it.
 	statuses driveStatuses
 	checks   []string
@@ -113,6 +124,7 @@ func newHealthReports(hs *healthSetup, set checkSet, logger *zap.Logger) *health
 	if hs.Store != nil {
 		h.store = hs.Store
 	}
+	h.sensors = set.Temps
 	if st, ok := set.Drives.(driveStatuses); ok {
 		h.statuses = st
 	}
@@ -142,6 +154,21 @@ func (h *healthReports) Drives() []command.Drive {
 	out := make([]command.Drive, 0, len(statuses))
 	for i := range statuses {
 		out = append(out, statusDrive(&statuses[i], missing[statuses[i].Serial], now))
+	}
+
+	return out
+}
+
+// TempSensors implements command.TempSensorSource: the temperature sensors
+// the check last saw, with their limits and unreadable times.
+func (h *healthReports) TempSensors() []report.Sensor {
+	if h.sensors == nil {
+		return nil
+	}
+	in := h.sensors.Sensors()
+	out := make([]report.Sensor, len(in))
+	for i, s := range in {
+		out[i] = report.Sensor{Metric: s.Metric, Label: s.Label, Limit: s.Limit, Since: s.Since}
 	}
 
 	return out
@@ -206,7 +233,7 @@ func (h *healthReports) handlers(logger *zap.Logger, publisher command.Publisher
 
 	return []telegram.Handler{
 		command.NewHistoryCommand(logger, publisher, h.store),
-		command.NewTempCommand(logger, publisher, h.store),
+		command.NewTempCommand(logger, publisher, h.store, h),
 		command.NewDisksCommand(logger, publisher, h, h.store),
 	}
 }

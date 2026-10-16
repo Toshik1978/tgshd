@@ -88,7 +88,7 @@ func TestHardwareChecksFollowTheConfig(t *testing.T) {
 
 	for _, hs := range []*healthSetup{{}, {Config: &hcfg.Config{}}} {
 		for name, set := range map[string]checkSet{
-			"disks": disksChecks(hs, zap.NewNop()), "temps": tempsChecks(hs), "kernel": kernelChecks(hs, zap.NewNop()),
+			"disks": disksChecks(hs, zap.NewNop()), "temps": tempsChecks(hs, newOpenState()), "kernel": kernelChecks(hs, zap.NewNop()),
 		} {
 			if len(set.Checks)+len(set.Errors)+len(set.Persisters)+len(set.Background) != 0 || set.Drives != nil {
 				t.Fatalf("%s without a section: %+v", name, set)
@@ -103,7 +103,7 @@ func TestHardwareChecksFollowTheConfig(t *testing.T) {
 		len(set.Persisters) != 1 || set.Drives == nil {
 		t.Fatalf("disks section: %+v", set)
 	}
-	if set := tempsChecks(hs); len(set.Checks) != 1 || set.Checks[0].Name != tempsCheckName ||
+	if set := tempsChecks(hs, newOpenState()); len(set.Checks) != 1 || set.Checks[0].Name != tempsCheckName ||
 		len(set.Persisters) != 1 {
 		t.Fatalf("temperatures section: %+v", set)
 	}
@@ -209,26 +209,55 @@ func (f *fakeGPUs) GPUs(ctx context.Context) ([]nvidia.GPU, error) {
 	return f.gpus, f.err
 }
 
+func TestNvidiaSourceMapsNoDevices(t *testing.T) {
+	t.Parallel()
+
+	_, err := nvidiaSource{reader: &fakeGPUs{err: nvidia.ErrNoDevices}}.GPUs(t.Context())
+	if !errors.Is(err, temps.ErrNoGPUs) {
+		t.Fatalf("err = %v, want temps.ErrNoGPUs", err)
+	}
+}
+
 func TestTemperatureSources(t *testing.T) {
 	t.Parallel()
 
 	maxC, crit := 90.0, 100.0
-	in := []hwmon.Sensor{{Chip: "coretemp", Label: "Package id 0", Celsius: 85, Max: &maxC, Crit: &crit}}
+	unreadable := errors.New("input/output error")
+	in := []hwmon.Sensor{
+		{
+			Chip: "coretemp", Label: "Package id 0", Device: "/sys/devices/example/hwmon3",
+			Celsius: 85, Max: &maxC, Crit: &crit,
+		},
+		{Chip: "acpitz", Label: "temp1", Device: "/sys/devices/example/hwmon4", Err: unreadable},
+	}
 	got, err := hwmonSource{reader: fakeHwmon{sensors: in}}.Sensors()
-	if err != nil || len(got) != 1 {
+	if err != nil || len(got) != 2 {
 		t.Fatalf("sensors = %+v, %v", got, err)
 	}
-	if want := (temps.Sensor{Chip: "coretemp", Label: "Package id 0", Celsius: 85, Max: &maxC, Crit: &crit}); got[0] != want {
+	want := temps.Sensor{
+		Chip: "coretemp", Label: "Package id 0", Device: "/sys/devices/example/hwmon3",
+		Celsius: 85, Max: &maxC, Crit: &crit,
+	}
+	if got[0] != want {
 		t.Fatalf("sensor = %+v, want %+v", got[0], want)
+	}
+	if got[1].Device != "/sys/devices/example/hwmon4" || !errors.Is(got[1].Err, unreadable) {
+		t.Fatalf("unreadable sensor = %+v", got[1])
 	}
 	readErr := errors.New("permission denied")
 	if _, err = (hwmonSource{reader: fakeHwmon{err: readErr}}).Sensors(); !errors.Is(err, readErr) {
 		t.Fatalf("err = %v", err)
 	}
 
-	gpus := &fakeGPUs{gpus: []nvidia.GPU{{Index: 0, Name: "Example GPU", Celsius: 70}}}
+	hot := 70.0
+	gpus := &fakeGPUs{
+		gpus: []nvidia.GPU{{Index: 0, Name: "Example GPU", Celsius: &hot}, {Index: 1, Name: "Example GPU"}},
+	}
 	g, err := nvidiaSource{reader: gpus}.GPUs(t.Context())
-	if err != nil || len(g) != 1 || g[0] != (temps.GPU{Index: 0, Name: "Example GPU", Celsius: 70}) {
+	if err != nil || len(g) != 2 || g[0].Celsius == nil || *g[0].Celsius != 70 || g[0].Index != 0 ||
+		g[0].Name != "Example GPU" ||
+		g[1].Index != 1 ||
+		g[1].Celsius != nil {
 		t.Fatalf("gpus = %+v, %v", g, err)
 	}
 	gpus.err = readErr
@@ -243,17 +272,24 @@ func TestBuildTempsCheck(t *testing.T) {
 	tc := &hcfg.Temperatures{
 		Interval: hcfg.Duration(time.Minute),
 		Limits:   hcfg.Limits{CPU: 80, GPU: 85, Board: 70},
+		// board_sensors reaches the check: SYSTIN is judged against 65, not 70.
+		BoardSensors: []hcfg.BoardSensor{{Chip: "nct*", Label: "SYSTIN", Limit: new(65)}},
 	}
-	sensors := fakeHwmon{sensors: []hwmon.Sensor{{Chip: "coretemp", Label: "Package id 0", Celsius: 95}}}
-	gpus := &fakeGPUs{gpus: []nvidia.GPU{{Index: 0, Name: "Example GPU", Celsius: 60}}}
-	set := buildTempsCheck(tc, hwmonSource{reader: sensors}, nvidiaSource{reader: gpus})
+	sensors := fakeHwmon{sensors: []hwmon.Sensor{
+		{Chip: "coretemp", Label: "Package id 0", Celsius: 95},
+		{Chip: "nct6775", Label: "SYSTIN", Celsius: 66},
+	}}
+	sixty := 60.0
+	gpus := &fakeGPUs{gpus: []nvidia.GPU{{Index: 0, Name: "Example GPU", Celsius: &sixty}}}
+	set := buildTempsCheck(tc, hwmonSource{reader: sensors}, nvidiaSource{reader: gpus}, newOpenState())
 	chk := set.Checks[0]
 	if chk.Name != "temps" || chk.Interval != time.Minute {
 		t.Fatalf("check = %+v", chk)
 	}
 
 	res := chk.Run(t.Context())
-	if res.Err != nil || !hasKey(res.Readings, "temps/gpu/0", health.Good) || len(res.Readings) != 2 {
+	if res.Err != nil || !hasKey(res.Readings, "temps/gpu/0", health.Good) ||
+		!hasKey(res.Readings, "temps/nct6775/systin", health.Bad) || len(res.Readings) != 3 {
 		t.Fatalf("readings = %+v, err %v", res.Readings, res.Err)
 	}
 	if !gpus.deadline {
@@ -269,6 +305,37 @@ func TestBuildTempsCheck(t *testing.T) {
 	}
 	if err := set.Persisters[0].Restore(st); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// fakeOpenSource answers IsOpen from a fixed set of open keys.
+type fakeOpenSource map[string]bool
+
+func (f fakeOpenSource) IsOpen(key string) bool { return f[key] }
+
+func TestOpenStateLateBound(t *testing.T) {
+	t.Parallel()
+
+	const key = "temps/acpitz/temp1"
+	o := newOpenState()
+	var open temps.OpenState = o
+	if open.IsOpen(key) {
+		t.Fatal("an unbound open state must answer false")
+	}
+	o.bind(fakeOpenSource{key: true})
+	if !open.IsOpen(key) || open.IsOpen("temps/acpitz/temp2") {
+		t.Fatal("a bound open state must answer from its source")
+	}
+
+	// newHealth binds the adapter the checks were built with to its runner.
+	p := enabledHealthParams(t, &fakePublisher{}, fxtest.NewLifecycle(t))
+	p.Open = newOpenState()
+	out := newHealth(p)
+	p.Open.mu.Lock()
+	src := p.Open.source
+	p.Open.mu.Unlock()
+	if len(out.Workers) != 1 || src == nil || any(src) != any(out.Workers[0]) {
+		t.Fatalf("open state bound to %T, want the runner %v", src, out.Workers)
 	}
 }
 
@@ -794,6 +861,39 @@ func TestBuildDisksCheckForcedReadOnlyInTheDaemon(t *testing.T) {
 			}
 			if got := st.Status(); oneShot && (len(got) != 1 || got[0].AsleepSince.IsZero()) {
 				t.Fatalf("Status() = %+v, want the drive asleep", got)
+			}
+		})
+	}
+}
+
+// TestBuildDisksCheckPerSerialLimit: temperatures.limits_by_serial reaches the
+// disks check through the section it is built with.
+func TestBuildDisksCheckPerSerialLimit(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		limits map[string]int
+		want   health.Verdict
+	}{
+		{"no override: the class limit", nil, health.Bad},
+		{"override raises this drive's limit", map[string]int{"TEST0000000001": 150}, health.Good},
+		{"override of another serial", map[string]int{"TEST0000000002": 150}, health.Bad},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			d := &hcfg.Disks{Interval: hcfg.Duration(time.Hour), WearPercent: 80}
+			tc := &hcfg.Temperatures{Limits: hcfg.Limits{DriveNVMe: 70, DriveSATA: 60}, LimitsBySerial: tt.limits}
+			now := func() time.Time { return time.Date(2026, 1, 2, 3, 0, 0, 0, time.UTC) }
+			set := buildDisksCheck(d, tc, fakeSmart{}, now, zap.NewNop(), false)
+			if err := set.Persisters[0].Restore(store.State{}); err != nil {
+				t.Fatal(err)
+			}
+			res := set.Checks[0].Run(t.Context())
+			if res.Err != nil || !hasKey(res.Readings, "disks/TEST0000000001/temp", tt.want) {
+				t.Fatalf("readings = %+v, err %v; want the temp %v", res.Readings, res.Err, tt.want)
 			}
 		})
 	}

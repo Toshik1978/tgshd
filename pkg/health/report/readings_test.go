@@ -8,27 +8,54 @@ import (
 	"github.com/Toshik1978/tgshd/pkg/health/store"
 )
 
-//go:fix inline
 func TestTemps(t *testing.T) {
 	stats := []store.MetricStats{
-		{Metric: "temp.cpu.chip.Package <0>", Current: 51.4, HasCurrent: true, Min: 30, Avg: 45.2, Max: 80.6},
+		{Metric: "temp.cpu.coretemp.package-id-0", Current: 51.4, HasCurrent: true, Min: 30, Avg: 45.2, Max: 80.6},
+		{Metric: "temp.cpu.coretemp.core-0", Current: 60, HasCurrent: true, Min: 1, Avg: 2, Max: 3},
+		{Metric: "temp.board.nct6775.systin", Current: 40, HasCurrent: true, Min: 38, Avg: 39, Max: 41},
+		{Metric: "temp.board.nct6775.auxtin0", Current: 41, HasCurrent: true, Min: 40, Avg: 41, Max: 42},
 		{Metric: "temp.drive.TEST0000000001", Current: 40, HasCurrent: true},
-		{Metric: "temp.gpu.0", HasCurrent: false, Min: 1, Avg: 2, Max: 3},
+		{Metric: "temp.gpu.0", HasCurrent: false, Min: 40, Avg: 50, Max: 70},
 		{Metric: "drive.TEST0000000001.wear", Current: 3, HasCurrent: true},
 	}
-	got := Temps(stats)
-	want := "cpu.chip.Package &lt;0&gt;: 51°C (7d min/avg/max 30/45/81)\ngpu.0: n/a (7d min/avg/max 1/2/3)"
+	since := time.Date(2026, 3, 2, 9, 30, 0, 0, time.UTC)
+	sensors := []Sensor{
+		{Metric: "temp.board.nct6775.auxtin0", Label: "nct6775 auxtin0"},
+		{Metric: "temp.board.nct6775.systin", Label: "nct6775 systin", Limit: 95},
+		{Metric: "temp.cpu.coretemp.package-id-0", Label: "coretemp package-id-0", Limit: 85},
+		{Metric: "temp.gpu.0", Label: "gpu 0", Limit: 80, Since: since},
+		{Metric: "temp.cpu.k10temp.tdie", Label: "k10temp <tdie>", Since: since},
+		// An implausible value (200°C) is reported the same way as an unreadable input.
+		{Metric: "temp.board.acpitz.temp1", Label: "acpitz temp1", Limit: 70, Since: since},
+	}
+	got := Temps(stats, sensors)
+	want := strings.Join([]string{
+		"nct6775 auxtin0: 41°C (7d min/avg/max 40/41/42)",
+		"nct6775 systin: 40°C (7d min/avg/max 38/39/41), limit 95°C",
+		"coretemp package-id-0: 51°C (7d min/avg/max 30/45/81), limit 85°C",
+		"gpu 0: unreadable since 2026-03-02 09:30",
+		"k10temp &lt;tdie&gt;: unreadable since 2026-03-02 09:30",
+		"acpitz temp1: unreadable since 2026-03-02 09:30",
+	}, "\n")
 	if got != want {
 		t.Errorf("got %q, want %q", got, want)
 	}
-	if got := Temps(nil); got != "No temperature sensors" {
+
+	// A known sensor without stats yet reads n/a; no sensor info lists the stats.
+	if got := Temps(nil, sensors[:1]); got != "nct6775 auxtin0: n/a" {
+		t.Errorf("no stats = %q", got)
+	}
+	if got := Temps(stats[:1], nil); got != "cpu.coretemp.package-id-0: 51°C (7d min/avg/max 30/45/81)" {
+		t.Errorf("no sensors = %q", got)
+	}
+	if got := Temps(nil, nil); got != "No temperature sensors" {
 		t.Errorf("empty = %q", got)
 	}
-	many := make([]store.MetricStats, 500)
+	many := make([]Sensor, 500)
 	for i := range many {
-		many[i] = store.MetricStats{Metric: "temp.cpu.chip." + strings.Repeat("x", 20), HasCurrent: true}
+		many[i] = Sensor{Metric: "temp.cpu.chip." + strings.Repeat("x", i%7+20), Label: "chip x"}
 	}
-	if got := Temps(many); units(got) > MaxMessageUnits || !strings.HasSuffix(got, "…") {
+	if got := Temps(nil, many); units(got) > MaxMessageUnits || !strings.HasSuffix(got, "…") {
 		t.Errorf("not truncated: %d units", units(got))
 	}
 }

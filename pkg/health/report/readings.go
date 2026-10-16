@@ -3,6 +3,7 @@ package report
 import (
 	"fmt"
 	"math"
+	"strconv"
 	"strings"
 	"time"
 
@@ -71,23 +72,70 @@ type SelfTest struct {
 	Unobserved bool
 }
 
-// Temps renders the /temp reply: one line per temperature sensor with the
-// current value and the 7-day min/avg/max. Drive temperatures are left to /disks.
-func Temps(stats []store.MetricStats) string {
-	var lines []string
+// Sensor is what /temp knows of a temperature sensor besides its samples.
+type Sensor struct {
+	// Metric is the sensor's sample metric; Label its name in the reply.
+	Metric, Label string
+	// Limit is the temperature the sensor is judged against; 0 means none.
+	Limit float64
+	// Since is when the sensor stopped giving a usable reading; zero when it does.
+	Since time.Time
+}
+
+// Temps renders the /temp reply: one line per known sensor with the current
+// value, the 7-day min/avg/max and the limit it is judged against, or, for a
+// sensor without a usable reading, since when. Stored metrics of sensors that
+// are no longer judged (a CPU core) are not listed. Without any known sensor
+// (before the first read) every stored metric is listed by name. Drive
+// temperatures are left to /disks.
+func Temps(stats []store.MetricStats, sensors []Sensor) string {
+	byMetric := make(map[string]store.MetricStats, len(stats))
 	for _, m := range stats {
-		if !strings.HasPrefix(m.Metric, tempPrefix) || strings.HasPrefix(m.Metric, driveTempPrefix) {
+		byMetric[m.Metric] = m
+	}
+	var lines []string
+	for _, s := range sensors {
+		if strings.HasPrefix(s.Metric, driveTempPrefix) {
 			continue
 		}
-		lines = append(lines, fmt.Sprintf("%s: %s (7d min/avg/max %s/%s/%s)",
-			escape(strings.TrimPrefix(m.Metric, tempPrefix)), unit(current(m), "°C"),
-			whole(m.Min), whole(m.Avg), whole(m.Max)))
+		lines = append(lines, s.line(byMetric))
+	}
+	if len(sensors) == 0 {
+		for _, m := range stats {
+			if !strings.HasPrefix(m.Metric, tempPrefix) || strings.HasPrefix(m.Metric, driveTempPrefix) {
+				continue
+			}
+			lines = append(lines, escape(strings.TrimPrefix(m.Metric, tempPrefix))+": "+statsText(m))
+		}
 	}
 	if len(lines) == 0 {
 		return "No temperature sensors"
 	}
 
 	return Truncate(strings.Join(lines, "\n"))
+}
+
+// line renders one sensor for /temp.
+func (s Sensor) line(byMetric map[string]store.MetricStats) string {
+	if !s.Since.IsZero() {
+		return escape(s.Label) + ": unreadable since " + s.Since.Format(timeLayout)
+	}
+	m, ok := byMetric[s.Metric]
+	if !ok {
+		return escape(s.Label) + ": " + notAvailable
+	}
+	out := escape(s.Label) + ": " + statsText(m)
+	if s.Limit > 0 {
+		out += ", limit " + strconv.FormatFloat(s.Limit, 'f', -1, 64) + "°C"
+	}
+
+	return out
+}
+
+// statsText is the current value with the 7-day min/avg/max.
+func statsText(m store.MetricStats) string {
+	return fmt.Sprintf("%s (7d min/avg/max %s/%s/%s)", unit(current(m), "°C"),
+		whole(m.Min), whole(m.Avg), whole(m.Max))
 }
 
 // Disks renders the /disks reply from the drive facts and the metrics

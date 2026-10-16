@@ -47,13 +47,17 @@ disks:
 
 temperatures:
   interval: 15m
-  threshold: 15m
-  limits:                                   # degrees Celsius, PROBLEM above
-    cpu: 85
-    drive_nvme: 70                          # judged by the disks check from SMART
-    drive_sata: 55                          # judged by the disks check from SMART
+  threshold: 0                              # the first reading at or above a limit opens a problem
+  limits:                                   # degrees Celsius, PROBLEM at or above
+    cpu: 90                                 # CPU package sensor
+    drive_nvme: 60                          # judged by the disks check from SMART
+    drive_sata: 60                          # SATA and SAS, judged by the disks check
     gpu: 85
-    board: 75                               # chipset / board sensors
+    board: 75                               # default for board_sensors entries
+  limits_by_serial: {}                      # drive serial -> limit (0-150), overrides the class limit
+  board_sensors: []                         # board sensors to judge; chip required, label optional
+  # board_sensors:                          # "*" globs work in chip and label
+  #   - {chip: "nct*", label: "SYSTIN", limit: 75}   # limit defaults to limits.board
 
 kernel:
   interval: 15m                             # EDAC counters; kmsg is read continuously

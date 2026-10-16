@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"maps"
 	"net/url"
+	"path"
 	"slices"
 	"strings"
 	"time"
@@ -205,8 +206,50 @@ func validateTemperatures(t *Temperatures, p *problems) {
 		{"gpu", t.Limits.GPU},
 		{"board", t.Limits.Board},
 	} {
-		p.atLeast("limits."+l.key, l.v, 0)
+		validateLimit(p, "limits."+l.key, l.v)
 	}
+
+	for _, serial := range slices.Sorted(maps.Keys(t.LimitsBySerial)) {
+		if serial == "" {
+			p.addf("limits_by_serial must not have an empty serial key")
+		}
+
+		validateLimit(p, "limits_by_serial "+serial, t.LimitsBySerial[serial])
+	}
+
+	for i := range t.BoardSensors {
+		validateBoardSensor(p, i, &t.BoardSensors[i], t.Limits.Board)
+	}
+}
+
+// validateLimit requires a temperature limit within 0-150 degrees Celsius.
+func validateLimit(p *problems, key string, v int) {
+	if v < 0 || v > 150 {
+		p.addf("%s %d must be within 0-150", key, v)
+	}
+}
+
+// validateBoardSensor checks one board_sensors entry and fills a missing limit with
+// the board limit.
+func validateBoardSensor(p *problems, i int, b *BoardSensor, boardLimit int) {
+	key := fmt.Sprintf("board_sensors[%d]", i)
+
+	p.required(key+" chip", b.Chip)
+
+	for _, g := range []struct{ key, pattern string }{{"chip", b.Chip}, {"label", b.Label}} {
+		if _, err := path.Match(g.pattern, ""); err != nil {
+			p.addf("%s %s %q is not a valid glob", key, g.key, g.pattern)
+		}
+	}
+
+	if b.Limit == nil {
+		// boardLimit is a copy, so entries never share one pointer.
+		b.Limit = &boardLimit
+
+		return
+	}
+
+	validateLimit(p, key+" limit", *b.Limit)
 }
 
 func validateKernel(k *Kernel, p *problems) {

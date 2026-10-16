@@ -36,7 +36,7 @@ func TestTempCommand(t *testing.T) {
 	m := &fakeMetrics{byPrefix: map[string][]store.MetricStats{
 		"temp.": {{Metric: "temp.gpu.0", Current: 60, HasCurrent: true, Min: 40, Avg: 50, Max: 70}},
 	}}
-	cmd := NewTempCommand(zap.NewNop(), pub, m)
+	cmd := NewTempCommand(zap.NewNop(), pub, m, nil)
 	if cmd.Name() != "temp" || !cmd.Enabled() {
 		t.Fatalf("Name=%q Enabled=%v", cmd.Name(), cmd.Enabled())
 	}
@@ -51,14 +51,36 @@ func TestTempCommand(t *testing.T) {
 	}
 }
 
+type fakeTempSensors []report.Sensor
+
+func (f fakeTempSensors) TempSensors() []report.Sensor { return f }
+
+func TestTempCommandShowsLimitsAndUnreadable(t *testing.T) {
+	pub := &fakePublisher{}
+	m := &fakeMetrics{byPrefix: map[string][]store.MetricStats{
+		"temp.": {{Metric: "temp.gpu.0", Current: 60, HasCurrent: true, Min: 40, Avg: 50, Max: 70}},
+	}}
+	sensors := fakeTempSensors{
+		{Metric: "temp.gpu.0", Label: "gpu 0", Limit: 80},
+		{Metric: "temp.gpu.1", Label: "gpu 1", Since: time.Date(2026, 3, 2, 9, 30, 0, 0, time.UTC)},
+	}
+	if err := NewTempCommand(zap.NewNop(), pub, m, sensors).Handle(context.Background(), 4, "/temp"); err != nil {
+		t.Fatal(err)
+	}
+	want := "gpu 0: 60°C (7d min/avg/max 40/50/70), limit 80°C\ngpu 1: unreadable since 2026-03-02 09:30"
+	if pub.lastMsg != want {
+		t.Errorf("msg = %q, want %q", pub.lastMsg, want)
+	}
+}
+
 func TestTempCommandErrors(t *testing.T) {
 	boom := errors.New("boom")
-	cmd := NewTempCommand(zap.NewNop(), &fakePublisher{}, &fakeMetrics{err: boom})
+	cmd := NewTempCommand(zap.NewNop(), &fakePublisher{}, &fakeMetrics{err: boom}, nil)
 	if err := cmd.Handle(context.Background(), 1, "/temp"); !errors.Is(err, boom) {
 		t.Errorf("metrics err = %v", err)
 	}
 	pub := &errPublisher{err: boom}
-	cmd = NewTempCommand(zap.NewNop(), pub, &fakeMetrics{})
+	cmd = NewTempCommand(zap.NewNop(), pub, &fakeMetrics{}, nil)
 	if err := cmd.Handle(context.Background(), 1, "/temp"); !errors.Is(err, boom) {
 		t.Errorf("publish err = %v", err)
 	}

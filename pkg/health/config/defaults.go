@@ -45,8 +45,10 @@ func defaultDisks() Disks {
 
 func defaultTemperatures() Temperatures {
 	return Temperatures{
-		Common: common(15*time.Minute, 15*time.Minute, ModeTLG),
-		Limits: Limits{CPU: 85, DriveNVMe: 70, DriveSATA: 55, GPU: 85, Board: 75},
+		Common:         common(15*time.Minute, 0, ModeTLG),
+		Limits:         Limits{CPU: 90, DriveNVMe: 60, DriveSATA: 60, GPU: 85, Board: 75},
+		LimitsBySerial: map[string]int{},
+		BoardSensors:   []BoardSensor{},
 	}
 }
 

@@ -101,9 +101,15 @@ func TestDefaultsAndAbsence(t *testing.T) {
 	if cfg.Disks == nil || cfg.Disks.WearPercent != 80 || cfg.Disks.SelftestMaxAge.Duration() != 40*day {
 		t.Errorf("disks = %+v", cfg.Disks)
 	}
-	if l := cfg.Temperatures.Limits; l.CPU != 85 || l.DriveNVMe != 70 || l.DriveSATA != 55 || l.GPU != 85 ||
+	if l := cfg.Temperatures.Limits; l.CPU != 90 || l.DriveNVMe != 60 || l.DriveSATA != 60 || l.GPU != 85 ||
 		l.Board != 75 {
 		t.Errorf("limits = %+v", l)
+	}
+	if cfg.Temperatures.Threshold.Duration() != 0 {
+		t.Errorf("temperatures threshold = %v, want 0", cfg.Temperatures.Threshold.Duration())
+	}
+	if len(cfg.Temperatures.LimitsBySerial) != 0 || len(cfg.Temperatures.BoardSensors) != 0 {
+		t.Errorf("temperatures = %+v", cfg.Temperatures)
 	}
 	if cfg.Containers.Threshold.Duration() != 15*time.Minute {
 		t.Errorf("containers = %+v", cfg.Containers)
@@ -216,6 +222,44 @@ func TestEntryErrors(t *testing.T) {
 		{"serial counter zero", "disks: {extra_counters_by_serial: {TEST0000000001: [0]}}", "disks", "TEST0000000001"},
 		{"serial key empty", "disks: {extra_counters_by_serial: {\"\": [230]}}", "disks", "extra_counters_by_serial"},
 		{"negative limit", "temperatures: {limits: {cpu: -1}}", "temperatures", "cpu"},
+		{"cpu limit high", "temperatures: {limits: {cpu: 500}}", "temperatures", "limits.cpu"},
+		{"nvme limit high", "temperatures: {limits: {drive_nvme: 151}}", "temperatures", "limits.drive_nvme"},
+		{"sata limit high", "temperatures: {limits: {drive_sata: 151}}", "temperatures", "limits.drive_sata"},
+		{"gpu limit high", "temperatures: {limits: {gpu: 151}}", "temperatures", "limits.gpu"},
+		{"board limit high", "temperatures: {limits: {board: 151}}", "temperatures", "limits.board"},
+		{
+			"serial limit high",
+			"temperatures: {limits_by_serial: {TEST0000000001: 151}}",
+			"temperatures",
+			"TEST0000000001",
+		},
+		{
+			"serial limit negative",
+			"temperatures: {limits_by_serial: {TEST0000000001: -1}}",
+			"temperatures",
+			"TEST0000000001",
+		},
+		{"serial limit empty key", "temperatures: {limits_by_serial: {\"\": 50}}", "temperatures", "limits_by_serial"},
+		{"board sensor no chip", "temperatures: {board_sensors: [{label: temp1}]}", "temperatures", "chip"},
+		{
+			"board sensor limit high",
+			"temperatures: {board_sensors: [{chip: acpitz, limit: 151}]}",
+			"temperatures",
+			"limit",
+		},
+		{
+			"board sensor limit negative",
+			"temperatures: {board_sensors: [{chip: acpitz, limit: -1}]}",
+			"temperatures",
+			"limit",
+		},
+		{"board sensor bad chip glob", "temperatures: {board_sensors: [{chip: \"[\"}]}", "temperatures", "chip"},
+		{
+			"board sensor bad label glob",
+			"temperatures: {board_sensors: [{chip: acpitz, label: \"[\"}]}",
+			"temperatures",
+			"label",
+		},
 		{"network no targets", "network: {}", "network", "internet_targets"},
 		{"bad summary weekday", "summary: {weekday: funday}", "summary", "weekday"},
 		{"bad summary time", "summary: {time: \"25:61\"}", "summary", "time"},
@@ -430,5 +474,39 @@ func TestDisksNewKeys(t *testing.T) {
 		d.IncludeSerials[0] != "TEST0000000009" || len(d.ExtraCounters) != 4 ||
 		d.ExtraCountersBySerial["TEST0000000001"][0] != 230 {
 		t.Errorf("parsed = %+v", d)
+	}
+}
+
+func TestTemperatureNewKeys(t *testing.T) {
+	cfg, errs := config.Parse([]byte(`temperatures:
+  limits: {board: 70}
+  limits_by_serial: {TEST0000000001: 0, TEST0000000002: 150}
+  board_sensors:
+    - {chip: "nct*", label: "SYSTIN"}
+    - {chip: acpitz, limit: 0}
+    - {chip: "pch_*", label: "*", limit: 80}
+`), "f")
+	if len(errs) != 0 {
+		t.Fatalf("unexpected errors: %+v", errs)
+	}
+
+	temps := cfg.Temperatures
+	if temps.LimitsBySerial["TEST0000000001"] != 0 || temps.LimitsBySerial["TEST0000000002"] != 150 ||
+		len(temps.LimitsBySerial) != 2 {
+		t.Errorf("limits_by_serial = %+v", temps.LimitsBySerial)
+	}
+
+	want := []struct {
+		chip, label string
+		limit       int
+	}{{"nct*", "SYSTIN", 70}, {"acpitz", "", 0}, {"pch_*", "*", 80}}
+	if len(temps.BoardSensors) != len(want) {
+		t.Fatalf("board_sensors = %+v", temps.BoardSensors)
+	}
+	for i, w := range want {
+		g := temps.BoardSensors[i]
+		if g.Chip != w.chip || g.Label != w.label || g.Limit == nil || *g.Limit != w.limit {
+			t.Errorf("board_sensors[%d] = %+v, want %+v", i, g, w)
+		}
 	}
 }

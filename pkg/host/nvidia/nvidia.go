@@ -14,11 +14,16 @@ import (
 
 const defaultBinary = "nvidia-smi"
 
-// GPU is one GPU and its core temperature.
+// ErrNoDevices is returned by GPUs when nvidia-smi reports "No devices were found"
+// (driver present, no GPU visible). An absent nvidia-smi is not this error.
+var ErrNoDevices = errors.New("nvidia-smi: no devices were found")
+
+// GPU is one GPU and its core temperature. Celsius is nil when nvidia-smi reports
+// the temperature as unavailable ("[N/A]").
 type GPU struct {
 	Index   int
 	Name    string
-	Celsius float64
+	Celsius *float64
 }
 
 // Reader runs nvidia-smi.
@@ -36,8 +41,8 @@ func NewDefault() *Reader {
 	return New(defaultBinary)
 }
 
-// GPUs queries every GPU. An absent binary, or nvidia-smi reporting that no devices were found, means no
-// GPUs and no error.
+// GPUs queries every GPU. An absent binary means no GPUs and no error; nvidia-smi
+// reporting that no devices were found returns ErrNoDevices.
 func (r *Reader) GPUs(ctx context.Context) ([]GPU, error) {
 	path, err := exec.LookPath(r.binary)
 	if err != nil {
@@ -58,7 +63,7 @@ func (r *Reader) GPUs(ctx context.Context) ([]GPU, error) {
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		if noDevices(err, stdout.String(), stderr.String()) {
-			return nil, nil
+			return nil, ErrNoDevices
 		}
 		if msg := strings.TrimSpace(stderr.String()); msg != "" {
 			return nil, fmt.Errorf("run %s: %w: %s", r.binary, err, msg)
@@ -101,16 +106,19 @@ func Parse(out string) ([]GPU, error) {
 		if err != nil {
 			return nil, fmt.Errorf("parse GPU index in %q: %w", line, err)
 		}
+		name := strings.TrimSpace(line[first+1 : last])
 		field := strings.TrimSpace(line[last+1:])
 		if strings.HasPrefix(field, "[") {
-			continue // "[N/A]" / "[Not Supported]": no reading for this GPU, keep the others
+			// "[N/A]" / "[Not Supported]": the GPU is present but has no reading.
+			gpus = append(gpus, GPU{Index: idx, Name: name})
+			continue
 		}
 
 		temp, err := strconv.ParseFloat(field, 64)
 		if err != nil {
 			return nil, fmt.Errorf("parse GPU temperature in %q: %w", line, err)
 		}
-		gpus = append(gpus, GPU{Index: idx, Name: strings.TrimSpace(line[first+1 : last]), Celsius: temp})
+		gpus = append(gpus, GPU{Index: idx, Name: name, Celsius: &temp})
 	}
 
 	return gpus, nil

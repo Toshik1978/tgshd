@@ -2,6 +2,7 @@ package nvidia_test
 
 import (
 	"context"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -25,12 +26,14 @@ func TestParse(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []nvidia.GPU{
-		{Index: 0, Name: "Example GPU", Celsius: 54},
-		{Index: 1, Name: "Example GPU, Pro", Celsius: 61},
-	}
-	if len(got) != 2 || got[0] != want[0] || got[1] != want[1] {
+	if len(got) != 2 {
 		t.Fatalf("got %+v", got)
+	}
+	if got[0].Index != 0 || got[0].Name != "Example GPU" || got[0].Celsius == nil || *got[0].Celsius != 54 {
+		t.Fatalf("got[0] = %+v", got[0])
+	}
+	if got[1].Index != 1 || got[1].Name != "Example GPU, Pro" || got[1].Celsius == nil || *got[1].Celsius != 61 {
+		t.Fatalf("got[1] = %+v", got[1])
 	}
 }
 
@@ -55,7 +58,7 @@ func TestGPUsRunsBinary(t *testing.T) {
 		"#!/bin/sh\n[ \"$1\" = --query-gpu=index,name,temperature.gpu ] && [ \"$2\" = --format=csv,noheader,nounits ] || exit 2\necho '0, Example GPU, 70'\n",
 	)
 	got, err := nvidia.New(bin).GPUs(context.Background())
-	if err != nil || len(got) != 1 || got[0].Celsius != 70 {
+	if err != nil || len(got) != 1 || got[0].Celsius == nil || *got[0].Celsius != 70 {
 		t.Fatalf("got %+v, %v", got, err)
 	}
 }
@@ -67,7 +70,7 @@ func TestGPUsFailingBinary(t *testing.T) {
 	}
 }
 
-func TestGPUsNoDevicesFound(t *testing.T) {
+func TestNoDevicesSentinel(t *testing.T) {
 	for name, script := range map[string]string{
 		"stdout":    "#!/bin/sh\necho 'No devices were found'\nexit 6\n",
 		"stderr":    "#!/bin/sh\necho 'No devices were found' >&2\nexit 6\n",
@@ -75,7 +78,7 @@ func TestGPUsNoDevicesFound(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			got, err := nvidia.New(writeBin(t, script)).GPUs(context.Background())
-			if err != nil || got != nil {
+			if !errors.Is(err, nvidia.ErrNoDevices) || got != nil {
 				t.Fatalf("got %+v, %v", got, err)
 			}
 		})
@@ -95,12 +98,18 @@ func TestGPUsOtherFailuresStayErrors(t *testing.T) {
 	}
 }
 
-func TestParseSkipsUnavailable(t *testing.T) {
+func TestNAKept(t *testing.T) {
 	got, err := nvidia.Parse("0, Example GPU, [N/A]\n1, Example GPU, [Not Supported]\n2, Example GPU, 48\n")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(got) != 1 || got[0].Index != 2 || got[0].Celsius != 48 {
+	if len(got) != 3 {
 		t.Fatalf("got %+v", got)
+	}
+	if got[0].Index != 0 || got[0].Celsius != nil || got[1].Index != 1 || got[1].Celsius != nil {
+		t.Fatalf("unavailable GPUs = %+v, %+v", got[0], got[1])
+	}
+	if got[2].Index != 2 || got[2].Celsius == nil || *got[2].Celsius != 48 {
+		t.Fatalf("got[2] = %+v", got[2])
 	}
 }

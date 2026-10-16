@@ -404,6 +404,14 @@ func (r *Runner) Snapshot() Snapshot {
 	return s
 }
 
+// IsOpen reports whether key has an open problem: one whose PROBLEM was sent
+// and not yet resolved. A condition still in its streak is not open.
+func (r *Runner) IsOpen(key string) bool {
+	cond, ok := r.engine.Condition(key)
+
+	return ok && cond.Open
+}
+
 // Clear returns a tracked condition to healthy without any message and
 // records it in the alert log as cleared. It reports whether key was tracked.
 func (r *Runner) Clear(key string) bool {

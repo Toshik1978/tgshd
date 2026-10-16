@@ -269,7 +269,10 @@ func (c *Check) Run(ctx context.Context) health.CheckResult {
 	c.mu.Lock()
 	now := c.now()
 	c.noteNodes(probes)
-	due := c.forcedReadDue(now, probes)
+	due := -1
+	if hasBudget(ctx) {
+		due = c.forcedReadDue(now, probes)
+	}
 	c.mu.Unlock()
 	// At most one forced read per run, after the routine reads, so spin-ups
 	// stay apart and inside the run deadline.
@@ -284,6 +287,19 @@ func (c *Check) Run(ctx context.Context) health.CheckResult {
 	}
 
 	return c.judge(now, probes)
+}
+
+// hasBudget reports whether the run has time left for a forced read. When the
+// routine reads used it up the forced read would fail at once, so it is left
+// for a later run instead of taking the slot and stamping forced_read_at.
+func hasBudget(ctx context.Context) bool {
+	if ctx.Err() != nil {
+		return false
+	}
+	_, cancel, left := health.Bound(ctx, probeTimeout)
+	cancel()
+
+	return left > 0
 }
 
 // LoadBaselines replaces the check's baselines with stored ones and must be
@@ -815,10 +831,12 @@ func (c *Check) judgeSelfTest(r *result, now time.Time, b *baseline, rep *Report
 	))
 }
 
-// judgeTemp samples the drive temperature and judges it against the limit of
-// its bus. The temperatures threshold is applied here, counting only observed
-// time like the engine does: until the drive has been too hot for that long
-// the condition is not judged at all (no reading).
+// judgeTemp samples the drive temperature and judges it against its limit: the
+// serial's limits_by_serial entry, else the bus limit (NVMe, or SATA for every
+// other bus including SAS). A reading at or above the limit is hot. The
+// temperatures threshold is applied here, counting only observed time like the
+// engine does: until the drive has been too hot for that long the condition is
+// not judged at all (no reading).
 func (c *Check) judgeTemp(r *result, now time.Time, name string, rep *Report) {
 	t := rep.Temperature
 	if t == nil {
@@ -834,7 +852,10 @@ func (c *Check) judgeTemp(r *result, now time.Time, name string, rep *Report) {
 	if rep.Bus == BusNVMe {
 		limit = c.temps.Limits.DriveNVMe
 	}
-	if *t <= limit {
+	if l, ok := c.temps.LimitsBySerial[serial]; ok {
+		limit = l
+	}
+	if *t < limit {
 		delete(c.hot, serial)
 		r.judged(serial, aspectTemp, false, "")
 
@@ -842,7 +863,7 @@ func (c *Check) judgeTemp(r *result, now time.Time, name string, rep *Report) {
 	}
 
 	if over, since := c.overFor(now, serial); over >= c.temps.Threshold.Duration() {
-		r.state(serial, aspectTemp, health.Bad, fmt.Sprintf("%s: temperature %d°C above %d°C", name, *t, limit))
+		r.state(serial, aspectTemp, health.Bad, fmt.Sprintf("%s: temperature %d°C at or above %d°C", name, *t, limit))
 		r.res.Readings[len(r.res.Readings)-1].Since = since
 	}
 }
@@ -946,6 +967,8 @@ func (c *Check) noteForced(now time.Time, p *probe) {
 //     is a checker error naming that drive;
 //   - any other node in standby suspends it, silently, until a forced read
 //     identifies it (asleepSince and forced-read times, kept in next);
+//   - an unlisted usb or other node never suspends it and is silent when asleep
+//     or, with include_serials set, unreadable;
 //   - any other unreadable node suspends it, with a checker error: a failed
 //     forced read is a forced-read checker error keyed by the node.
 func (c *Check) orphan(now time.Time, p *probe, next orphanTimes) (bool, error) {
@@ -959,8 +982,9 @@ func (c *Check) orphan(now time.Time, p *probe, next orphanTimes) (bool, error) 
 	}
 	if external(p.transport) {
 		// An unlisted usb or other node cannot be a tracked drive: it never
-		// suspends the missing judgement, and is never woken.
-		if asleep {
+		// suspends the missing judgement, and is never woken. Unreadable (a
+		// stick without SMART support) it is as silent as asleep.
+		if asleep || len(c.cfg.IncludeSerials) > 0 {
 			return false, nil
 		}
 

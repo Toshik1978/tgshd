@@ -16,18 +16,28 @@ type MetricsSource interface {
 	Metrics(ctx context.Context, prefix string, now time.Time) ([]store.MetricStats, error)
 }
 
+// TempSensorSource provides the temperature sensors the check knows, with
+// their limits and unreadable times.
+type TempSensorSource interface {
+	TempSensors() []report.Sensor
+}
+
 type tempCommand struct {
 	logger    *zap.Logger
 	publisher Publisher
 	metrics   MetricsSource
+	sensors   TempSensorSource
 	now       func() time.Time
 }
 
-// NewTempCommand creates a new handler for the /temp command.
-func NewTempCommand(logger *zap.Logger, publisher Publisher, metrics MetricsSource) *tempCommand {
+// NewTempCommand creates a new handler for the /temp command. sensors may be
+// nil: the reply then lists the stored metrics without limits.
+func NewTempCommand(
+	logger *zap.Logger, publisher Publisher, metrics MetricsSource, sensors TempSensorSource,
+) *tempCommand {
 	logger.Info("Temp command created")
 
-	return &tempCommand{logger: logger, publisher: publisher, metrics: metrics, now: time.Now}
+	return &tempCommand{logger: logger, publisher: publisher, metrics: metrics, sensors: sensors, now: time.Now}
 }
 
 func (c *tempCommand) Name() string {
@@ -45,7 +55,11 @@ func (c *tempCommand) Handle(ctx context.Context, senderID int64, _ string) erro
 	if err != nil {
 		return fmt.Errorf("failed to read temperatures: %w", err)
 	}
-	if err := c.publisher.Publish(ctx, senderID, report.Temps(stats)); err != nil {
+	var sensors []report.Sensor
+	if c.sensors != nil {
+		sensors = c.sensors.TempSensors()
+	}
+	if err := c.publisher.Publish(ctx, senderID, report.Temps(stats, sensors)); err != nil {
 		return fmt.Errorf("failed to publish reply: %w", err)
 	}
 

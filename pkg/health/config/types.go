@@ -70,7 +70,7 @@ type Disks struct {
 	ExtraCountersBySerial map[string][]int `yaml:"extra_counters_by_serial"`
 }
 
-// Limits are the temperature limits in degrees Celsius; a PROBLEM is raised above.
+// Limits are the temperature limits in degrees Celsius; a PROBLEM is raised at or above.
 type Limits struct {
 	CPU       int `yaml:"cpu"`
 	DriveNVMe int `yaml:"drive_nvme"`
@@ -84,6 +84,11 @@ type Temperatures struct {
 	Common `yaml:",inline"`
 
 	Limits Limits `yaml:"limits"`
+
+	// LimitsBySerial overrides the drive limit for one drive serial.
+	LimitsBySerial map[string]int `yaml:"limits_by_serial"`
+	// BoardSensors lists the board sensors that are judged against a limit.
+	BoardSensors []BoardSensor `yaml:"board_sensors"`
 }
 
 // Kernel is the EDAC/kmsg check.

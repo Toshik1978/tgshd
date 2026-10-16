@@ -1110,6 +1110,28 @@ func TestSnapshot(t *testing.T) {
 	}
 }
 
+func TestIsOpen(t *testing.T) {
+	open := newFakeCheck(nil, "ups", reading("ups/main", health.Bad, "on battery"))
+	streak := newFakeCheck(nil, "temps", reading("temps/board", health.Bad, "hot"))
+	streakCheck := checkOf(streak)
+	streakCheck.Threshold = 10 * time.Minute // bad, but not yet open
+	f := newFixture(t, &fakeStore{}, checkOf(open), streakCheck)
+
+	if f.r.IsOpen("ups/main") {
+		t.Fatal("open before any cycle")
+	}
+	f.tick(t)
+
+	for key, want := range map[string]bool{"ups/main": true, "temps/board": false, "http/none": false} {
+		if got := f.r.IsOpen(key); got != want {
+			t.Errorf("IsOpen(%q) = %v, want %v", key, got, want)
+		}
+	}
+	if !f.r.Clear("ups/main") || f.r.IsOpen("ups/main") {
+		t.Error("a cleared condition must not be open")
+	}
+}
+
 func TestConcurrencyBound(t *testing.T) {
 	const limit = 2
 

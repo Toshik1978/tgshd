@@ -19,8 +19,10 @@ import (
 	"github.com/Toshik1978/tgshd/pkg/command"
 	"github.com/Toshik1978/tgshd/pkg/health"
 	"github.com/Toshik1978/tgshd/pkg/health/check/disks"
+	"github.com/Toshik1978/tgshd/pkg/health/check/temps"
 	hcfg "github.com/Toshik1978/tgshd/pkg/health/config"
 	"github.com/Toshik1978/tgshd/pkg/health/notify"
+	"github.com/Toshik1978/tgshd/pkg/health/report"
 	"github.com/Toshik1978/tgshd/pkg/health/runner"
 	"github.com/Toshik1978/tgshd/pkg/health/store"
 	"github.com/Toshik1978/tgshd/pkg/telegram"
@@ -521,5 +523,30 @@ func TestHealthGraphRegistersReportCommands(t *testing.T) {
 		if !slices.Contains(names, want) {
 			t.Errorf("handlers = %v, want /%s", names, want)
 		}
+	}
+}
+
+type fakeTempSensors []temps.SensorStatus
+
+func (f fakeTempSensors) Sensors() []temps.SensorStatus { return f }
+
+func TestHealthReportsTempSensors(t *testing.T) {
+	t.Parallel()
+
+	if got := (&healthReports{}).TempSensors(); got != nil {
+		t.Fatalf("without the temperatures check = %+v, want none", got)
+	}
+	since := time.Date(2026, 3, 2, 9, 30, 0, 0, time.UTC)
+	h := newHealthReports(&healthSetup{}, checkSet{Temps: fakeTempSensors{
+		{Metric: "temp.gpu.0", Label: "gpu 0", Limit: 80, Since: since},
+	}}, zap.NewNop())
+	want := []report.Sensor{{Metric: "temp.gpu.0", Label: "gpu 0", Limit: 80, Since: since}}
+	if got := h.TempSensors(); !slices.Equal(got, want) {
+		t.Fatalf("TempSensors = %+v, want %+v", got, want)
+	}
+
+	merged := mergeCheckSets([]checkSet{{}, {Temps: fakeTempSensors{}}})
+	if merged.Temps == nil {
+		t.Fatal("mergeCheckSets dropped the temperatures sensors")
 	}
 }

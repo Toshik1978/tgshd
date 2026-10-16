@@ -608,3 +608,62 @@ func TestWithoutForcedReadNeverWakes(t *testing.T) {
 		t.Fatalf("Status() = %+v, want asleep since %v, last read %v", st, asleepAt, readAt)
 	}
 }
+
+// TestForcedReadSkippedWithoutBudget: when the routine reads used up the run
+// (the context is cancelled or its deadline has passed) the forced read is not
+// tried, so it does not take the slot or stamp forced_read_at; the next run
+// does it.
+func TestForcedReadSkippedWithoutBudget(t *testing.T) {
+	tests := []struct {
+		name string
+		ctx  func() (context.Context, context.CancelFunc)
+		slow func(cancel context.CancelFunc) error
+	}{
+		{
+			"cancelled",
+			func() (context.Context, context.CancelFunc) { return context.WithCancel(context.Background()) },
+			func(cancel context.CancelFunc) error { cancel(); return nil },
+		},
+		{
+			"deadline used up",
+			func() (context.Context, context.CancelFunc) {
+				return context.WithTimeout(context.Background(), 30*time.Millisecond)
+			},
+			func(context.CancelFunc) error { time.Sleep(60 * time.Millisecond); return nil },
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			src := &fakeSource{}
+			src.set("sda", sata(serialSATA))
+			clk := newClock()
+			start := clk.now()
+			c := fixtureCheck(t, src, clk, nil)
+
+			src.runs["sda"] = output{status: StandbyStatus}
+			src.woken = map[string]output{"sda": {stdout: sata(serialSATA).json()}}
+			_ = c.Run(t.Context())
+			clk.t = start.Add(day)
+
+			ctx, cancel := tt.ctx()
+			defer cancel()
+			src.hook = func(context.Context, string) error { return tt.slow(cancel) }
+			_ = c.Run(ctx)
+			src.hook = nil
+			if len(src.wakes) != 0 {
+				t.Fatalf("wakes = %v, want no forced read without budget", src.wakes)
+			}
+			if _, d := dataOf(t, c, serialSATA); d.ForcedReadAt != 0 {
+				t.Errorf("forced_read_at = %d, want unstamped", d.ForcedReadAt)
+			}
+
+			res := c.Run(t.Context())
+			if len(src.wakes) != 1 {
+				t.Fatalf("wakes = %v, want the forced read on the next run", src.wakes)
+			}
+			if r := mustFind(t, res, "disks/"+serialSATA+"/health"); r.Verdict != health.Good {
+				t.Errorf("health = %+v", r)
+			}
+		})
+	}
+}

@@ -150,25 +150,66 @@ func (p disksPersister) Save(st *store.State) error {
 
 // tempsChecks provides the temperatures check (hwmon and nvidia-smi) when its
 // section is present.
-func tempsChecks(hs *healthSetup) checkSet {
+func tempsChecks(hs *healthSetup, open *openState) checkSet {
 	if hs.Config == nil || hs.Config.Temperatures == nil {
 		return checkSet{}
 	}
 
 	return buildTempsCheck(hs.Config.Temperatures,
-		hwmonSource{reader: hwmon.NewDefault()}, nvidiaSource{reader: nvidia.NewDefault()})
+		hwmonSource{reader: hwmon.NewDefault()}, nvidiaSource{reader: nvidia.NewDefault()}, open)
 }
 
 // buildTempsCheck builds the temperatures check; its set of known sensors is
 // persisted under tempsSeenKey. The check bounds the nvidia-smi run itself;
-// the hwmon read is bounded by the check's run budget.
-func buildTempsCheck(t *hcfg.Temperatures, sensors temps.Hwmon, gpus temps.Nvidia) checkSet {
-	chk := temps.New(sensors, gpus, t.Limits)
+// the hwmon read is bounded by the check's run budget. open answers whether a
+// sensor's condition is open.
+func buildTempsCheck(t *hcfg.Temperatures, sensors temps.Hwmon, gpus temps.Nvidia, open temps.OpenState) checkSet {
+	chk := temps.New(sensors, gpus, *t, open)
 
 	return checkSet{
 		Checks:     []health.Check{newCheck(tempsCheckName, t.Common, chk.Run)},
 		Persisters: []runner.Persister{runner.KVPersister{Key: tempsSeenKey, State: chk}},
+		Temps:      chk,
 	}
+}
+
+// openSource answers whether a condition is open; the runner is one.
+type openSource interface {
+	IsOpen(key string) bool
+}
+
+// openState is the temps.OpenState of the temperatures check. fx builds the
+// checks before the runner, so it answers false until newHealth binds it to
+// the runner.
+type openState struct {
+	mu     sync.Mutex
+	source openSource
+}
+
+// newOpenState returns an unbound open state.
+func newOpenState() *openState {
+	return &openState{}
+}
+
+// IsOpen implements temps.OpenState.
+func (o *openState) IsOpen(key string) bool {
+	o.mu.Lock()
+	src := o.source
+	o.mu.Unlock()
+
+	return src != nil && src.IsOpen(key)
+}
+
+// bind hands over the source the open state answers from. A nil open state
+// (one no check was built with) has nothing to bind.
+func (o *openState) bind(src openSource) {
+	if o == nil {
+		return
+	}
+	o.mu.Lock()
+	defer o.mu.Unlock()
+
+	o.source = src
 }
 
 // hwmonReader is the sensor read of pkg/host/hwmon.
@@ -208,6 +249,9 @@ type nvidiaSource struct {
 // GPUs implements temps.Nvidia.
 func (s nvidiaSource) GPUs(ctx context.Context) ([]temps.GPU, error) {
 	in, err := s.reader.GPUs(ctx)
+	if errors.Is(err, nvidia.ErrNoDevices) {
+		return nil, temps.ErrNoGPUs
+	}
 	if err != nil {
 		return nil, fmt.Errorf("nvidia-smi: %w", err)
 	}

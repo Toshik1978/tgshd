@@ -758,8 +758,8 @@ func TestDriveConditions(t *testing.T) {
 			badText: map[string]string{"temp": "56°C"},
 		},
 		{
-			name:  "sata at limit",
-			drive: func() drive { d := sata(serialSATA); d.temp = 55; return d }(),
+			name:  "sata just below limit",
+			drive: func() drive { d := sata(serialSATA); d.temp = 54; return d }(),
 			want:  want{"temp": health.Good},
 		},
 		{
@@ -2158,5 +2158,97 @@ func TestSleepingUSBNodeDoesNotSuspendMissing(t *testing.T) {
 	}
 	if len(src.wakes) != 0 {
 		t.Errorf("forced reads = %v, an unidentified external node is never woken", src.wakes)
+	}
+}
+
+// TestDriveTempAtLimit: a drive at (not just above) its bus limit is Bad on the
+// first reading when the threshold is 0.
+func TestDriveTempAtLimit(t *testing.T) {
+	tests := []struct {
+		name string
+		d    drive
+		temp int
+		want health.Verdict
+	}{
+		{"nvme at limit", nvme(serialNVMe), 70, health.Bad},
+		{"nvme below limit", nvme(serialNVMe), 69, health.Good},
+		{"sata at limit", sata(serialSATA), 55, health.Bad},
+		{"sata below limit", sata(serialSATA), 54, health.Good},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			src := &fakeSource{}
+			tt.d.temp = tt.temp
+			src.set("dev0", tt.d)
+			res := newLoaded(src, disksCfg(), tempsCfg(0), newClock().now).Run(t.Context())
+			if r := mustFind(t, res, "disks/"+tt.d.serial+"/temp"); r.Verdict != tt.want {
+				t.Errorf("%d°C = %+v, want %v", tt.temp, r, tt.want)
+			}
+		})
+	}
+}
+
+// TestDriveTempBySerial: limits_by_serial wins over the class limit, both ways.
+func TestDriveTempBySerial(t *testing.T) {
+	tests := []struct {
+		name   string
+		d      drive
+		temp   int
+		limits map[string]int
+		want   health.Verdict
+	}{
+		{"override lowers the limit", sata(serialSATA), 45, map[string]int{serialSATA: 45}, health.Bad},
+		{"override raises the limit", nvme(serialNVMe), 75, map[string]int{serialNVMe: 80}, health.Good},
+		{"override at its limit", nvme(serialNVMe), 80, map[string]int{serialNVMe: 80}, health.Bad},
+		{"other serial uses the class limit", sata(serialSATA), 56, map[string]int{serialNVMe: 90}, health.Bad},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			src := &fakeSource{}
+			tt.d.temp = tt.temp
+			src.set("dev0", tt.d)
+			cfg := tempsCfg(0)
+			cfg.LimitsBySerial = tt.limits
+			res := newLoaded(src, disksCfg(), cfg, newClock().now).Run(t.Context())
+			if r := mustFind(t, res, "disks/"+tt.d.serial+"/temp"); r.Verdict != tt.want {
+				t.Errorf("%d°C = %+v, want %v", tt.temp, r, tt.want)
+			}
+		})
+	}
+}
+
+// TestUnreadableUnlistedExternalNodeIsSilent: with include_serials set, a usb
+// node that is unreadable (a stick without SMART) is not tracked, so it is no
+// checker error, as when asleep; an internal node stays one.
+func TestUnreadableUnlistedExternalNodeIsSilent(t *testing.T) {
+	tests := []struct {
+		name    string
+		path    string
+		wantErr bool
+	}{
+		{"usb", pathUSB, false},
+		{"sata", pathSATA, true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			src := &fakeSource{}
+			src.set("sda", sata(serialSATA))
+			cfg := disksCfg()
+			cfg.IncludeSerials = []string{"TEST0000000009"}
+			clk := newClock()
+			c := newLoaded(src, cfg, nil, clk.now)
+			if res := c.Run(t.Context()); res.Err != nil {
+				t.Fatal(res.Err)
+			}
+			clk.add(15 * time.Minute)
+
+			src.nodes = append(src.nodes, "sdb")
+			src.setPath("sdb", tt.path)
+			src.runs["sdb"] = output{err: errors.New("smart not supported")}
+			res := c.Run(t.Context())
+			if got := res.Err != nil; got != tt.wantErr {
+				t.Errorf("Err = %v, want error: %v", res.Err, tt.wantErr)
+			}
+		})
 	}
 }

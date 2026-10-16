@@ -55,7 +55,9 @@ type checkSet struct {
 	Errors     []startError
 	Persisters []runner.Persister
 	// Drives is set by the disks check only; nil otherwise.
-	Drives     runner.DriveBook
+	Drives runner.DriveBook
+	// Temps is set by the temperatures check only; nil otherwise.
+	Temps      tempSensors
 	Background []background
 	// Fixes hand the fix actions of the command checks to the runner (under
 	// check --once: what would have been fixed).
@@ -102,6 +104,9 @@ type healthParams struct {
 	SMS    command.SmsSender `optional:"true"`
 	Uptime *sysfs.Reader
 	Sets   []checkSet `group:"health_checks"`
+	// Open is the open state the temperatures check was built with, bound
+	// here to the runner.
+	Open *openState
 }
 
 // healthOut registers the runner and its commands; both are empty while
@@ -143,6 +148,7 @@ func healthProviders() fx.Option {
 func healthCheckProviders() fx.Option {
 	return fx.Provide(
 		sysfs.NewDefault,
+		newOpenState,
 		fx.Annotate(networkChecks, fx.ResultTags(healthCheckGroup)),
 		fx.Annotate(upsChecks, fx.ResultTags(healthCheckGroup)),
 		fx.Annotate(disksChecks, fx.ResultTags(healthCheckGroup)),
@@ -278,6 +284,7 @@ func newHealth(p healthParams) healthOut {
 	reports.hook(&opts)
 	r := runner.New(opts)
 	reports.bind(r)
+	p.Open.bind(r)
 	registerStart(p.Lifecycle, r.Load, startLoadTimeout, r.CheckerError, slices.Concat(errs, set.Errors))
 	// After registerStart: the stored state is restored before a job (the
 	// kernel log reader) starts.
@@ -388,6 +395,9 @@ func mergeCheckSets(sets []checkSet) checkSet {
 		out.Persisters = append(out.Persisters, s.Persisters...)
 		out.Background = append(out.Background, s.Background...)
 		out.Fixes = append(out.Fixes, s.Fixes...)
+		if out.Temps == nil && s.Temps != nil {
+			out.Temps = s.Temps
+		}
 		if out.Drives == nil && s.Drives != nil {
 			out.Drives = s.Drives
 		}
