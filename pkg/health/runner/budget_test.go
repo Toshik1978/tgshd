@@ -117,8 +117,8 @@ type hangingDrives struct{}
 
 func (hangingDrives) Drives() ([]disks.Node, error) {
 	return []disks.Node{
-		{Name: "sda", Path: "/sys/devices/example/sda"},
-		{Name: "sdb", Path: "/sys/devices/example/sdb"},
+		{Name: "sda", Path: "/sys/devices/pci0000:00/0000:00:1f.2/ata1/host0/target0:0:0/0:0:0:0/block/sda"},
+		{Name: "sdb", Path: "/sys/devices/pci0000:00/0000:00:1f.2/ata1/host0/target0:0:0/0:0:0:0/block/sdb"},
 	}, nil
 }
 

@@ -12,6 +12,8 @@ import (
 
 	"go.uber.org/fx/fxtest"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/Toshik1978/tgshd/pkg/health"
 	"github.com/Toshik1978/tgshd/pkg/health/check/disks"
@@ -68,7 +70,9 @@ const nvmeHot = `{"device":{"name":"/dev/nvme0","protocol":"NVMe"},"model_name":
 type fakeSmart struct{}
 
 func (fakeSmart) Drives() ([]disks.Node, error) {
-	return []disks.Node{{Name: "nvme0n1", Path: "/sys/devices/example/nvme0n1"}}, nil
+	return []disks.Node{
+		{Name: "nvme0n1", Path: "/sys/devices/pci0000:00/0000:00:1d.0/0000:01:00.0/nvme/nvme0/nvme0n1"},
+	}, nil
 }
 
 func (fakeSmart) Run(context.Context, string, bool) ([]byte, int, error) {
@@ -84,7 +88,7 @@ func TestHardwareChecksFollowTheConfig(t *testing.T) {
 
 	for _, hs := range []*healthSetup{{}, {Config: &hcfg.Config{}}} {
 		for name, set := range map[string]checkSet{
-			"disks": disksChecks(hs), "temps": tempsChecks(hs), "kernel": kernelChecks(hs, zap.NewNop()),
+			"disks": disksChecks(hs, zap.NewNop()), "temps": tempsChecks(hs), "kernel": kernelChecks(hs, zap.NewNop()),
 		} {
 			if len(set.Checks)+len(set.Errors)+len(set.Persisters)+len(set.Background) != 0 || set.Drives != nil {
 				t.Fatalf("%s without a section: %+v", name, set)
@@ -95,7 +99,7 @@ func TestHardwareChecksFollowTheConfig(t *testing.T) {
 	hs := &healthSetup{Config: &hcfg.Config{
 		Disks: &hcfg.Disks{}, Temperatures: &hcfg.Temperatures{}, Kernel: &hcfg.Kernel{},
 	}}
-	if set := disksChecks(hs); len(set.Checks) != 1 || set.Checks[0].Name != disksCheckName ||
+	if set := disksChecks(hs, zap.NewNop()); len(set.Checks) != 1 || set.Checks[0].Name != disksCheckName ||
 		len(set.Persisters) != 1 || set.Drives == nil {
 		t.Fatalf("disks section: %+v", set)
 	}
@@ -144,7 +148,7 @@ func TestBuildDisksCheck(t *testing.T) {
 	d := &hcfg.Disks{Interval: hcfg.Duration(time.Hour), WearPercent: 80}
 	tc := &hcfg.Temperatures{Limits: hcfg.Limits{DriveNVMe: 70, DriveSATA: 60}}
 	now := func() time.Time { return time.Date(2026, 1, 2, 3, 0, 0, 0, time.UTC) }
-	set := buildDisksCheck(d, tc, fakeSmart{}, now)
+	set := buildDisksCheck(d, tc, fakeSmart{}, now, zap.NewNop(), false)
 	chk := set.Checks[0]
 	if chk.Name != "disks" || chk.Interval != time.Hour {
 		t.Fatalf("check = %+v", chk)
@@ -174,7 +178,7 @@ func TestBuildDisksCheck(t *testing.T) {
 	}
 
 	// The stored baselines come back on restore: the drive is known and stays retired.
-	again := buildDisksCheck(d, nil, fakeSmart{}, now)
+	again := buildDisksCheck(d, nil, fakeSmart{}, now, zap.NewNop(), false)
 	if err := again.Persisters[0].Restore(st); err != nil {
 		t.Fatal(err)
 	}
@@ -584,7 +588,11 @@ func TestSmartctlSourceMapsNodes(t *testing.T) {
 	t.Parallel()
 
 	runner := &fakeSmartRunner{nodes: []smartctl.Node{
-		{Name: "sda", Path: "/sys/devices/example/sda"}, {Name: "nvme0n1", Path: "/sys/devices/example/nvme0n1"},
+		{
+			Name: "sda",
+			Path: "/sys/devices/example/sda",
+		},
+		{Name: "nvme0n1", Path: "/sys/devices/pci0000:00/0000:00:1d.0/0000:01:00.0/nvme/nvme0/nvme0n1"},
 	}}
 	src := smartctlSource{runner: runner}
 	got, err := src.Drives()
@@ -592,7 +600,11 @@ func TestSmartctlSourceMapsNodes(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := []disks.Node{
-		{Name: "sda", Path: "/sys/devices/example/sda"}, {Name: "nvme0n1", Path: "/sys/devices/example/nvme0n1"},
+		{
+			Name: "sda",
+			Path: "/sys/devices/example/sda",
+		},
+		{Name: "nvme0n1", Path: "/sys/devices/pci0000:00/0000:00:1d.0/0000:01:00.0/nvme/nvme0/nvme0n1"},
 	}
 	if !slices.Equal(got, want) {
 		t.Fatalf("Drives() = %+v, want %+v", got, want)
@@ -695,6 +707,93 @@ func TestKernelCheckJournalWiring(t *testing.T) {
 			defer fj.mu.Unlock()
 			if !slices.Equal(fj.calls, tt.want) {
 				t.Fatalf("journal calls = %v, want %v", fj.calls, tt.want)
+			}
+		})
+	}
+}
+
+func TestBuildDisksCheckLogsTheUpgradeRetire(t *testing.T) {
+	t.Parallel()
+
+	core, logs := observer.New(zapcore.WarnLevel)
+	d := &hcfg.Disks{Interval: hcfg.Duration(time.Hour), WearPercent: 80}
+	now := func() time.Time { return time.Date(2026, 1, 2, 3, 0, 0, 0, time.UTC) }
+	set := buildDisksCheck(d, nil, fakeSmart{}, now, zap.New(core), false)
+	err := set.Persisters[0].Restore(store.State{Baselines: []store.Baseline{{
+		Serial: "TEST0000000009", Data: []byte(`{"node":"sdb","transport":"usb"}`),
+	}}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	set.Checks[0].Run(t.Context())
+	if got := logs.All(); len(got) != 1 ||
+		!strings.Contains(got[0].Message, "drive TEST0000000009 on a usb transport") {
+		t.Fatalf("log = %+v, want the retire line through the given logger", got)
+	}
+}
+
+// sleepySmart is one drive that is read once and then sleeps; it records
+// forced reads.
+type sleepySmart struct {
+	mu     sync.Mutex
+	asleep bool
+	wakes  int
+}
+
+func (*sleepySmart) Drives() ([]disks.Node, error) { return fakeSmart{}.Drives() }
+
+func (s *sleepySmart) Run(_ context.Context, _ string, wake bool) ([]byte, int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if wake {
+		s.wakes++
+	}
+	if s.asleep && !wake {
+		return []byte("{}"), disks.StandbyStatus, nil
+	}
+
+	return []byte(nvmeHot), 0, nil
+}
+
+// TestBuildDisksCheckForcedReadOnlyInTheDaemon: the daemon's disks check
+// force-reads a drive asleep for force_read_after; the one-shot CLI's never
+// does and reports the drive asleep through its status.
+func TestBuildDisksCheckForcedReadOnlyInTheDaemon(t *testing.T) {
+	t.Parallel()
+
+	for _, oneShot := range []bool{false, true} {
+		t.Run(fmt.Sprintf("oneShot=%v", oneShot), func(t *testing.T) {
+			t.Parallel()
+
+			clock := time.Date(2026, 1, 2, 3, 0, 0, 0, time.UTC)
+			src := &sleepySmart{}
+			d := &hcfg.Disks{Interval: hcfg.Duration(time.Hour), ForceReadAfter: hcfg.Duration(24 * time.Hour)}
+			set := buildDisksCheck(d, nil, src, func() time.Time { return clock }, zap.NewNop(), oneShot)
+			if err := set.Persisters[0].Restore(store.State{}); err != nil {
+				t.Fatal(err)
+			}
+			if res := set.Checks[0].Run(t.Context()); res.Err != nil {
+				t.Fatalf("first run: %v", res.Err)
+			}
+
+			src.asleep = true
+			for range 30 {
+				clock = clock.Add(time.Hour)
+				set.Checks[0].Run(t.Context())
+			}
+			if oneShot && src.wakes != 0 {
+				t.Fatalf("one-shot wakes = %d, want none", src.wakes)
+			}
+			if !oneShot && src.wakes == 0 {
+				t.Fatal("the daemon never force-read the drive")
+			}
+			st, ok := set.Drives.(driveStatuses)
+			if !ok {
+				t.Fatal("the drive book has no Status")
+			}
+			if got := st.Status(); oneShot && (len(got) != 1 || got[0].AsleepSince.IsZero()) {
+				t.Fatalf("Status() = %+v, want the drive asleep", got)
 			}
 		})
 	}

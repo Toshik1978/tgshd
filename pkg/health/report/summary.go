@@ -60,7 +60,8 @@ func summaryDrives(in SummaryInput) []string {
 		byName[m.Metric] = m
 	}
 	lines := []string{"Drives:"}
-	for _, d := range in.Drives {
+	for i := range in.Drives {
+		d := &in.Drives[i]
 		written := notAvailable
 		if w, ok := byName[drivePrefix+d.Serial+writtenSuffix]; ok && w.HasCurrent {
 			written = size(max(w.Current-w.Min, 0))

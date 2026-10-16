@@ -63,14 +63,14 @@ type background struct {
 // disksChecks provides the disks check (smartctl over the drives found in
 // sysfs) when its section is present. Drive temperatures are judged against
 // the temperatures section's drive limits and threshold when that is present.
-func disksChecks(hs *healthSetup) checkSet {
+func disksChecks(hs *healthSetup, logger *zap.Logger) checkSet {
 	if hs.Config == nil || hs.Config.Disks == nil {
 		return checkSet{}
 	}
 
 	src := smartctlSource{runner: smartctl.NewDefault()}
 
-	return buildDisksCheck(hs.Config.Disks, hs.Config.Temperatures, src, time.Now)
+	return buildDisksCheck(hs.Config.Disks, hs.Config.Temperatures, src, time.Now, logger, hs.OneShot)
 }
 
 // smartctlRunner is the part of *smartctl.Runner smartctlSource uses.
@@ -104,9 +104,21 @@ func (s smartctlSource) Run(ctx context.Context, node string, wake bool) ([]byte
 }
 
 // buildDisksCheck builds the disks check. Its baselines are persisted through
-// the runner hook, and it is the drive book /retire works on.
-func buildDisksCheck(d *hcfg.Disks, t *hcfg.Temperatures, src disks.Source, now func() time.Time) checkSet {
-	chk := disks.New(src, *d, t, now)
+// the runner hook, and it is the drive book /retire works on. oneShot
+// (check --once) builds it without the forced read, so it never wakes a drive.
+func buildDisksCheck(
+	d *hcfg.Disks,
+	t *hcfg.Temperatures,
+	src disks.Source,
+	now func() time.Time,
+	logger *zap.Logger,
+	oneShot bool,
+) checkSet {
+	opts := []disks.Option{disks.WithLogger(logger)}
+	if oneShot {
+		opts = append(opts, disks.WithoutForcedRead())
+	}
+	chk := disks.New(src, *d, t, now, opts...)
 
 	return checkSet{
 		Checks:     []health.Check{newCheck(disksCheckName, d.Common, chk.Run)},

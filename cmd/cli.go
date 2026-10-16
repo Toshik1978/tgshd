@@ -20,6 +20,7 @@ import (
 
 	"github.com/Toshik1978/tgshd/pkg/health"
 	hcfg "github.com/Toshik1978/tgshd/pkg/health/config"
+	"github.com/Toshik1978/tgshd/pkg/health/report"
 	"github.com/Toshik1978/tgshd/pkg/health/runner"
 	"github.com/Toshik1978/tgshd/pkg/health/store"
 	"github.com/Toshik1978/tgshd/pkg/host/lockfile"
@@ -165,6 +166,9 @@ func runCheckOnce(ctx context.Context, cfg *config, cio cliIO) int {
 		writeError(cio.stdout, e.Key, e.Text, &t)
 	}
 	interrupted := runChecks(ctx, cio.stdout, set.Checks, set.Fixes, &t, runner.MaxRunTime)
+	if !interrupted {
+		writeAsleep(cio.stdout, set.Drives, cio.now())
+	}
 	fmt.Fprintln(cio.stdout, t)
 
 	switch {
@@ -385,6 +389,24 @@ func writeFixes(w io.Writer, fixes []runner.FixSource) {
 		for _, f := range src.TakeFixes() {
 			fmt.Fprintf(w, "WOULD FIX %s: %s\n", f.Key, oneLine(f.Text))
 		}
+	}
+}
+
+// writeAsleep prints the drives found in standby, which a one-shot run never
+// wakes, with the time since their last read. book is the disks check's drive
+// book, nil without one.
+func writeAsleep(w io.Writer, book runner.DriveBook, now time.Time) {
+	st, ok := book.(driveStatuses)
+	if !ok {
+		return
+	}
+	drives := st.Status()
+	for i := range drives {
+		d := &drives[i]
+		if d.AsleepSince.IsZero() {
+			continue
+		}
+		fmt.Fprintf(w, "ASLEEP %s/%s: last read %s\n", disksCheckName, d.Serial, report.Ago(now.Sub(d.LastReadAt)))
 	}
 }
 

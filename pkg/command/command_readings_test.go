@@ -9,6 +9,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/Toshik1978/tgshd/pkg/health/report"
 	"github.com/Toshik1978/tgshd/pkg/health/store"
 )
 
@@ -67,9 +68,15 @@ func TestDisksCommand(t *testing.T) {
 	pub := &fakePublisher{}
 	m := &fakeMetrics{byPrefix: map[string][]store.MetricStats{
 		"temp.drive.": {{Metric: "temp.drive.TEST0000000001", Current: 35, HasCurrent: true}},
-		"drive.":      {{Metric: "drive.TEST0000000001.wear", Current: 2, HasCurrent: true}},
+		"drive.": {
+			{Metric: "drive.TEST0000000001.wear", Current: 2, HasCurrent: true, Min: 1, Avg: 2, Max: 3, N: 4},
+		},
 	}}
-	d := fakeDrives{drives: []Drive{{Bus: "nvme", Model: "Example NVMe SSD", Serial: "TEST0000000001", HealthOK: true}}}
+	d := fakeDrives{drives: []Drive{{
+		Node: "nvme0n1", Bus: "NVMe", Model: "Example NVMe SSD", Serial: "TEST0000000001", Transport: "nvme",
+		Health: "ok", Wear: new(2), Temp: new(35), SpareFloor: 10, LastReadAge: new(time.Minute),
+		SelfTest: report.SelfTest{Format: "ok", Result: "passed", Age: 24 * time.Hour},
+	}}}
 	cmd := NewDisksCommand(zap.NewNop(), pub, d, m)
 	if cmd.Name() != "disks" || !cmd.Enabled() {
 		t.Fatalf("Name=%q Enabled=%v", cmd.Name(), cmd.Enabled())
@@ -77,7 +84,8 @@ func TestDisksCommand(t *testing.T) {
 	if err := cmd.Handle(context.Background(), 4, "/disks"); err != nil {
 		t.Fatal(err)
 	}
-	want := "nvme Example NVMe SSD …0001: health OK, wear 2%, spare n/a, temp 35°C, written 7d n/a, self-test n/a"
+	want := "nvme0n1 NVMe Example NVMe SSD …0001: health OK, wear 2% (7d 1/2/3), spare unknown (floor 10%, drive unknown), " +
+		"temp 35°C, written 7d n/a, self-test passed 1 d ago, last read 1 m ago"
 	if pub.lastMsg != want {
 		t.Errorf("msg = %q, want %q", pub.lastMsg, want)
 	}

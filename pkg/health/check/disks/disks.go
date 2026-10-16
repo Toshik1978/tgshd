@@ -13,6 +13,8 @@ import (
 	"sync"
 	"time"
 
+	"go.uber.org/zap"
+
 	"github.com/Toshik1978/tgshd/pkg/health"
 	"github.com/Toshik1978/tgshd/pkg/health/config"
 	"github.com/Toshik1978/tgshd/pkg/health/store"
@@ -39,6 +41,12 @@ const (
 	// kindNoTemperature is the checker-error kind of a read without a
 	// temperature.
 	kindNoTemperature = "no-temperature"
+	// subjectDiscovery and kindEmpty key the checker error of a discovery that
+	// found no node while drives are known.
+	subjectDiscovery = "discovery"
+	kindEmpty        = "empty"
+	// kindForcedRead is the checker-error kind of a forced read that failed.
+	kindForcedRead = "forced-read"
 	// inventoryKey is the event key of the first-run message listing all drives.
 	inventoryKey = checkName + "/drives"
 
@@ -63,12 +71,8 @@ const maxParallelReads = 8
 // runner the run's deadline, less health.RunMargin, ends them first.
 const probeTimeout = 5 * time.Minute
 
-// asleepOrphanLimit bounds how long a node in standby that no drive can be
-// attributed to (one never read awake since the daemon started) suspends the
-// missing judgement: it may be a known drive that moved, but not for ever.
-// The clock (Check.asleepSince) is kept in memory only, so a daemon restart
-// restarts it and such a node suspends the judgement for another 24 h.
-const asleepOrphanLimit = 24 * time.Hour
+// sinceLayout formats the asleep-since time of a failed forced read.
+const sinceLayout = "2006-01-02 15:04 UTC"
 
 // errAsleep marks a drive in standby, not read this run; it is never reported.
 var errAsleep = errors.New("drive in standby")
@@ -104,11 +108,17 @@ type Check struct {
 	temps   *config.Temperatures
 	now     func() time.Time
 	exclude map[string]struct{}
+	log     *zap.Logger
+	// noForcedRead turns the daemon's forced read off (see WithoutForcedRead).
+	noForcedRead bool
 
 	mu     sync.Mutex
 	loaded bool // LoadBaselines was called; Run refuses to work before
 	bases  map[string]*baseline
 	hot    map[string]*streak
+	// live holds the last successful read's values the baseline does not
+	// keep (see Status); in memory only.
+	live map[string]liveValues
 	// excludedNodes maps the node an excluded drive was last read from to
 	// its serial, so that drive asleep there is credited to it (see
 	// noteNodes and noteRead for when a credit is dropped).
@@ -120,6 +130,9 @@ type Check struct {
 	// to, in the last run, to when it was first found so. It lives in memory
 	// only: a daemon restart restarts every node's clock.
 	asleepSince map[string]time.Time
+	// orphanForcedAt maps such a node (asleep or unreadable in the last run)
+	// to its last forced read attempt; in memory only, like asleepSince.
+	orphanForcedAt map[string]time.Time
 }
 
 // baseline is the in-memory form of store.Baseline.
@@ -154,6 +167,18 @@ type baselineData struct {
 	// Node is the device node the drive was last read from; it attributes an
 	// unreadable node to its drive.
 	Node string `json:"node,omitempty"`
+	// Transport is the transport of that node: nvme, sata, sas, usb or other
+	// (empty in a baseline stored before it was recorded).
+	Transport string `json:"transport,omitempty"`
+	// AsleepSince is the first run that found the drive asleep since its
+	// last read (Unix seconds); 0 when awake.
+	AsleepSince int64 `json:"asleep_since,omitempty"`
+	// UnreadableSince is the first failed read (or forced read) since the
+	// last successful read (Unix seconds); 0 otherwise.
+	UnreadableSince int64 `json:"unreadable_since,omitempty"`
+	// ForcedReadAt is the last forced read attempt, successful or not (Unix
+	// seconds); 0 when never.
+	ForcedReadAt int64 `json:"forced_read_at,omitempty"`
 }
 
 // streak tracks how long a drive has been above its temperature limit,
@@ -167,9 +192,15 @@ type streak struct {
 // probe is the outcome of reading one device node. A drive in standby was not
 // read: its err is errAsleep.
 type probe struct {
-	node   string
-	report Report
-	err    error
+	node string
+	// transport is the node's transport (ClassifyTransport).
+	transport string
+	report    Report
+	err       error
+	// forced marks the run's forced read (wake=true) of node; target is the
+	// serial of the drive it was due for, empty for a sleeping orphan.
+	forced bool
+	target string
 }
 
 // result accumulates the readings and samples of one run.
@@ -179,19 +210,41 @@ type result struct {
 	errs []error
 }
 
+// Option configures a Check.
+type Option func(*Check)
+
+// WithLogger sets the logger of the check; the default discards.
+func WithLogger(l *zap.Logger) Option {
+	return func(c *Check) { c.log = l }
+}
+
+// WithoutForcedRead turns the forced read (wake=true) of a drive in standby
+// off: a sleeping drive stays asleep however long since its last read. The
+// one-shot CLI uses it so that it never wakes a drive (FR-003); the status
+// still tells since when a drive sleeps.
+func WithoutForcedRead() Option {
+	return func(c *Check) { c.noForcedRead = true }
+}
+
 // New returns a disks check. temps is the temperatures section: nil means
 // drive temperatures are sampled but not judged. now is the clock.
-func New(src Source, disks config.Disks, temps *config.Temperatures, now func() time.Time) *Check {
+func New(src Source, disks config.Disks, temps *config.Temperatures, now func() time.Time, opts ...Option) *Check {
 	exclude := make(map[string]struct{}, len(disks.ExcludeSerials))
 	for _, s := range disks.ExcludeSerials {
 		exclude[s] = struct{}{}
 	}
 
-	return &Check{
-		src: src, cfg: disks, temps: temps, now: now, exclude: exclude,
-		bases: map[string]*baseline{}, hot: map[string]*streak{},
+	c := &Check{
+		src: src, cfg: disks, temps: temps, now: now, exclude: exclude, log: zap.NewNop(),
+		bases: map[string]*baseline{}, hot: map[string]*streak{}, live: map[string]liveValues{},
 		excludedNodes: map[string]string{}, asleepSince: map[string]time.Time{},
+		orphanForcedAt: map[string]time.Time{},
 	}
+	for _, o := range opts {
+		o(c)
+	}
+
+	return c
 }
 
 // Run reads every discovered drive and judges it against its baseline. A
@@ -199,7 +252,7 @@ func New(src Source, disks config.Disks, temps *config.Temperatures, now func() 
 // that cannot be read gets no readings; its node (and serial, when known) is
 // reported in Err, joined per node, alongside the healthy drives' readings. A
 // drive in standby (StandbyStatus) is skipped: no readings, not missing, no
-// error.
+// error, unless it is this run's forced read (see forcedReadDue).
 func (c *Check) Run(ctx context.Context) health.CheckResult {
 	c.mu.Lock()
 	loaded := c.loaded
@@ -214,9 +267,23 @@ func (c *Check) Run(ctx context.Context) health.CheckResult {
 	}
 
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	now := c.now()
+	c.noteNodes(probes)
+	due := c.forcedReadDue(now, probes)
+	c.mu.Unlock()
+	// At most one forced read per run, after the routine reads, so spin-ups
+	// stay apart and inside the run deadline.
+	if due >= 0 {
+		probes[due] = c.forceRead(ctx, probes[due])
+	}
 
-	return c.judge(c.now(), probes)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if due >= 0 {
+		c.noteForced(now, &probes[due])
+	}
+
+	return c.judge(now, probes)
 }
 
 // LoadBaselines replaces the check's baselines with stored ones and must be
@@ -230,6 +297,7 @@ func (c *Check) LoadBaselines(bases []store.Baseline) {
 	c.loaded = true
 	c.bases = make(map[string]*baseline, len(bases))
 	c.hot = map[string]*streak{}
+	c.live = map[string]liveValues{}
 	for i := range bases {
 		sb := &bases[i]
 		b := &baseline{
@@ -293,9 +361,15 @@ func (c *Check) probe(ctx context.Context) ([]probe, error) {
 	if err != nil {
 		return nil, fmt.Errorf("discover drives: %w", err)
 	}
+	if err := c.discovered(nodes); err != nil {
+		return nil, err
+	}
 	if err := ctx.Err(); err != nil {
 		return nil, fmt.Errorf("read drives: %w", err)
 	}
+	// Nodes that are not read (usb and other without include_serials) are
+	// left out here, so they are neither read nor reported.
+	nodes = slices.DeleteFunc(slices.Clone(nodes), func(n Node) bool { return !c.readable(ClassifyTransport(n.Path)) })
 	// The reads end before the run's deadline (health.Bound), so a run that
 	// started late in the tick reports its slow drives itself rather than
 	// being abandoned with every drive's readings.
@@ -306,17 +380,21 @@ func (c *Check) probe(ctx context.Context) ([]probe, error) {
 	sem := make(chan struct{}, maxParallelReads)
 	var wg sync.WaitGroup
 	for i, n := range nodes {
-		node := n.Name
+		node, transport := n.Name, ClassifyTransport(n.Path)
 		wg.Go(func() {
 			select {
 			case sem <- struct{}{}:
 				defer func() { <-sem }()
 			case <-ctx.Done():
-				out[i] = probe{node: node, err: fmt.Errorf("%w: not read: %w", ErrUnreadable, ctx.Err())}
+				out[i] = probe{
+					node: node, transport: transport,
+					err: fmt.Errorf("%w: not read: %w", ErrUnreadable, ctx.Err()),
+				}
 
 				return
 			}
-			out[i] = c.read(ctx, node)
+			out[i] = c.read(ctx, node, false)
+			out[i].transport = transport
 		})
 	}
 	wg.Wait()
@@ -324,8 +402,153 @@ func (c *Check) probe(ctx context.Context) ([]probe, error) {
 	return out, nil
 }
 
-func (c *Check) read(ctx context.Context, node string) probe {
-	stdout, status, err := c.src.Run(ctx, node, false)
+// discovered judges the nodes a discovery found. Under the lock it retires
+// the drives that no longer qualify for tracking (see retireUntracked) and
+// returns the empty-discovery checker error when no node was found while
+// active, non-excluded drives are known: they cannot all be gone at once, so
+// the missing-drive check is suspended with no readings at all.
+func (c *Check) discovered(nodes []Node) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.retireUntracked(nodes)
+	if len(nodes) > 0 {
+		return nil
+	}
+	known := 0
+	for serial, b := range c.bases {
+		if !b.retired && !c.excluded(serial) {
+			known++
+		}
+	}
+	if known == 0 {
+		return nil
+	}
+
+	return health.CheckError{Subject: subjectDiscovery, Kind: kindEmpty, Err: fmt.Errorf(
+		"no drives found while %d are known; missing-drive check suspended", known,
+	)}
+}
+
+// retireUntracked retires, silently apart from one log line, the active
+// drives whose transport is now usb or other and whose serial is not in
+// include_serials: baselines stored before drives on those transports were
+// skipped. The transport is the stored one or, for a baseline stored without
+// one, that of the node the drive was last read from when it is discovered.
+// A retired drive never opens "drive missing". It must be called with c.mu
+// held.
+func (c *Check) retireUntracked(nodes []Node) {
+	byName := make(map[string]string, len(nodes))
+	for _, n := range nodes {
+		byName[n.Name] = ClassifyTransport(n.Path)
+	}
+	for _, serial := range slices.Sorted(maps.Keys(c.bases)) {
+		b := c.bases[serial]
+		if b.retired || c.excluded(serial) {
+			continue
+		}
+		transport := b.data.Transport
+		if transport == "" {
+			transport = byName[b.data.Node]
+		}
+		if c.tracked(transport, serial) {
+			continue
+		}
+		b.retired = true
+		delete(c.hot, serial)
+		c.log.Warn(fmt.Sprintf(
+			"drive %s on a %s transport is no longer tracked; list it in include_serials to keep watching it",
+			serial, transport,
+		))
+	}
+}
+
+// forcedReadDue returns the index of the probe due this run's forced read, or
+// -1. A node found asleep is due when its drive's last successful read and
+// last forced read attempt are both at least force_read_after old; a sleeping
+// orphan (no drive attributable, see attribute) uses its in-memory asleep
+// since and forced read times instead. Of the due nodes, the one with the
+// oldest of those times wins; the others wait for later runs. It sets the
+// winner's target and must be called with c.mu held, after noteNodes.
+func (c *Check) forcedReadDue(now time.Time, probes []probe) int {
+	if c.noForcedRead {
+		return -1
+	}
+	seen := readSerials(probes)
+	due, oldest, target := -1, time.Time{}, ""
+	for i := range probes {
+		p := &probes[i]
+		if p.err == nil {
+			continue
+		}
+		// Attribute the node as attribute will, so a drive is not credited
+		// twice.
+		b := c.byNode(p, seen)
+		if b != nil {
+			seen[b.serial] = true
+		}
+		ref, serial, ok := c.lastRead(now, p, b)
+		if !ok || now.Sub(ref) < c.cfg.ForceReadAfter.Duration() || (due >= 0 && !ref.Before(oldest)) {
+			continue
+		}
+		due, oldest, target = i, ref, serial
+	}
+	if due >= 0 {
+		probes[due].target = target
+	}
+
+	return due
+}
+
+// readSerials is the set of serials the probes read.
+func readSerials(probes []probe) map[string]bool {
+	seen := map[string]bool{}
+	for i := range probes {
+		if probes[i].err == nil {
+			seen[probes[i].report.Serial] = true
+		}
+	}
+
+	return seen
+}
+
+// lastRead returns, for a node found asleep, the later of its last
+// successful read and last forced read attempt, and the serial of its drive b
+// (nil for an orphan, whose in-memory times stand in). ok is false when the
+// node is not asleep or holds an excluded drive, which are never force-read.
+func (c *Check) lastRead(now time.Time, p *probe, b *baseline) (time.Time, string, bool) {
+	if !errors.Is(p.err, errAsleep) {
+		return time.Time{}, "", false
+	}
+	if b != nil {
+		return later(b.lastSeen, unixTime(b.data.ForcedReadAt)), b.serial, true
+	}
+	if _, excluded := c.excludedNodes[p.node]; excluded || external(p.transport) {
+		return time.Time{}, "", false
+	}
+
+	return later(c.orphanAsleepSince(now, p.node), c.orphanForcedAt[p.node]), "", true
+}
+
+// forceRead reads p's node with wake, spinning a sleeping drive up; the
+// source applies its own forced-read timeout and the run deadline bounds it
+// through health.Bound. A drive still in standby is unreadable.
+func (c *Check) forceRead(ctx context.Context, p probe) probe {
+	ctx, cancel, _ := health.Bound(ctx, probeTimeout)
+	defer cancel()
+
+	out := c.read(ctx, p.node, true)
+	out.transport = p.transport
+	if errors.Is(out.err, errAsleep) {
+		out.err = fmt.Errorf("%w: still in standby", ErrUnreadable)
+	}
+	out.forced, out.target = true, p.target
+
+	return out
+}
+
+func (c *Check) read(ctx context.Context, node string, wake bool) probe {
+	stdout, status, err := c.src.Run(ctx, node, wake)
 	if err != nil {
 		return probe{node: node, err: fmt.Errorf("%w: run smartctl: %w", ErrUnreadable, err)}
 	}
@@ -394,14 +617,13 @@ func (c *Check) judge(now time.Time, probes []probe) health.CheckResult {
 	var inventory []string
 	var unreadable []probe
 
-	c.noteNodes(probes)
 	for i := range probes {
 		p := &probes[i]
 		serial := p.report.Serial
 		switch {
 		case p.err != nil:
 			unreadable = append(unreadable, *p)
-		case c.excluded(serial) || seen[serial]:
+		case c.skipped(p, seen):
 		default:
 			seen[serial] = true
 			b, fresh := c.track(now, p)
@@ -428,6 +650,15 @@ func (c *Check) judge(now time.Time, probes []probe) health.CheckResult {
 	return r.res
 }
 
+// skipped reports whether the drive read in p is not judged: excluded, read
+// already on another node, or on a usb or other transport without being
+// listed in include_serials (discarded: never tracked, never missing).
+func (c *Check) skipped(p *probe, seen map[string]bool) bool {
+	serial := p.report.Serial
+
+	return c.excluded(serial) || seen[serial] || !c.tracked(p.transport, serial)
+}
+
 func (c *Check) excluded(serial string) bool {
 	_, ok := c.exclude[serial]
 	return ok
@@ -446,7 +677,8 @@ func (c *Check) track(now time.Time, p *probe) (*baseline, bool) {
 	}
 	b.model, b.bus = p.report.Model, string(p.report.Bus)
 	b.lastSeen = now
-	b.data.Node = p.node
+	b.data.Node, b.data.Transport = p.node, p.transport
+	b.data.AsleepSince, b.data.UnreadableSince = 0, 0
 
 	return b, fresh
 }
@@ -454,6 +686,7 @@ func (c *Check) track(now time.Time, p *probe) (*baseline, bool) {
 func (c *Check) judgeDrive(r *result, now time.Time, b *baseline, rep *Report, fresh bool) {
 	serial, name := rep.Serial, label(b)
 
+	c.noteLive(rep)
 	c.judgeVerdict(r, b, rep)
 	c.judgeNVMe(r, name, rep)
 	// A section the read lacked judges nothing: the conditions it feeds keep
@@ -642,12 +875,12 @@ func (c *Check) overFor(now time.Time, serial string) (time.Duration, time.Time)
 func (c *Check) attribute(now time.Time, unreadable []probe, seen map[string]bool) ([]error, int) {
 	errs := make([]error, 0, len(unreadable))
 	orphans := 0
-	asleepSince := make(map[string]time.Time, len(c.asleepSince))
+	next := orphanTimes{asleepSince: map[string]time.Time{}, forcedAt: map[string]time.Time{}}
 	for i := range unreadable {
 		p := &unreadable[i]
-		b := c.byNode(p.node, seen)
+		b := c.byNode(p, seen)
 		if b == nil {
-			suspends, err := c.orphan(now, p, asleepSince)
+			suspends, err := c.orphan(now, p, next)
 			if err != nil {
 				errs = append(errs, err)
 			}
@@ -658,13 +891,51 @@ func (c *Check) attribute(now time.Time, unreadable []probe, seen map[string]boo
 			continue
 		}
 		seen[b.serial] = true
-		if !errors.Is(p.err, errAsleep) {
-			errs = append(errs, fmt.Errorf("%s on /dev/%s: %w", label(b), p.node, p.err))
+		if err := c.unreadableDrive(now, b, p); err != nil {
+			errs = append(errs, err)
 		}
 	}
-	c.asleepSince = asleepSince
+	c.asleepSince, c.orphanForcedAt = next.asleepSince, next.forcedAt
 
 	return errs, orphans
+}
+
+// unreadableDrive records a known drive not read this run (asleep, or a
+// failed read) in its baseline and returns its checker error, nil when asleep.
+// A forced read was due because the drive was found asleep, so it counts as
+// asleep since this run at the latest.
+func (c *Check) unreadableDrive(now time.Time, b *baseline, p *probe) error {
+	if b.data.AsleepSince == 0 && (p.forced || errors.Is(p.err, errAsleep)) {
+		b.data.AsleepSince = now.Unix()
+	}
+	if errors.Is(p.err, errAsleep) {
+		return nil
+	}
+	if b.data.UnreadableSince == 0 {
+		b.data.UnreadableSince = now.Unix()
+	}
+	if p.forced {
+		return health.CheckError{Subject: b.serial, Kind: kindForcedRead, Err: fmt.Errorf(
+			"drive asleep since %s could not be read when woken: %w",
+			unixTime(b.data.AsleepSince).Format(sinceLayout), p.err,
+		)}
+	}
+
+	return fmt.Errorf("%s on /dev/%s: %w", label(b), p.node, p.err)
+}
+
+// noteForced records the forced read p before its result is judged: the
+// attempt time of the drive it was due for, or of its orphan node.
+func (c *Check) noteForced(now time.Time, p *probe) {
+	switch b := c.bases[p.target]; {
+	case p.target == "":
+		c.orphanForcedAt[p.node] = now
+	case b != nil:
+		b.data.ForcedReadAt = now.Unix()
+	}
+	if p.err == nil {
+		c.noteRead(p)
+	}
 }
 
 // orphan judges an unreadable node no known drive can be attributed to. It
@@ -673,10 +944,11 @@ func (c *Check) attribute(now time.Time, unreadable []probe, seen map[string]boo
 //   - a node an excluded drive was last read from (excludedNodes) does not
 //     suspend it; asleep it is credited to that drive silently, unreadable it
 //     is a checker error naming that drive;
-//   - any other node in standby suspends it, silently, only for its first
-//     asleepOrphanLimit asleep (asleepSince, kept in next);
-//   - any other unreadable node suspends it, with a checker error.
-func (c *Check) orphan(now time.Time, p *probe, next map[string]time.Time) (bool, error) {
+//   - any other node in standby suspends it, silently, until a forced read
+//     identifies it (asleepSince and forced-read times, kept in next);
+//   - any other unreadable node suspends it, with a checker error: a failed
+//     forced read is a forced-read checker error keyed by the node.
+func (c *Check) orphan(now time.Time, p *probe, next orphanTimes) (bool, error) {
 	asleep := errors.Is(p.err, errAsleep)
 	ex, excluded := c.excludedNodes[p.node]
 	switch {
@@ -684,11 +956,40 @@ func (c *Check) orphan(now time.Time, p *probe, next map[string]time.Time) (bool
 		return false, nil
 	case excluded:
 		return false, fmt.Errorf("/dev/%s (last read as excluded drive %s): %w", p.node, ex, p.err)
+	}
+	if external(p.transport) {
+		// An unlisted usb or other node cannot be a tracked drive: it never
+		// suspends the missing judgement, and is never woken.
+		if asleep {
+			return false, nil
+		}
+
+		return false, fmt.Errorf("/dev/%s (%s transport, not tracked): %w", p.node, p.transport, p.err)
+	}
+	if at, ok := c.orphanForcedAt[p.node]; ok {
+		next.forcedAt[p.node] = at
+	}
+	switch {
 	case asleep:
-		return c.asleepOrphan(now, p.node, next), nil
+		next.asleepSince[p.node] = c.orphanAsleepSince(now, p.node)
+		return true, nil
+	case p.forced:
+		// It was found asleep this run: it stays asleep since then.
+		since := c.orphanAsleepSince(now, p.node)
+		next.asleepSince[p.node] = since
+
+		return true, health.CheckError{Subject: p.node, Kind: kindForcedRead, Err: fmt.Errorf(
+			"/dev/%s asleep since %s could not be read when woken: %w", p.node, since.Format(sinceLayout), p.err,
+		)}
 	}
 
 	return true, fmt.Errorf("/dev/%s (missing-drive check suspended this run): %w", p.node, p.err)
+}
+
+// orphanTimes are the in-memory times of the sleeping orphans of a run.
+type orphanTimes struct {
+	asleepSince map[string]time.Time
+	forcedAt    map[string]time.Time
 }
 
 // noteNodes updates the excluded-drive credits for this run's probes. Every
@@ -728,24 +1029,43 @@ func (c *Check) noteRead(p *probe) {
 	c.excludedNodes[p.node] = serial
 }
 
-// asleepOrphan records node, in standby and attributed to no drive, in next
-// with the time it was first found so, and reports whether it still suspends
-// the missing judgement (for less than asleepOrphanLimit).
-func (c *Check) asleepOrphan(now time.Time, node string, next map[string]time.Time) bool {
-	since, ok := c.asleepSince[node]
-	if !ok {
-		since = now
+// orphanAsleepSince is when node, attributed to no drive, was first found
+// in standby: in the last run's asleepSince, or now.
+func (c *Check) orphanAsleepSince(now time.Time, node string) time.Time {
+	if since, ok := c.asleepSince[node]; ok {
+		return since
 	}
-	next[node] = since
 
-	return now.Sub(since) < asleepOrphanLimit
+	return now
 }
 
-// byNode returns the active, not yet seen drive last read from node.
-func (c *Check) byNode(node string, seen map[string]bool) *baseline {
+// unixTime is the time of Unix seconds s; the zero time for 0.
+func unixTime(s int64) time.Time {
+	if s == 0 {
+		return time.Time{}
+	}
+
+	return time.Unix(s, 0).UTC()
+}
+
+// later returns the later of a and b.
+func later(a, b time.Time) time.Time {
+	if b.After(a) {
+		return b
+	}
+
+	return a
+}
+
+// byNode returns the active, not yet seen drive last read from p's node that
+// may be on it: a node on a transport the drive is not tracked on (an
+// unlisted usb disk that took the name of a vanished sata drive) is not the
+// drive, whatever its name.
+func (c *Check) byNode(p *probe, seen map[string]bool) *baseline {
 	for _, serial := range slices.Sorted(maps.Keys(c.bases)) {
 		b := c.bases[serial]
-		if b.data.Node == node && !b.retired && !seen[serial] && !c.excluded(serial) {
+		if b.data.Node == p.node && !b.retired && !seen[serial] && !c.excluded(serial) &&
+			c.tracked(p.transport, serial) {
 			return b
 		}
 	}

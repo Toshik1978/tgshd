@@ -25,6 +25,9 @@ type SelfTestState struct {
 type SelfTestNewest struct {
 	Result      string `json:"result"` // passed or failed
 	Description string `json:"description"`
+	// Hours is the drive's power-on hours when the test ran; zero when the
+	// log gave none (and for data stored before it was kept).
+	Hours int64 `json:"hours,omitempty"`
 }
 
 // SelfTestUpdate is the outcome of reading a self-test log against the stored
@@ -54,14 +57,8 @@ type SelfTestUpdate struct {
 func AlignSelfTests(prev SelfTestState, log []SelfTestEntry, now time.Time) SelfTestUpdate {
 	out := SelfTestUpdate{Head: prev.Head, OKAt: min(prev.OKAt, now.Unix())}
 
-	newestFinished := -1
-	for i, e := range log {
-		if e.Result == SelfTestPassed || e.Result == SelfTestFailed {
-			newestFinished = i
-			out.Newest = &SelfTestNewest{Result: resultName(e.Result), Description: e.Description}
-			break
-		}
-	}
+	newestFinished, newest := newestOf(log)
+	out.Newest = newest
 
 	if len(log) == 0 {
 		return out
@@ -81,6 +78,24 @@ func AlignSelfTests(prev SelfTestState, log []SelfTestEntry, now time.Time) Self
 	}
 
 	return out
+}
+
+// newestOf finds the newest finished entry of a log (newest first): its
+// position, -1 when none, and its summary.
+func newestOf(log []SelfTestEntry) (int, *SelfTestNewest) {
+	for i, e := range log {
+		if e.Result != SelfTestPassed && e.Result != SelfTestFailed {
+			continue
+		}
+		n := &SelfTestNewest{Result: resultName(e.Result), Description: e.Description}
+		if e.hasHours {
+			n.Hours = e.ID.Hours
+		}
+
+		return i, n
+	}
+
+	return -1, nil
 }
 
 // SelfTestAge is the calendar time since the last observed pass, or since the

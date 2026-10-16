@@ -14,6 +14,10 @@ import (
 	"testing"
 	"time"
 
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
+	"go.uber.org/zap/zaptest/observer"
+
 	"github.com/Toshik1978/tgshd/pkg/health"
 	"github.com/Toshik1978/tgshd/pkg/health/config"
 	"github.com/Toshik1978/tgshd/pkg/health/store"
@@ -36,26 +40,67 @@ type output struct {
 type fakeSource struct {
 	nodes     []string
 	drivesErr error
-	runs      map[string]output
+	// paths overrides the sysfs path of a node (see nodePath).
+	paths map[string]string
+	runs  map[string]output
 	// hook, when set, runs first in Run (drives are read concurrently).
-	hook  func(ctx context.Context, node string) error
+	hook func(ctx context.Context, node string) error
+	// woken, when it has the node, is the output of a forced read
+	// (wake=true); otherwise a forced read returns runs[node].
+	woken map[string]output
 	mu    sync.Mutex
 	calls []string
+	// wakes are the nodes of the forced reads, in order.
+	wakes []string
 }
 
 func (f *fakeSource) Drives() ([]Node, error) {
 	out := make([]Node, 0, len(f.nodes))
 	for _, n := range f.nodes {
-		out = append(out, Node{Name: n, Path: "/sys/devices/example/" + n})
+		out = append(out, Node{Name: n, Path: f.nodePath(n)})
 	}
 
 	return out, f.drivesErr
 }
 
-func (f *fakeSource) Run(ctx context.Context, node string, _ bool) ([]byte, int, error) {
+// Synthetic sysfs paths of the three transports.
+const (
+	pathSATA = "/sys/devices/pci0000:00/0000:00:1f.2/ata1/host0/target0:0:0/0:0:0:0/block/"
+	pathNVMe = "/sys/devices/pci0000:00/0000:00:1d.0/0000:01:00.0/nvme/nvme0/"
+	pathUSB  = "/sys/devices/pci0000:00/0000:00:14.0/usb2/2-1/2-1:1.0/host6/target6:0:0/6:0:0:0/block/"
+)
+
+// nodePath is the node's path in f.paths, else a SATA path (an NVMe one for an
+// nvme node).
+func (f *fakeSource) nodePath(node string) string {
+	if p, ok := f.paths[node]; ok {
+		return p
+	}
+	if strings.HasPrefix(node, "nvme") {
+		return pathNVMe + node
+	}
+
+	return pathSATA + node
+}
+
+// setPath puts the node at the sysfs path.
+func (f *fakeSource) setPath(node, path string) {
+	if f.paths == nil {
+		f.paths = map[string]string{}
+	}
+	f.paths[node] = path + node
+}
+
+func (f *fakeSource) Run(ctx context.Context, node string, wake bool) ([]byte, int, error) {
 	f.mu.Lock()
 	f.calls = append(f.calls, node)
 	o := f.runs[node]
+	if wake {
+		f.wakes = append(f.wakes, node)
+		if w, ok := f.woken[node]; ok {
+			o = w
+		}
+	}
 	f.mu.Unlock()
 	if f.hook != nil {
 		if err := f.hook(ctx, node); err != nil {
@@ -103,8 +148,11 @@ type drive struct {
 	testBad   bool
 	// log, when set, is the whole self-test log, newest first, replacing the
 	// single entry testAge/testBad describe.
-	log     []testRun
-	ata     map[int]uint64
+	log []testRun
+	ata map[int]uint64
+	// ssdWear, when non-zero, makes a SATA drive a solid-state one whose
+	// attribute 177 (wear levelling) has this normalised value.
+	ssdWear int
 	nvmeCtr map[string]uint64
 	warning int
 	spare   int
@@ -218,6 +266,13 @@ func (d drive) ataJSON(m map[string]any) {
 	for id, v := range d.ata {
 		rows = append(rows, map[string]any{"id": id, "raw": map[string]any{"value": v}})
 	}
+	if d.ssdWear != 0 {
+		m["rotation_rate"] = 0
+		rows = append(
+			rows,
+			map[string]any{"id": ataWearLeveling, "value": d.ssdWear, "raw": map[string]any{"value": 1}},
+		)
+	}
 	m["ata_smart_attributes"] = map[string]any{"table": rows}
 	runs := d.runs()
 	table := make([]any, 0, len(runs))
@@ -250,6 +305,7 @@ func disksCfg() config.Disks {
 		Interval:       config.Duration(15 * time.Minute),
 		WearPercent:    80,
 		SelftestMaxAge: config.Duration(8 * 24 * time.Hour),
+		ForceReadAfter: config.Duration(24 * time.Hour),
 	}
 }
 
@@ -1848,5 +1904,259 @@ func TestSelfTestLogMissingKeepsState(t *testing.T) {
 	}
 	if was.OKAt == 0 || len(was.Head) != 2 {
 		t.Errorf("setup did not store state: %+v", was)
+	}
+}
+
+func TestUSBSkipped(t *testing.T) {
+	// US1 acc. 8: a USB drive is neither read nor tracked nor missing.
+	src := &fakeSource{}
+	src.set("sda", sata(serialSATA))
+	src.set("sdb", sata(serialNew))
+	src.setPath("sdb", pathUSB)
+	clk := newClock()
+	c := newLoaded(src, disksCfg(), nil, clk.now)
+
+	res := c.Run(t.Context())
+	if res.Err != nil {
+		t.Fatalf("Err = %v", res.Err)
+	}
+	if slices.Contains(src.calls, "sdb") {
+		t.Errorf("the usb node was read: %v", src.calls)
+	}
+	if len(c.Baselines()) != 1 || c.Baselines()[0].Serial != serialSATA {
+		t.Errorf("baselines = %+v, want only the sata drive", c.Baselines())
+	}
+	if data := string(c.Baselines()[0].Data); !strings.Contains(data, `"transport":"sata"`) {
+		t.Errorf("baseline data = %s, want transport sata", data)
+	}
+	clk.add(15 * time.Minute)
+	res = c.Run(t.Context())
+	for _, r := range res.Readings {
+		if strings.Contains(r.Key, serialNew) {
+			t.Errorf("usb drive got a reading: %+v", r)
+		}
+	}
+}
+
+func TestIncludeSerials(t *testing.T) {
+	src := &fakeSource{}
+	src.set("sda", sata(serialSATA))
+	src.set("sdb", sata(serialNew))
+	src.set("sdc", sata("TEST0000000004"))
+	src.setPath("sdb", pathUSB)
+	src.setPath("sdc", pathUSB)
+	cfg := disksCfg()
+	cfg.IncludeSerials = []string{serialNew}
+	clk := newClock()
+	c := newLoaded(src, cfg, nil, clk.now)
+
+	res := c.Run(t.Context())
+	if res.Err != nil {
+		t.Fatalf("Err = %v", res.Err)
+	}
+	got := make([]string, 0, 2)
+	for _, b := range c.Baselines() {
+		got = append(got, b.Serial)
+	}
+	if want := []string{serialSATA, serialNew}; !slices.Equal(got, want) {
+		t.Fatalf("tracked = %v, want %v (the unlisted usb drive discarded)", got, want)
+	}
+	if data := string(c.Baselines()[1].Data); !strings.Contains(data, `"transport":"usb"`) {
+		t.Errorf("baseline data = %s, want transport usb", data)
+	}
+	clk.add(15 * time.Minute)
+	res = c.Run(t.Context())
+	if r := mustFind(t, res, "disks/"+serialNew+"/missing"); r.Verdict != health.Good {
+		t.Errorf("listed usb drive = %+v", r)
+	}
+	if _, ok := find(res, "disks/TEST0000000004/missing"); ok {
+		t.Error("unlisted usb drive judged")
+	}
+}
+
+func TestEmptyDiscovery(t *testing.T) {
+	// US1 acc. 9: nothing found while drives are known suspends the missing check.
+	src := &fakeSource{}
+	src.set("sda", sata(serialSATA))
+	src.set("nvme0n1", nvme(serialNVMe))
+	clk := newClock()
+	c := fixtureCheck(t, src, clk, nil)
+
+	src.remove("sda")
+	src.remove("nvme0n1")
+	res := c.Run(t.Context())
+	var ce health.CheckError
+	if !errors.As(res.Err, &ce) || ce.Subject != "discovery" || ce.Kind != "empty" {
+		t.Fatalf("Err = %#v, want the discovery/empty checker error", res.Err)
+	}
+	if want := "no drives found while 2 are known; missing-drive check suspended"; ce.Err == nil ||
+		ce.Err.Error() != want {
+		t.Errorf("text = %v, want %q", ce.Err, want)
+	}
+	if len(res.Readings) != 0 {
+		t.Errorf("readings = %+v, want none", res.Readings)
+	}
+
+	// Retired and excluded drives are not counted.
+	c.Retire(serialSATA)
+	res = c.Run(t.Context())
+	if !errors.As(res.Err, &ce) || !strings.Contains(ce.Err.Error(), "while 1 are known") {
+		t.Errorf("Err = %v, want 1 known", res.Err)
+	}
+	c.Retire(serialNVMe)
+	if res = c.Run(t.Context()); res.Err != nil {
+		t.Errorf("no active drive known: Err = %v", res.Err)
+	}
+}
+
+func TestUpgradeUSBNotMissing(t *testing.T) {
+	obs, logs := observer.New(zapcore.WarnLevel)
+	base := func(data string) store.Baseline {
+		return store.Baseline{
+			Serial: serialNew,
+			Model:  "Example SSD",
+			Data:   json.RawMessage(data),
+			FirstSeenAt: time.Date(
+				2026,
+				9,
+				1,
+				0,
+				0,
+				0,
+				0,
+				time.UTC,
+			),
+			LastSeenAt: time.Date(2026, 9, 30, 0, 0, 0, 0, time.UTC),
+		}
+	}
+	tests := []struct {
+		name    string
+		data    string
+		include []string
+		retired bool
+	}{
+		{"stored transport", `{"node":"sdb","transport":"usb"}`, nil, true},
+		{"stored other", `{"node":"sdb","transport":"other"}`, nil, true},
+		{"001 baseline, node discovered on usb", `{"node":"sdb"}`, nil, true},
+		{"listed in include_serials", `{"node":"sdb","transport":"usb"}`, []string{serialNew}, false},
+		{"stored sata", `{"node":"sdb","transport":"sata"}`, nil, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			src := &fakeSource{}
+			src.set("sda", sata(serialSATA))
+			src.set("sdb", sata(serialNew))
+			src.setPath("sdb", pathUSB)
+			cfg := disksCfg()
+			cfg.IncludeSerials = tt.include
+			c := New(src, cfg, nil, newClock().now, WithLogger(zap.New(obs)))
+			c.LoadBaselines([]store.Baseline{base(tt.data)})
+			logs.TakeAll()
+
+			res := c.Run(t.Context())
+			retired := slices.ContainsFunc(c.Baselines(), func(b store.Baseline) bool {
+				return b.Serial == serialNew && b.Retired
+			})
+			if retired != tt.retired {
+				t.Fatalf("retired = %v, want %v", retired, tt.retired)
+			}
+			if r, ok := find(res, "disks/"+serialNew+"/missing"); retired && ok {
+				t.Errorf("retired drive judged missing: %+v", r)
+			}
+			lines := logs.TakeAll()
+			if !retired {
+				if len(lines) != 0 {
+					t.Errorf("logged %v", lines)
+				}
+
+				return
+			}
+			if len(lines) != 1 || !strings.HasPrefix(lines[0].Message, "drive "+serialNew+" on a ") ||
+				!strings.HasSuffix(
+					lines[0].Message,
+					" transport is no longer tracked; list it in include_serials to keep watching it",
+				) {
+				t.Errorf("log = %+v, want the one retire line", lines)
+			}
+		})
+	}
+}
+
+func TestUpgradeRetireWithoutNodeAndNoMissing(t *testing.T) {
+	// A stored usb drive that is gone entirely never opens "missing".
+	src := &fakeSource{}
+	src.set("sda", sata(serialSATA))
+	c := New(src, disksCfg(), nil, newClock().now)
+	c.LoadBaselines([]store.Baseline{{
+		Serial: serialNew, Data: json.RawMessage(`{"node":"sdb","transport":"usb"}`),
+	}})
+	res := c.Run(t.Context())
+	if r, ok := find(res, "disks/"+serialNew+"/missing"); ok {
+		t.Errorf("missing = %+v", r)
+	}
+}
+
+func TestMovedToUSB(t *testing.T) {
+	// A SATA-baselined drive vanished and an unrelated USB disk took its node
+	// name: the drive is missing, never hidden behind the USB node.
+	const otherSerial = "TEST0000000009"
+	tests := []struct {
+		name string
+		out  output
+	}{
+		{"awake", output{stdout: sata(serialNew).json()}},
+		{"asleep", output{status: StandbyStatus}},
+		{"unreadable", output{err: errors.New("device not ready")}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			src := &fakeSource{}
+			src.set("sda", sata(serialSATA))
+			src.set("sdb", sata(serialNVMe))
+			cfg := disksCfg()
+			cfg.IncludeSerials = []string{otherSerial}
+			clk := newClock()
+			c := newLoaded(src, cfg, nil, clk.now)
+			if res := c.Run(t.Context()); res.Err != nil {
+				t.Fatal(res.Err)
+			}
+			clk.add(15 * time.Minute)
+
+			src.setPath("sdb", pathUSB)
+			src.runs["sdb"] = tt.out
+			res := c.Run(t.Context())
+			if r := mustFind(t, res, "disks/"+serialNVMe+"/missing"); r.Verdict != health.Bad {
+				t.Errorf("missing = %+v, want Bad", r)
+			}
+			if res.Err != nil && strings.Contains(res.Err.Error(), "drive "+serialNVMe) {
+				t.Errorf("Err = %v, the usb node stands in for the sata drive", res.Err)
+			}
+		})
+	}
+}
+
+func TestSleepingUSBNodeDoesNotSuspendMissing(t *testing.T) {
+	src := &fakeSource{}
+	src.set("sda", sata(serialSATA))
+	src.set("sdb", sata(serialNVMe))
+	cfg := disksCfg()
+	cfg.IncludeSerials = []string{"TEST0000000009"}
+	clk := newClock()
+	c := newLoaded(src, cfg, nil, clk.now)
+	if res := c.Run(t.Context()); res.Err != nil {
+		t.Fatal(res.Err)
+	}
+	clk.add(15 * time.Minute)
+
+	src.remove("sdb")
+	src.set("sdc", sata(serialNew))
+	src.setPath("sdc", pathUSB)
+	src.runs["sdc"] = output{status: StandbyStatus}
+	res := c.Run(t.Context())
+	if r := mustFind(t, res, "disks/"+serialNVMe+"/missing"); r.Verdict != health.Bad {
+		t.Errorf("missing = %+v, want Bad despite the sleeping usb node", r)
+	}
+	if len(src.wakes) != 0 {
+		t.Errorf("forced reads = %v, an unidentified external node is never woken", src.wakes)
 	}
 }

@@ -886,3 +886,48 @@ func TestRunCheckOnceSchemaVersionFallback(t *testing.T) {
 		})
 	}
 }
+
+// asleepBook is a drive book whose drives have the given statuses.
+type asleepBook struct{ statusesOf }
+
+func (asleepBook) Baselines() []store.Baseline { return nil }
+
+func (asleepBook) Retire(string) bool { return false }
+
+// TestOneShotAsleep: a drive in standby is printed as ASLEEP with the time
+// since its last read, in the reports' wording, and is not a reading; a
+// drive that is awake prints nothing.
+func TestOneShotAsleep(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 1, 10, 12, 0, 0, 0, time.UTC)
+	book := asleepBook{statusesOf{
+		{Serial: "TEST0000000001", LastReadAt: now.Add(-50 * time.Hour), AsleepSince: now.Add(-49 * time.Hour)},
+		{Serial: "TEST0000000002", LastReadAt: now.Add(-time.Minute)},
+		{Serial: "TEST0000000003", LastReadAt: now.Add(-30 * time.Second), AsleepSince: now.Add(-time.Second)},
+	}}
+	path, _ := writeHealthConfig(t, "")
+	cio, stdout, stderr := testIO(nil, now)
+	cio.checkProviders = fx.Provide(fx.Annotate(
+		func() checkSet {
+			return checkSet{
+				Drives: book,
+				Checks: []health.Check{{
+					Name: "disks", Interval: time.Minute,
+					Run: func(context.Context) health.CheckResult { return health.CheckResult{} },
+				}},
+			}
+		},
+		fx.ResultTags(healthCheckGroup),
+	))
+
+	if code := runCheckOnce(t.Context(), &config{HealthConfig: path}, cio); code != exitOK {
+		t.Fatalf("code %d, stderr %q", code, stderr)
+	}
+	want := "ASLEEP disks/TEST0000000001: last read 2 d ago\n" +
+		"ASLEEP disks/TEST0000000003: last read <1 m ago\n" +
+		"SUMMARY 1 checks, 0 readings (0 good, 0 bad, 0 unknown), 0 samples, 0 errors\n"
+	if got := stdout.String(); got != want {
+		t.Fatalf("stdout:\n%s\nwant:\n%s", got, want)
+	}
+}

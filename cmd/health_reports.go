@@ -12,6 +12,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/Toshik1978/tgshd/pkg/command"
+	"github.com/Toshik1978/tgshd/pkg/health/check/disks"
 	"github.com/Toshik1978/tgshd/pkg/health/notify"
 	"github.com/Toshik1978/tgshd/pkg/health/report"
 	"github.com/Toshik1978/tgshd/pkg/health/runner"
@@ -36,9 +37,6 @@ const (
 	driveMetricsOf = "drive."
 	spareSuffix    = ".spare"
 	selfTestSuffix = ".selftest_age_h"
-	// driveReadTimeout bounds the metrics read of /disks' drive source, which
-	// gets no context.
-	driveReadTimeout = 10 * time.Second
 )
 
 var (
@@ -57,6 +55,14 @@ type reportStore interface {
 	Retention(ctx context.Context, now time.Time) (store.RetentionResult, error)
 }
 
+// driveStatuses is what the reports read of the disks check; *disks.Check
+// satisfies it.
+type driveStatuses interface {
+	Status() []disks.DriveStatus
+}
+
+var _ driveStatuses = (*disks.Check)(nil)
+
 // reportRunner is the runner as the reports use it; *runner.Runner satisfies it.
 type reportRunner interface {
 	Snapshot() runner.Snapshot
@@ -66,15 +72,18 @@ type reportRunner interface {
 
 // healthReports serves /history, /temp and /disks, and the runner's daily
 // retention and weekly summary jobs. It is also the drive source of /disks
-// and the summary: the disks check's baselines joined with the runner's open
-// conditions and the stored drive metrics.
+// (the disks check's status with the runner's open missing conditions) and of
+// the summary (the baselines joined with the open conditions and the stored
+// drive metrics).
 type healthReports struct {
 	// store is nil without a state database (memory only).
 	store reportStore
 	// book is nil without the disks check.
-	book   runner.DriveBook
-	checks []string
-	host   string
+	book runner.DriveBook
+	// statuses is the disks check's status; nil without it.
+	statuses driveStatuses
+	checks   []string
+	host     string
 	// loc is the host's zone retention takes local days in.
 	loc    *time.Location
 	logger *zap.Logger
@@ -104,6 +113,9 @@ func newHealthReports(hs *healthSetup, set checkSet, logger *zap.Logger) *health
 	if hs.Store != nil {
 		h.store = hs.Store
 	}
+	if st, ok := set.Drives.(driveStatuses); ok {
+		h.statuses = st
+	}
 	for i := range set.Checks {
 		h.checks = append(h.checks, set.Checks[i].Name)
 	}
@@ -111,25 +123,55 @@ func newHealthReports(hs *healthSetup, set checkSet, logger *zap.Logger) *health
 	return h
 }
 
-// Drives implements command.DriveSource: the active drives with their health
-// from the open conditions, and spare and self-test age from the latest
-// stored samples (unknown without them).
+// Drives implements command.DriveSource: the active drives as the disks
+// check last saw them, with "missing" from the open missing condition.
 func (h *healthReports) Drives() []command.Drive {
-	if h.book == nil {
+	if h.statuses == nil {
 		return nil
 	}
-	var stats []store.MetricStats
-	if h.store != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), driveReadTimeout)
-		defer cancel()
-
-		var err error
-		if stats, err = h.store.Metrics(ctx, driveMetricsOf, h.now()); err != nil {
-			h.logger.Warn("cannot read drive metrics; spare and self-test age unknown", zap.Error(err))
+	missing := map[string]bool{}
+	for _, c := range h.open() {
+		if s, ok := strings.CutPrefix(c.Key, diskKeyPrefix); ok {
+			if serial, ok := strings.CutSuffix(s, missingSuffix); ok {
+				missing[serial] = true
+			}
 		}
 	}
+	now := h.now()
+	statuses := h.statuses.Status()
+	out := make([]command.Drive, 0, len(statuses))
+	for i := range statuses {
+		out = append(out, statusDrive(&statuses[i], missing[statuses[i].Serial], now))
+	}
 
-	return driveList(h.book.Baselines(), h.open(), stats)
+	return out
+}
+
+// statusDrive maps one drive status to the /disks drive.
+func statusDrive(s *disks.DriveStatus, missing bool, now time.Time) command.Drive {
+	d := command.Drive{
+		Node: s.Node, Bus: string(s.Bus), Model: s.Model, Serial: s.Serial, Transport: s.Transport,
+		Health: s.Health, Missing: missing,
+		Temp: s.Temperature, Wear: s.Wear, Spare: s.Spare, SpareThreshold: s.SpareThreshold,
+		SpareFloor: s.SpareFloor,
+		SelfTest: report.SelfTest{
+			Format: string(s.SelfTestFormat), Age: s.SelfTestPassAge,
+			NewestAge: s.SelfTestNewestAge, Unobserved: !s.SelfTestPassObserved,
+		},
+		AsleepSince: s.AsleepSince, UnreadableSince: s.UnreadableSince,
+	}
+	if d.Health == "" {
+		d.Health = "unknown"
+	}
+	if s.SelfTestNewest != nil {
+		d.SelfTest.Result = s.SelfTestNewest.Result
+	}
+	if !s.LastReadAt.IsZero() {
+		ago := max(now.Sub(s.LastReadAt), 0)
+		d.LastReadAge = &ago
+	}
+
+	return d
 }
 
 // hook sets the runner's daily retention (with a store only) and weekly

@@ -195,7 +195,8 @@ func TestAlignSelfTests(t *testing.T) {
 			switch {
 			case (got.Newest == nil) != (tt.wantNewest == nil):
 				t.Errorf("newest = %v, want %v", got.Newest, tt.wantNewest)
-			case got.Newest != nil && *got.Newest != *tt.wantNewest:
+			case got.Newest != nil &&
+				(got.Newest.Result != tt.wantNewest.Result || got.Newest.Description != tt.wantNewest.Description):
 				t.Errorf("newest = %v, want %v", *got.Newest, *tt.wantNewest)
 			}
 		})
@@ -233,5 +234,15 @@ func TestSelfTestAge(t *testing.T) {
 				t.Errorf("age = %v, want %v", got, tt.want)
 			}
 		})
+	}
+}
+
+// TestAlignSelfTestsNewestHours: the newest finished entry's power-on hours
+// are kept, skipping an unfinished entry above it.
+func TestAlignSelfTestsNewestHours(t *testing.T) {
+	log := []SelfTestEntry{stEntry(950, SelfTestInProgress), stEntry(900, SelfTestFailed), stEntry(800, SelfTestPassed)}
+	got := AlignSelfTests(SelfTestState{}, log, time.Unix(1_000_000, 0))
+	if got.Newest == nil || got.Newest.Result != "failed" || got.Newest.Hours != 900 {
+		t.Errorf("Newest = %+v, want failed at 900 h", got.Newest)
 	}
 }

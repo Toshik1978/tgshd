@@ -18,6 +18,8 @@ import (
 
 	"github.com/Toshik1978/tgshd/pkg/command"
 	"github.com/Toshik1978/tgshd/pkg/health"
+	"github.com/Toshik1978/tgshd/pkg/health/check/disks"
+	hcfg "github.com/Toshik1978/tgshd/pkg/health/config"
 	"github.com/Toshik1978/tgshd/pkg/health/notify"
 	"github.com/Toshik1978/tgshd/pkg/health/runner"
 	"github.com/Toshik1978/tgshd/pkg/health/store"
@@ -159,31 +161,59 @@ func TestDriveList(t *testing.T) {
 	}
 }
 
-func TestHealthReportsDrivesFollowTheBookAndSnapshot(t *testing.T) {
+// statusesOf serves fixed drive statuses.
+type statusesOf []disks.DriveStatus
+
+func (s statusesOf) Status() []disks.DriveStatus { return slices.Clone(s) }
+
+func TestHealthReportsDrivesFromStatus(t *testing.T) {
 	t.Parallel()
 
-	h := &healthReports{book: testBook(), logger: zap.NewNop(), now: time.Now}
-	if got := h.Drives(); len(got) != 2 || !got[0].HealthOK || !got[1].HealthOK || got[0].SparePct != nil {
-		t.Fatalf("before the runner is bound, without a store, every active drive is OK: %+v", got)
+	now := time.Date(2026, 5, 6, 12, 0, 0, 0, time.UTC)
+	asleep := now.Add(-2 * time.Hour)
+	statuses := statusesOf{
+		{
+			Serial: testSerial1, Model: "Example NVMe SSD", Bus: disks.BusNVMe, Transport: "nvme", Node: "nvme0n1",
+			Health: "ok", LastReadAt: now.Add(-3 * time.Hour), AsleepSince: asleep,
+			Temperature: new(38), Wear: new(4), Spare: new(99), SpareThreshold: new(10),
+			WearLimit: 80, SpareFloor: 20, SelfTestPassAge: 30 * time.Hour, SelfTestReadable: true,
+			SelfTestFormat: disks.SelfTestFormatOK,
+			SelfTestNewest: &disks.SelfTestNewest{Result: "passed"}, SelfTestNewestAge: new(26 * time.Hour),
+			SelfTestPassObserved: true,
+		},
+		{
+			Serial: testSerial2, Model: "Example SATA SSD", Bus: disks.BusATA, Transport: "sata", Node: "sda",
+			Health: "failing", LastReadAt: now, UnreadableSince: asleep,
+		},
 	}
-	h.bind(&fakeRunner{open: []runner.OpenCondition{{Key: "disks/" + testSerial1 + "/health"}}})
-	if got := h.Drives(); got[0].HealthOK || !got[1].HealthOK {
-		t.Fatalf("drives = %+v", got)
-	}
+	h := &healthReports{statuses: statuses, logger: zap.NewNop(), now: func() time.Time { return now }}
+	h.bind(&fakeRunner{open: []runner.OpenCondition{{Key: "disks/" + testSerial2 + "/missing"}}})
 
-	st := &fakeReportStore{metrics: []store.MetricStats{
-		{Metric: "drive." + testSerial1 + ".spare", Current: 97, HasCurrent: true},
-	}}
-	h.store = st
-	if got := h.Drives(); got[0].SparePct == nil || *got[0].SparePct != 97 {
-		t.Fatalf("spare = %v, want the stored sample", got[0].SparePct)
+	got := h.Drives()
+	if len(got) != 2 {
+		t.Fatalf("got %+v, want two drives", got)
 	}
-	if !slices.Equal(st.prefixes, []string{"drive."}) {
-		t.Errorf("metrics read = %v", st.prefixes)
+	d := got[0]
+	if d.Node != "nvme0n1" || d.Bus != "NVMe" || d.Transport != "nvme" || d.Health != "ok" || d.Missing ||
+		d.Wear == nil || *d.Wear != 4 || d.Spare == nil || *d.Spare != 99 || *d.SpareThreshold != 10 ||
+		d.SpareFloor != 20 || d.Temp == nil || *d.Temp != 38 {
+		t.Errorf("drive 1 = %+v", d)
 	}
-	st.metricsErr = errors.New("locked")
-	if got := h.Drives(); len(got) != 2 || got[0].SparePct != nil {
-		t.Fatalf("a failed metrics read must leave spare unknown: %+v", got)
+	st := d.SelfTest
+	if st.Format != "ok" || st.Result != "passed" || st.Age != 30*time.Hour || st.Unobserved ||
+		st.NewestAge == nil || *st.NewestAge != 26*time.Hour {
+		t.Errorf("self-test = %+v, want passed, 30h, newest 26h, observed", st)
+	}
+	if !got[1].SelfTest.Unobserved {
+		t.Errorf("drive 2 pass was never observed: %+v", got[1].SelfTest)
+	}
+	if d.LastReadAge == nil || *d.LastReadAge != 3*time.Hour || !d.AsleepSince.Equal(asleep) {
+		t.Errorf("last read %v, asleep %v", d.LastReadAge, d.AsleepSince)
+	}
+	d = got[1]
+	if !d.Missing || d.Health != "failing" || d.Wear != nil || d.SelfTest.Format != "" ||
+		d.LastReadAge == nil || *d.LastReadAge != 0 || !d.UnreadableSince.Equal(asleep) {
+		t.Errorf("drive 2 = %+v", d)
 	}
 	if got := (&healthReports{}).Drives(); got != nil {
 		t.Fatalf("no disks check: %+v", got)
@@ -284,6 +314,17 @@ func weeklyReports(st *fakeReportStore, r *fakeRunner) *healthReports {
 	h := &healthReports{
 		book: testBook(), checks: []string{"containers", "disks", "http/web-app"},
 		host: "box", logger: zap.NewNop(), now: time.Now,
+		statuses: statusesOf{
+			{
+				Serial: testSerial1,
+				Model:  "Example NVMe SSD",
+				Bus:    disks.BusNVMe,
+				Node:   "nvme0n1",
+				Health: "ok",
+				Wear:   new(4),
+			},
+			{Serial: testSerial2, Model: "Example SATA SSD", Bus: disks.BusATA, Node: "sda", Health: "ok"},
+		},
 	}
 	if st != nil {
 		h.store = st
@@ -419,6 +460,18 @@ func TestHealthReportsHandlersWithoutStore(t *testing.T) {
 	failing := weeklyReports(nil, &fakeRunner{}).handlers(zap.NewNop(), &fakePublisher{err: errors.New("down")})
 	if err := failing[0].Handle(t.Context(), 42, "/history"); err == nil {
 		t.Fatal("a failed reply must be returned")
+	}
+}
+
+// TestNewHealthReportsTakesTheDisksCheckStatus: the real disks check is the
+// reports' status source.
+func TestNewHealthReportsTakesTheDisksCheckStatus(t *testing.T) {
+	t.Parallel()
+
+	set := buildDisksCheck(&hcfg.Disks{}, nil, nil, time.Now, zap.NewNop(), false)
+	h := newHealthReports(&healthSetup{Host: "box"}, set, zap.NewNop())
+	if h.statuses == nil {
+		t.Fatal("statuses = nil, want the disks check")
 	}
 }
 
