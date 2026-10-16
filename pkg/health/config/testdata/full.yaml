@@ -58,7 +58,7 @@ command:
   - name: port-guard
     run: ["/usr/local/bin/probe-port"]
     interval: 5m
-    timeout: 60s
+    timeout: 20s
     threshold: 0
     fix:
       after: 2

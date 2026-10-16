@@ -483,3 +483,25 @@ func TestRestoreErrors(t *testing.T) {
 		t.Error("want error")
 	}
 }
+
+func TestReplayReportsMatchesIgnoringCursorAndBaseline(t *testing.T) {
+	boot := &fakeBoot{id: "boot-1"}
+	clk := &clock{t: time.Date(2026, 1, 2, 3, 0, 0, 0, time.UTC)}
+	k := kernel.New(boot, &fakeEDAC{}, health.NewRateMarks(), clk.now, kernel.WithReplay())
+	// A stored cursor past the records must not hide them.
+	if err := k.Restore(`{"Cursor":{"BootID":"boot-1","Seq":100,"Seen":true}}`); err != nil {
+		t.Fatal(err)
+	}
+	k.Consume(rec(5, "Buffer I/O error on dev sda, logical block 0"))
+	k.Consume(rec(6, "Buffer I/O error on dev sda, logical block 1"))
+	k.Consume(rec(7, "unrelated"))
+
+	res := k.Run(t.Context())
+	if res.Err != nil || len(res.Readings) != 1 || !strings.Contains(res.Readings[0].Text, "2 records") {
+		t.Fatalf("res = %+v", res)
+	}
+	after, _ := k.Export()
+	if !strings.Contains(after, "100") {
+		t.Fatalf("cursor changed: %s", after)
+	}
+}

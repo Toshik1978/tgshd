@@ -2,6 +2,7 @@ package notify
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"time"
@@ -96,9 +97,11 @@ func (c *CheckerErrors) CheckerError(key, text string) {
 	}
 
 	if c.opts.Mailer != nil && c.opts.Marks.Allow(key, ChannelEmail, now, CheckerErrorWindow) {
-		sent = true
-
-		c.mail(ctx, key, check, text)
+		if c.mail(ctx, key, check, text) {
+			sent = true
+		} else {
+			c.opts.Marks.Revert(key, ChannelEmail, now)
+		}
 	}
 
 	if sent {
@@ -120,11 +123,17 @@ func (c *CheckerErrors) Drain() []CheckerAlert {
 	return out
 }
 
-func (c *CheckerErrors) mail(ctx context.Context, key, check, text string) {
+// mail sends the checker error by email. It reports false when the send was
+// refused without being attempted (ErrNotSent), so the caller gives the rate
+// mark back; an attempted send that failed keeps it, as before.
+func (c *CheckerErrors) mail(ctx context.Context, key, check, text string) bool {
 	subject := c.opts.Host + ": " + checkerLabel + check
 	body := c.opts.Host + ": " + checkerLabel + check + ": " + text
 
-	if err := c.opts.Mailer.Send(ctx, subject, body); err != nil {
+	err := c.opts.Mailer.Send(ctx, subject, body)
+	if err != nil {
 		c.opts.Logger.Warn("checker error email not sent", zap.String("key", key), zap.Error(err))
 	}
+
+	return !errors.Is(err, ErrNotSent)
 }

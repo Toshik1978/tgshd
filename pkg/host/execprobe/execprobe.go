@@ -11,9 +11,13 @@ import (
 	"time"
 )
 
-// waitDelay is a safety net: the whole process group is killed on cancel, so
+// WaitDelay is a safety net: the whole process group is killed on cancel, so
 // this only bounds the wait if something still holds the output pipes.
-const waitDelay = 5 * time.Second
+// health.Bound ends a probe min(health.RunMargin, a tenth of the time left)
+// before the run's deadline, so a probe cut there still returns in time to
+// be judged, not abandoned, when at least about 10×WaitDelay of the run was
+// left at bound time; with less left the margin is shorter than WaitDelay.
+const WaitDelay = time.Second
 
 // Runner runs commands directly (no shell) and discards their output.
 type Runner struct{}
@@ -32,7 +36,7 @@ func (Runner) Run(ctx context.Context, argv []string) (int, error) {
 	cmd.Cancel = func() error {
 		return killGroup(cmd.Process)
 	}
-	cmd.WaitDelay = waitDelay
+	cmd.WaitDelay = WaitDelay
 	err := cmd.Run()
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return -1, fmt.Errorf("run %s: %w", argv[0], ctxErr)

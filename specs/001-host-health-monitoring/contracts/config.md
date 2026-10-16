@@ -59,7 +59,7 @@ http:
     url: https://app.example.org/health
     interval: 10m
     threshold: 10m
-    timeout: 15s
+    timeout: 15s                      # at most 20s (see "Timeouts" below)
     status: [200, 399]
     connect_to: 192.0.2.5             # optional: dial this address, keep URL host for TLS/Host
     doh: https://cloudflare-dns.com/dns-query   # optional, mutually exclusive with connect_to
@@ -78,7 +78,7 @@ command:
   - name: port-guard
     run: [ "/usr/local/bin/probe-port" ]  # argv, no shell
     interval: 5m
-    timeout: 60s
+    timeout: 20s                      # probe and fix each; at most 20s (see "Timeouts" below)
     threshold: 0
     fix:                              # optional
       after: 2                        # consecutive failures
@@ -97,3 +97,20 @@ modem_probe:                          # requires BOT_GAMMU_DSN
 
 Per-check common keys: `interval`, `threshold`, `mode` (`tlg` | `sms` | `tlg-or-sms`, default
 `tlg`), `needs_internet` (default `false`; `true` for `http` entries using `doh`).
+
+## Timeouts and the run budget
+
+Every check run of one 30 s cycle shares a run budget of 40 s; a run still going at its end is
+abandoned and reported only as a checker error (its late result is dropped). So that a hung probe
+is judged instead:
+
+- `timeout` of `http` and `command` entries must be at most `20s` (an entry above it is invalid);
+  the defaults are `15s` (`http`) and `20s` (`command`). A `command` fix action gets the same
+  timeout as its probe.
+- Each timed step (the request, the container check, the probe, the fix) also ends 2 s before the
+  run budget does, so a check that started late in the cycle still judges a hang itself: an
+  endpoint that does not answer, or a probe that does not finish, in time is a Bad reading
+  (`no answer before the run deadline`, `probe did not finish before the run deadline`) that
+  raises a PROBLEM and counts towards `fix.after`.
+- `tgshd check --once` bounds each run the same way: by the check's interval and the 40 s run
+  budget, whichever is shorter.

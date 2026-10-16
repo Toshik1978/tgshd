@@ -3,19 +3,27 @@ package notify
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf16"
+	"unicode/utf8"
 )
 
 type fakeSender struct {
 	sent []string
 	fail bool
+	// err, when set, is returned instead of sending.
+	err error
 }
 
 func (f *fakeSender) Send(_ context.Context, text string) error {
+	if f.err != nil {
+		return f.err
+	}
 	if f.fail {
 		return errors.New("send failed")
 	}
@@ -91,6 +99,10 @@ func TestFormatting(t *testing.T) {
 	}
 }
 
+func utf16Units(s string) int {
+	return len(utf16.Encode([]rune(s)))
+}
+
 func TestTruncate(t *testing.T) {
 	fx := newFixture(t, ModeTelegram, false)
 	long := strings.Repeat("é", 5000)
@@ -99,12 +111,12 @@ func TestTruncate(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	body := strings.TrimPrefix(fx.tlg.sent[0], "host1.example.org: ")
-	if n := len([]rune(body)); n != 4096 {
-		t.Fatalf("body is %d runes, want 4096", n)
+	got := fx.tlg.sent[0]
+	if n := utf16Units(got); n != 4096 {
+		t.Fatalf("message is %d units, want 4096", n)
 	}
 
-	if !strings.HasSuffix(body, "…") {
+	if !strings.HasSuffix(got, "…") {
 		t.Fatal("missing ellipsis")
 	}
 
@@ -112,9 +124,47 @@ func TestTruncate(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	body = strings.TrimPrefix(fx.tlg.sent[1], "host1.example.org: ")
-	if len([]rune(body)) != 4096 || !strings.HasSuffix(body, "… (since 09:05)") {
-		t.Fatalf("bad problem body (%d runes)", len([]rune(body)))
+	got = fx.tlg.sent[1]
+	if utf16Units(got) != 4096 || !strings.HasSuffix(got, "… (since 09:05)") {
+		t.Fatalf("bad problem message (%d units)", utf16Units(got))
+	}
+}
+
+func TestTruncateCountsUTF16Units(t *testing.T) {
+	tests := []struct {
+		name string
+		text string
+	}{
+		{"emoji", strings.Repeat("\U0001F600", 4000)},
+		{"escaped", strings.Repeat("<", 2000) + strings.Repeat("&", 2000)},
+		{"escaped boundary", strings.Repeat("a", 4050) + strings.Repeat("&", 100)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fx := newFixture(t, ModeTelegram, true)
+			msg := Message{Kind: KindProblem, Text: tt.text, Since: since()}
+
+			if err := fx.n.Notify(context.Background(), msg); err != nil {
+				t.Fatal(err)
+			}
+
+			got := fx.tlg.sent[0]
+			if n := utf16Units(got); n > 4096 {
+				t.Fatalf("message is %d units, want <= 4096", n)
+			}
+
+			if !strings.Contains(got, "…") || !utf8.ValidString(got) {
+				t.Fatal("want a valid text truncated with an ellipsis")
+			}
+
+			// No entity is cut: every ampersand starts a complete entity.
+			for _, part := range strings.Split(got, "&")[1:] {
+				if !strings.HasPrefix(part, "amp;") && !strings.HasPrefix(part, "lt;") {
+					t.Fatalf("cut entity near %q", part[:min(len(part), 8)])
+				}
+			}
+		})
 	}
 }
 
@@ -189,6 +239,71 @@ func TestFallbackToSMS(t *testing.T) {
 
 	if len(fx.sms.sent) != 2 || len(fx.tlg.sent) != 0 {
 		t.Fatalf("sms=%d tlg=%d", len(fx.sms.sent), len(fx.tlg.sent))
+	}
+}
+
+// TestRefusedTelegramInTelegramOrSMS: a Telegram send refused past the
+// tick's delivery deadline is queued for Telegram and spends no SMS (the SMS
+// lane is past the same deadline), while one refused because an abandoned
+// Telegram send still hangs (a sign Telegram is down) falls back to SMS.
+func TestRefusedTelegramInTelegramOrSMS(t *testing.T) {
+	tests := []struct {
+		name      string
+		err       error
+		smsFails  bool
+		wantSMS   int
+		wantQueue int
+	}{
+		{"past the deadline", fmt.Errorf("deadline: %w: %w", ErrPastDeadline, ErrNotSent), false, 0, 1},
+		{"lane busy", fmt.Errorf("lane busy: %w", ErrNotSent), false, 1, 0},
+		{"lane busy and SMS fails", fmt.Errorf("lane busy: %w", ErrNotSent), true, 0, 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fx := newFixture(t, ModeTelegramOrSMS, true)
+			fx.tlg.err = tt.err
+			fx.sms.fail = tt.smsFails
+
+			_ = fx.n.Notify(context.Background(), Message{Kind: KindProblem, Text: "x"})
+
+			q := fx.n.Export()
+			if len(fx.sms.sent) != tt.wantSMS || len(q) != tt.wantQueue {
+				t.Fatalf("sms = %q, queue = %+v; want %d SMS, %d queued", fx.sms.sent, q, tt.wantSMS, tt.wantQueue)
+			}
+			if len(q) == 1 && q[0].Channel != ChannelTelegram {
+				t.Fatalf("queued on %q, want Telegram", q[0].Channel)
+			}
+		})
+	}
+}
+
+func TestSinceOnAnEarlierDayHasTheDate(t *testing.T) {
+	tests := []struct {
+		name  string
+		since time.Time
+		want  string
+	}{
+		// The fixture's now is 2026-01-02 03:04:05 UTC.
+		{"same day", time.Date(2026, 1, 2, 1, 5, 0, 0, time.UTC), "(since 01:05)"},
+		{"earlier day", time.Date(2026, 1, 1, 15, 4, 0, 0, time.UTC), "(since 01 Jan 15:04)"},
+		{"days ago", time.Date(2025, 12, 25, 8, 0, 0, 0, time.UTC), "(since 25 Dec 08:00)"},
+		// Days are compared in the since time's own (host) zone: an earlier
+		// UTC day, the same local day.
+		{
+			"same day in the host zone",
+			time.Date(2026, 1, 1, 21, 0, 0, 0, time.UTC).In(time.FixedZone("E", 5*60*60)),
+			"(since 02:00)",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fx := newFixture(t, ModeTelegram, false)
+			_ = fx.n.Notify(context.Background(), Message{Kind: KindProblem, Text: "x", Since: tt.since})
+
+			if len(fx.tlg.sent) != 1 || !strings.HasSuffix(fx.tlg.sent[0], tt.want) {
+				t.Fatalf("got %q, want suffix %q", fx.tlg.sent, tt.want)
+			}
+		})
 	}
 }
 
@@ -445,5 +560,36 @@ func TestExpireDropsOldMessagesAndReportsThem(t *testing.T) {
 	}
 	if again := n.Expire(now, 7*24*time.Hour); len(again) != 0 || len(reported) != 1 {
 		t.Fatalf("expired twice: %+v", again)
+	}
+}
+
+func TestRenderReplacesInvalidUTF8(t *testing.T) {
+	fx := newFixture(t, ModeTelegram, true)
+	msg := Message{Kind: KindEvent, Text: "bad \xff\xfe bytes", Mode: ModeSMS}
+
+	if err := fx.n.Notify(context.Background(), msg); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := fx.n.Notify(context.Background(), Message{Kind: KindEvent, Text: msg.Text}); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, got := range []string{fx.sms.sent[0], fx.tlg.sent[0]} {
+		if !utf8.ValidString(got) || !strings.Contains(got, "bad \uFFFD bytes") {
+			t.Errorf("got %q, want valid UTF-8 with a replacement character", got)
+		}
+	}
+}
+
+func TestTruncateWithoutBudgetKeepsOnlyTheEllipsis(t *testing.T) {
+	n := New(Options{Host: strings.Repeat("h", MaxMessageUnits)})
+
+	plain, rich := n.render(Message{Kind: KindProblem, Text: "body text"})
+
+	for _, got := range []string{plain, rich} {
+		if strings.Contains(got, "body") || !strings.Contains(got, "…") {
+			t.Errorf("body not cut to the ellipsis: %q", got[len(got)-30:])
+		}
 	}
 }

@@ -23,12 +23,19 @@ build); nothing host-specific is recorded here.
 ## R2. Scheduling model
 
 - **Decision**: One `app.Worker` named `health` with a 30 s tick (gocron, singleton mode, as all
-  workers today). Each tick the runner: writes the heartbeat; returns early inside a quiet window
-  (maintenance lock or boot grace); runs the `network` check first if due; then runs every other
+  workers today). Each tick the runner: writes the heartbeat; inside a quiet window (maintenance
+  lock or boot grace) only raises its checker errors and checkpoints; otherwise runs the
+  `network` check first if due; then runs every other
   due check concurrently (bounded, default 4), skipping `needs_internet` checks while the outside
   is known down and checks whose `depends_on` target is currently bad; feeds readings to the
   engine; dispatches events; flushes queued messages; checkpoints state. Daily jobs (retention,
   roll-up, write snapshot) and the weekly summary are "due" computations inside the same tick.
+  Run budget: all runs of a tick share 40 s (`runner.MaxRunTime`); a run still going at its end
+  is abandoned and is only a checker error. So a hang is judged rather than abandoned, every
+  configurable check timeout (`http`, `command` probe and fix) is at most 20 s
+  (`health.MaxCheckTimeout`), and each timed step is bounded with `health.Bound`, which also ends
+  it 2 s (`health.RunMargin`) before the run's deadline: a probe or request cut short is a Bad
+  reading. `tgshd check --once` bounds each run by min(interval, 40 s), like the daemon.
 - **Rationale**: Fits the existing `Worker`/gocron pattern, keeps ordering rules (network first,
   dependencies) in one place, and makes SC-006 (heartbeat ≤ cycle + 1 min) hold by construction.
 - **Alternatives considered**: one gocron job per check (loses network-first ordering and
@@ -37,10 +44,22 @@ build); nothing host-specific is recorded here.
 
 ## R3. SMART data source
 
-- **Decision**: `smartctl --json=c -a /dev/<node>` per drive, decoded into Go structs. The
-  exit status is a bitmask: bits 0–1 (command line / device open failed) ⇒ unreadable;
-  bit 3 (disk failing) and `smart_status.passed=false` ⇒ health bad; other bits are informational
-  (the JSON carries the details). One exec per drive per hardware cycle (default 15 min).
+- **Decision**: `smartctl --json=c -n standby,3 -a /dev/<node>` per drive, decoded into Go
+  structs. `-n standby,3` keeps a spun-down drive asleep and makes that case exit 3 (smartctl's
+  default, 2, also means the open failed): such a drive is skipped that run — no readings, never
+  missing, not a checker error. A sleeping node is attributed to the drive last read from it;
+  one an excluded drive was last read from is credited to that drive while the set of nodes
+  stays the same (any node appearing or vanishing drops those credits until the excluded drive is
+  read awake again). A sleeping node no drive can be attributed to (never read awake since
+  start) may be a known drive that moved, so it suspends the missing judgement of the other
+  drives, but only for its first 24 h asleep; that clock is kept in memory and restarts when the
+  daemon restarts. Otherwise the exit status is a bitmask: bits 0–1 (command line / device open
+  failed) ⇒ unreadable; bit 3 (disk failing) and `smart_status.passed=false` ⇒ health bad; other
+  bits are informational (the JSON carries the details). One exec per drive per hardware cycle
+  (default 15 min), each bounded by 10 s and, like every timed step, by the run's deadline less
+  `health.RunMargin` (a killed smartctl gets 1 s to release its pipes, within the margin while at
+  least 10 s of the run is left); drives are read concurrently (at most 8 at a time); a slow or
+  unreadable drive is a checker error naming its device while the other drives' readings apply.
   Parsing lives in the check package and is tested with anonymised JSON fixtures; the adapter
   only runs the command.
 - **Rationale**: Maintainer decision after comparing options. One call yields health, ATA
@@ -101,7 +120,8 @@ build); nothing host-specific is recorded here.
 
 ## R8. HTTP checks and DNS-over-HTTPS
 
-- **Decision**: `net/http` with a per-check timeout, no redirects followed beyond 5, status range
+- **Decision**: `net/http` with a per-check timeout (at most 20 s, bounded by the run budget via
+  `health.Bound`), no redirects followed beyond 5, status range
   check. Optional `doh` resolves the host via RFC 8484 (POST `application/dns-message`) using
   `golang.org/x/net/dns/dnsmessage` to build/parse the DNS message; the transport's `DialContext`
   then dials the resolved address while TLS still verifies the original host name. Optional
@@ -121,7 +141,11 @@ build); nothing host-specific is recorded here.
   authoritative; at the end of each tick the runner writes the dirty set (conditions, baselines,
   kv, queued messages, new alert records and samples) in one transaction. On write failure the
   store marks itself degraded, reports one checker error, keeps accumulating in memory, and
-  retries every tick; the first successful write flushes everything (FR-013).
+  retries every tick; the first successful write flushes everything (FR-013). A database that
+  cannot be opened at start is retried too: the daemon holds a `store.Deferred`, which opens on
+  first use and retries a failed open on each later use (the runner's Load every tick); until it
+  opens the runner runs from memory, reports the load failure as a checker error and reads as
+  degraded, then loads and checkpoints normally.
 - **Rationale**: Validated in the spike (static build, SQLite 3.53, WAL). Queryable history for
   `/history`, `/temp`, `/disks` and the weekly summary.
 - **Alternatives considered**: JSON checkpoint file (no history queries); `etcd-io/bbolt` (no

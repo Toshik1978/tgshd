@@ -15,16 +15,24 @@ One judgement a check produces for one condition in one run.
 | Text | string | Human text for PROBLEM (`Bad`) or the error (`Unknown`); never contains secrets or raw event attributes |
 | Mode | enum | Delivery override: `tlg`, `sms`, `tlg-or-sms` (else the check's mode) |
 | Kind | enum | `State` (threshold rule) or `Event` (one message per occurrence: counter rise, drive announce, retire) |
+| Since | time? | When the check itself saw the violation begin. A check that withholds its `Bad` reading until its own threshold passes sets it, so the PROBLEM states the real start of the streak. The engine uses it only when it first tracks the condition (it becomes `StreakStart`) and ignores a future time |
 
 ### Sample
 | Field | Type | Notes |
 |---|---|---|
-| Metric | string | e.g. `temp.cpu.package`, `temp.drive.<serial>`, `drive.<serial>.wear`, `drive.<serial>.written_bytes`, `ups.charge`, `ups.voltage`, `temp.gpu.<index>` |
+| Metric | string | e.g. `temp.cpu.package`, `temp.drive.<serial>`, `drive.<serial>.wear`, `drive.<serial>.written_bytes`, `drive.<serial>.spare`, `drive.<serial>.selftest_age_h`, `ups.charge`, `ups.voltage`, `temp.gpu.<index>` |
 | Value | float64 | |
 
 ### CheckResult
-`{ Readings []Reading; Samples []Sample; Err error }` — `Err` set means the whole check could not
-run (all its conditions are Unknown for this tick).
+`{ Readings []Reading; Forget []string; Samples []Sample; Err error }` — a non-nil `Err` is reported as a checker
+error. Readings returned alongside it (a partial failure) are still judged; conditions absent from
+them are untouched. A run that failed outright returns no Readings and changes nothing.
+
+`Forget` lists condition keys to clear silently once the readings are applied, as `/clear` does:
+no message is sent and the alert log records the clear (kind `cleared`, text `sensor gone`). A check
+uses it for a subject that is gone for good, e.g. `temps` for a vanished sensor. The runner honours
+it only for the reporting check's own conditions (another check's key is ignored), and also when
+`Err` is set.
 
 ### Condition (state)
 | Field | Type | Rules |
@@ -49,6 +57,8 @@ run (all its conditions are Unknown for this tick).
  /clear <key>: any state → Healthy, no message (alert record kind=cleared).
  Condition absent from a check's readings for a whole run while that check succeeded
    and the subject is gone: resolved once as "no longer exists" (containers) or via retire (drives).
+ Sensor gone (temps): one "gone" Event reading, then the check lists the key in Forget and the
+   runner clears the condition silently in the same run (alert record kind=cleared, no message).
 ```
 
 ### Baseline (per drive)
@@ -128,5 +138,8 @@ CREATE TABLE queue (
 - Condition keys never contain secrets; subjects are names from config, container names, drive
   serials or sensor labels.
 - Thresholds ≥ 0; intervals ≥ 30 s (the tick); max ages > 0; status ranges within 100–599.
+- `http` and `command` timeouts > 0 and ≤ 20 s (`health.MaxCheckTimeout`, well inside the 40 s
+  run budget; command default 20 s, http default 15 s).
+- An entry error never repeats a URL (its userinfo or query may be secret).
 - `planned_until` window 0–86 400 s (FR-017).
 - Message text ≤ 4 096 characters after the host prefix (truncate with `…`).

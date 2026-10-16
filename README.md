@@ -22,9 +22,10 @@ monitoring and control.
 | `/sms <phone> <message>` | Sends an SMS through gammu-smsd | gammu is configured |
 | `/status` | Lists open health problems, or confirms all checks are OK | `BOT_HEALTH_CONFIG` is set |
 | `/clear <condition key>` | Clears an open health condition without sending RESOLVED | `BOT_HEALTH_CONFIG` is set |
+| `/retire <serial>` | Retires a removed drive (full serial or its last 4+ characters) and clears its conditions | `BOT_HEALTH_CONFIG` is set |
 | `/history [check] [24h\|7d\|30d]` | Lists past health alerts, newest first (default 7d) | `BOT_HEALTH_CONFIG` is set |
 | `/temp` | Shows each temperature sensor now and its 7-day min/avg/max | `BOT_HEALTH_CONFIG` is set |
-| `/disks` | Shows each drive's health, wear, spare, temperature, data written in 7 days and self-test age | `BOT_HEALTH_CONFIG` is set |
+| `/disks` | Shows each drive's health, wear and temperature (with 7-day min/avg/max), spare, data written in 7 days and self-test age | `BOT_HEALTH_CONFIG` is set |
 | *custom* | Names/executes commands from your own script | `TELEGRAM_UNKNOWN_SCRIPT` is set |
 
 **Background workers**
@@ -36,6 +37,12 @@ monitoring and control.
 
 - **Host health monitoring** — scheduled checks with PROBLEM/RESOLVED alerts that
   survive restarts (see [Host health monitoring](#host-health-monitoring)).
+
+**Access control**
+
+Only `TELEGRAM_CHAT_ID` and the optional `TELEGRAM_ALLOWED_IDS` may command the
+bot; updates from any other chat are ignored and logged. `/sms` stays limited
+to `TELEGRAM_CHAT_ID`.
 
 Every hardware/service-backed feature is **optional**: if it isn't configured,
 that feature is simply inactive and the daemon still runs.
@@ -51,7 +58,9 @@ that feature is simply inactive and the daemon still runs.
 - Host health monitoring (`BOT_HEALTH_CONFIG`), hardware checks: the `disks`
   check needs **[smartmontools](https://www.smartmontools.org/)** (`smartctl`
   7.0+ for JSON output) on `PATH`; GPU temperatures use `nvidia-smi` when it is
-  installed (optional, absent means no GPUs). `disks` and `kernel` read
+  installed (optional, absent means no GPUs). `disks` reads every drive with
+  `smartctl -n standby`, so a spun-down drive is skipped that run rather than
+  woken. `disks` and `kernel` read
   `/dev/*` and `/dev/kmsg`, so run the daemon as root (the systemd unit below).
   Hardware checks are not supported in the Docker image (distroless, nonroot,
   no `smartctl`/`nvidia-smi`).
@@ -115,6 +124,9 @@ skipped, and a file that cannot be parsed disables health monitoring. Omitted
 sections take their defaults and a check type that is absent is not run.
 Durations use Go syntax plus `d` for days (`8d`). Each check accepts `interval`,
 `threshold`, `mode` (`tlg`, `sms` or `tlg-or-sms`) and `needs_internet`.
+The `timeout` of `http` and `command` entries is at most `20s`, so a hung probe
+is judged inside the 40 s run budget of a cycle (a PROBLEM, and a strike
+towards a `command` fix) rather than abandoned.
 Checker errors are also emailed when `BOT_SMTP_ADDR` is set.
 
 **Checks.** Each check type runs when its section is configured: `network`
@@ -129,12 +141,15 @@ described below.
 
 **Telegram commands.** `/status` lists open problems (or `All checks OK`) and
 notes a degraded store or quiet window; `/clear <condition key>` drops an open
-condition without sending RESOLVED. `/history [check] [24h|7d|30d]` lists the
+condition without sending RESOLVED; `/retire <serial>` retires a drive that was
+removed (the full serial or its last 4+ characters; an unknown or ambiguous
+value lists the known drives) and clears its conditions. `/history [check] [24h|7d|30d]` lists the
 alert log newest first (a check name or condition key prefix filters it; the
 default period is 7d), `/temp` shows each sensor's current value next to its
 7-day min/avg/max, and `/disks` shows each drive by bus, model and the last 4
-serial characters with its health (OK, FAILING or missing), wear, spare (NVMe),
-temperature, data written in the last 7 days and the age of its newest
+serial characters with its health (OK, FAILING or missing), wear and temperature (each
+followed by its 7-day min/avg/max, e.g. `temp 41°C (7d 35/38/44)`), spare (NVMe),
+data written in the last 7 days and the age of its newest
 self-test. These three read the state database; while the daemon runs from
 memory they reply that history is unavailable. All commands are accepted only
 from `TELEGRAM_CHAT_ID` and `TELEGRAM_ALLOWED_IDS`.
@@ -160,7 +175,10 @@ undelivered messages after 7 days (each dropped one is logged).
 `sudo` drops the service environment. When running a subcommand by hand, pass
 the variables it needs (`BOT_HEALTH_CONFIG`, `BOT_NUT_*`, ...) explicitly, use
 `sudo -E`, or source the env file inside the elevated shell (this keeps secrets
-off the command line):
+off the command line). Sourcing runs the file as shell, so any value with
+spaces or shell metacharacters (`$`, `&`, `;`, `#`, ...) must be shell-quoted
+in the env file; systemd's `EnvironmentFile` reads the same file with its own
+quoting rules, so prefer values that need no quoting:
 
 ```bash
 sudo sh -c 'set -a; . /usr/local/etc/tgshd.conf; exec tgshd check --once'
@@ -170,10 +188,13 @@ sudo env BOT_HEALTH_CONFIG=/usr/local/etc/tgshd-health.yaml tgshd heartbeat --pl
 Without `BOT_HEALTH_CONFIG`, `tgshd heartbeat` writes the default
 `/run/tgshd/heartbeat`; pass the variable whenever `heartbeat_file` is
 customised.
+It also exits 1 when `BOT_HEALTH_CONFIG` points at an unreadable or
+unparsable file, since the heartbeat path cannot then be determined.
 
 **Heartbeat.** The daemon writes `ts=<epoch> planned_until=<epoch>` to
 `general.heartbeat_file` every 30 seconds. An external watchdog should treat a
-missing file or an old `ts` as "daemon quiet", unless `now < planned_until`.
+missing file or an old `ts` as "daemon quiet", unless `now < planned_until`. `tgshd heartbeat` keeps an existing `ts`, and on a
+missing or corrupt file writes the current time as `ts`.
 
 **Host requirements.** Run tgshd as root on the host itself (not in the
 distroless container) so it can read host state; the state database and

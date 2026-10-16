@@ -13,8 +13,9 @@ import (
 )
 
 type call struct {
-	argv    []string
-	hasDead bool
+	argv     []string
+	hasDead  bool
+	deadline time.Time
 }
 
 type fakeRunner struct {
@@ -25,9 +26,9 @@ type fakeRunner struct {
 }
 
 func (f *fakeRunner) Run(ctx context.Context, argv []string) (int, error) {
-	_, dl := ctx.Deadline()
+	deadline, dl := ctx.Deadline()
 	f.mu.Lock()
-	f.calls = append(f.calls, call{argv: argv, hasDead: dl})
+	f.calls = append(f.calls, call{argv: argv, hasDead: dl, deadline: deadline})
 	f.mu.Unlock()
 	if argv[0] == "/fix" {
 		if f.fix != nil {
@@ -482,5 +483,68 @@ func TestDryRunReportsTheFixWithoutTakingIt(t *testing.T) {
 				t.Fatalf("fixes = %+v, want %q", fixes, tt.want)
 			}
 		})
+	}
+}
+
+// TestHungProbeJudgedBeforeTheRunDeadline: a probe whose own timeout is longer
+// than what is left of the run is cut short of the run's deadline and judged
+// Bad, so the runner gets the reading (a PROBLEM, a strike towards the fix)
+// instead of abandoning the run.
+func TestHungProbeJudgedBeforeTheRunDeadline(t *testing.T) {
+	parent, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+
+	r := &fakeRunner{probe: func(ctx context.Context) (int, error) {
+		<-ctx.Done()
+
+		return -1, ctx.Err()
+	}}
+	res := newCheck(base(), r, nil, &clock{epochTime()}).Run(parent)
+
+	if parent.Err() != nil {
+		t.Fatal("the run returned only after its deadline")
+	}
+	if res.Err != nil || len(res.Readings) != 1 {
+		t.Fatalf("res = %+v", res)
+	}
+	rd := res.Readings[0]
+	if rd.Verdict != health.Bad || rd.Text != "command port-guard: probe did not finish before the run deadline" {
+		t.Fatalf("reading = %+v", rd)
+	}
+}
+
+// TestProbeTimeoutTextNamesTheTimeout: a probe that times out within a run
+// with room to spare reports its configured timeout.
+func TestProbeTimeoutTextNamesTheTimeout(t *testing.T) {
+	cfg := base()
+	cfg.Timeout = config.Duration(50 * time.Millisecond)
+	r := &fakeRunner{probe: func(ctx context.Context) (int, error) {
+		<-ctx.Done()
+
+		return -1, ctx.Err()
+	}}
+	res := newCheck(cfg, r, nil, &clock{epochTime()}).Run(context.Background())
+	if len(res.Readings) != 1 || res.Readings[0].Text != "command port-guard: probe timed out after 50ms" {
+		t.Fatalf("res = %+v", res)
+	}
+}
+
+// TestFixEndsBeforeTheRunDeadline: the fix gets its timeout, but no more than
+// what is left of the run less the margin, so its record is never lost with
+// an abandoned run.
+func TestFixEndsBeforeTheRunDeadline(t *testing.T) {
+	parent, cancel := context.WithTimeout(context.Background(), time.Second)
+	defer cancel()
+	parentDL, _ := parent.Deadline()
+
+	r := &fakeRunner{probe: exit(1)}
+	ck := newCheck(fixCfg(config.Fix{After: 1, Run: []string{"/fix"}, MaxPerHour: 3}), r, nil, &clock{epochTime()})
+	ck.Run(parent)
+
+	if len(r.calls) != 2 || r.calls[1].argv[0] != "/fix" {
+		t.Fatalf("calls = %+v", r.calls)
+	}
+	if dl := r.calls[1].deadline; !dl.Before(parentDL) {
+		t.Fatalf("fix deadline %v is not before the run deadline %v", dl, parentDL)
 	}
 }

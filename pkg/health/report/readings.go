@@ -74,8 +74,8 @@ func Disks(drives []Drive, stats []store.MetricStats) string {
 			lines,
 			fmt.Sprintf("%s %s …%s: health %s, wear %s, spare %s, temp %s, written 7d %s, self-test %s",
 				escape(d.Bus), escape(d.Model), escape(tail(d.Serial)), d.health(),
-				unit(current(byName[drivePrefix+d.Serial+wearSuffix]), "%"), unit(pct(d.SparePct), "%"),
-				unit(current(byName[driveTempPrefix+d.Serial]), "°C"), written, age(d.SelfTestAge)),
+				withStats(byName[drivePrefix+d.Serial+wearSuffix], "%"), unit(pct(d.SparePct), "%"),
+				withStats(byName[driveTempPrefix+d.Serial], "°C"), written, age(d.SelfTestAge)),
 		)
 	}
 	if len(lines) == 0 {
@@ -104,6 +104,17 @@ func unit(v, u string) string {
 	}
 
 	return v + u
+}
+
+// withStats renders the current value with its unit followed by the 7-day
+// min/avg/max when the metric has samples: "41°C (7d 35/38/44)".
+func withStats(m store.MetricStats, u string) string {
+	v := unit(current(m), u)
+	if m.N == 0 {
+		return v
+	}
+
+	return fmt.Sprintf("%s (7d %s/%s/%s)", v, whole(m.Min), whole(m.Avg), whole(m.Max))
 }
 
 func current(m store.MetricStats) string {

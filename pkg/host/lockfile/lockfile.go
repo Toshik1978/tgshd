@@ -21,8 +21,13 @@ const (
 	MaxPlannedSeconds = 86400
 )
 
-// ErrAlreadyLocked is returned when another process holds the instance lock.
-var ErrAlreadyLocked = errors.New("lock already held")
+var (
+	// ErrAlreadyLocked is returned when another process holds the instance lock.
+	ErrAlreadyLocked = errors.New("lock already held")
+	// ErrCorrupt is wrapped by the error of a heartbeat that is not in the
+	// file format.
+	ErrCorrupt = errors.New("corrupt heartbeat")
+)
 
 // MaintenanceHeld reports whether another process holds the maintenance lock
 // exclusively. It never holds the lock itself: a shared non-blocking lock is
@@ -110,11 +115,11 @@ func ParseHeartbeat(content string) (Heartbeat, error) {
 	for field := range strings.FieldsSeq(content) {
 		key, val, ok := strings.Cut(field, "=")
 		if !ok {
-			return Heartbeat{}, fmt.Errorf("parse heartbeat: bad field %q", field)
+			return Heartbeat{}, fmt.Errorf("%w: bad field %q", ErrCorrupt, field)
 		}
 		n, err := strconv.ParseInt(val, 10, 64)
 		if err != nil {
-			return Heartbeat{}, fmt.Errorf("parse heartbeat %s: %w", key, err)
+			return Heartbeat{}, fmt.Errorf("%w: field %s: %w", ErrCorrupt, key, err)
 		}
 		switch key {
 		case "ts":
@@ -124,7 +129,7 @@ func ParseHeartbeat(content string) (Heartbeat, error) {
 		}
 	}
 	if !hasTS || !hasPU {
-		return Heartbeat{}, errors.New("parse heartbeat: missing field")
+		return Heartbeat{}, fmt.Errorf("%w: missing field", ErrCorrupt)
 	}
 
 	return h, nil
@@ -155,6 +160,8 @@ func WriteTick(path string, now time.Time) error {
 }
 
 // SetPlanned sets planned_until to now+seconds (0 clears it), preserving ts.
+// A file that is missing, corrupt or has no ts yet gets ts=now, so a watchdog
+// does not read it as stale before the daemon's first tick.
 // seconds must be within 0..MaxPlannedSeconds.
 func SetPlanned(path string, now time.Time, seconds int) error {
 	if seconds < 0 || seconds > MaxPlannedSeconds {
@@ -162,16 +169,22 @@ func SetPlanned(path string, now time.Time, seconds int) error {
 	}
 
 	return update(path, func(h Heartbeat) Heartbeat {
+		if h.TS == 0 {
+			h.TS = now.Unix()
+		}
 		h.PlannedUntil = 0
 		if seconds > 0 {
 			h.PlannedUntil = now.Unix() + int64(seconds)
 		}
+
 		return h
 	})
 }
 
 // update applies fn to the current heartbeat under the sidecar lock and
-// atomically replaces the file. An unreadable or corrupt file counts as empty.
+// atomically replaces the file. A missing or corrupt file counts as empty; a
+// file that cannot be read is left as it is and the error returned, so a
+// live planned_until is never dropped.
 func update(path string, fn func(Heartbeat) Heartbeat) error {
 	dir := filepath.Dir(path)
 	if err := os.MkdirAll(dir, dirMode); err != nil {
@@ -188,8 +201,11 @@ func update(path string, fn func(Heartbeat) Heartbeat) error {
 	}
 
 	current, err := ReadHeartbeat(path)
-	if err != nil {
+	switch {
+	case errors.Is(err, ErrCorrupt):
 		current = Heartbeat{}
+	case err != nil:
+		return fmt.Errorf("heartbeat not rewritten: %w", err)
 	}
 
 	return writeAtomic(dir, path, fn(current).String())

@@ -130,7 +130,7 @@ summary: {}
 		t.Errorf("http defaults = %+v", h)
 	}
 	c := cfg.Command[0]
-	if c.Report != config.ReportAlert || c.Timeout.Duration() != time.Minute ||
+	if c.Report != config.ReportAlert || c.Timeout.Duration() != 20*time.Second ||
 		c.Fix.After != 2 || c.Fix.MaxPerHour != 3 || c.Fix.GraceAfterStart.Duration() != 2*time.Minute {
 		t.Errorf("command defaults = %+v / %+v", c, c.Fix)
 	}
@@ -252,6 +252,9 @@ func TestEntryErrors(t *testing.T) {
 		{"command fix none", "command: [{name: c, run: [x], fix: {after: 2}}]", "command/c", "fix"},
 		{"command fix after", "command: [{name: c, run: [x], fix: {after: -1, run: [y]}}]", "command/c", "after"},
 		{"command timeout", "command: [{name: c, run: [x], timeout: -1s}]", "command/c", "timeout"},
+		// A timeout must end well inside the runner's 40 s run budget.
+		{"command timeout ceiling", "command: [{name: c, run: [x], timeout: 21s}]", "command/c", "at most 20s"},
+		{"http timeout ceiling", "http: [{name: a, url: " + okURL + ", timeout: 40s}]", "http/a", "at most 20s"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -267,6 +270,35 @@ func TestEntryErrors(t *testing.T) {
 				t.Error("empty Error()")
 			}
 		})
+	}
+}
+
+// TestURLErrorsDoNotEchoTheURL: entry errors are pushed to Telegram and email,
+// so an invalid url never repeats its value (userinfo or query may be secret).
+func TestURLErrorsDoNotEchoTheURL(t *testing.T) {
+	const secret = "s3cret-token"
+	for _, doc := range []string{
+		`http: [{name: a, url: "ftp://user:` + secret + `@a.example.org/"}]`,
+		`http: [{name: a, url: "https://a.example.org:bad/?key=` + secret + `"}]`,
+		`http: [{name: a, url: "https://a.example.org/", doh: "ftp://d.example.org/?key=` + secret + `"}]`,
+	} {
+		_, errs := config.Parse([]byte(doc), "health.yaml")
+		if len(errs) != 1 || !strings.Contains(errs[0].Reason, "must be an http or https URL") {
+			t.Fatalf("%s: got %+v", doc, errs)
+		}
+		if strings.Contains(errs[0].Error(), secret) {
+			t.Fatalf("%s: error echoes the url: %v", doc, errs[0])
+		}
+	}
+}
+
+func TestTimeoutAtTheCeilingIsValid(t *testing.T) {
+	cfg := mustParse(t, `
+command: [{name: c, run: [x], timeout: 20s}]
+http: [{name: a, url: "https://a.example.org/", timeout: 20s}]
+`)
+	if len(cfg.Command) != 1 || len(cfg.HTTP) != 1 {
+		t.Fatalf("entries at the ceiling must be kept: %+v %+v", cfg.Command, cfg.HTTP)
 	}
 }
 

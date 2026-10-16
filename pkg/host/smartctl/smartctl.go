@@ -10,17 +10,30 @@ import (
 	"os/exec"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"time"
 )
 
 const (
-	// waitDelay bounds how long Run waits for I/O after the process is killed.
-	waitDelay       = 3 * time.Second
+	// WaitDelay bounds how long Run waits for I/O after the process is
+	// killed. health.Bound ends the disks reads min(health.RunMargin, a
+	// tenth of the time left) before the run's deadline, so a read cut there
+	// still returns in time for the check to report it when at least about
+	// 10×WaitDelay of the run was left at bound time; with less left the
+	// margin is shorter than WaitDelay.
+	WaitDelay       = time.Second
 	defaultSysBlock = "/sys/block"
 	defaultBinary   = "smartctl"
-	// DefaultTimeout bounds a single smartctl run.
-	DefaultTimeout = 60 * time.Second
+	// DefaultTimeout bounds a single smartctl run (one drive), well under the
+	// health runner's 40 s run budget, so a slow drive costs only its own
+	// result.
+	DefaultTimeout = 10 * time.Second
+	// StandbyStatus is the exit status of a run that found the drive in a
+	// low-power mode (sleep or standby) and did not read it: Run passes
+	// `-n standby,3` so the drive is not spun up and the case gets a status of
+	// its own (smartctl's default, 2, also means the open failed).
+	StandbyStatus = 3
 )
 
 // ErrInvalidNode is returned when a device node name is not a plain block device name.
@@ -66,9 +79,10 @@ func (r *Runner) Drives() ([]string, error) {
 	return nodes, nil
 }
 
-// Run executes `smartctl --json=c -a /dev/<node>` and returns its stdout and exit status.
-// smartctl's exit status is a bitmask, so a non-zero status is not an error; only a failure
-// to execute the binary or a timeout is.
+// Run executes `smartctl --json=c -n standby,3 -a /dev/<node>` and returns its stdout and
+// exit status. smartctl's exit status is a bitmask, so a non-zero status is not an error;
+// only a failure to execute the binary or a timeout is. A drive in standby is not spun up:
+// the run exits with StandbyStatus.
 func (r *Runner) Run(ctx context.Context, node string) ([]byte, int, error) {
 	if node == "" || strings.HasPrefix(node, "-") || strings.ContainsAny(node, `/\`) || node == "." || node == ".." {
 		return nil, 0, fmt.Errorf("%w: %q", ErrInvalidNode, node)
@@ -81,11 +95,12 @@ func (r *Runner) Run(ctx context.Context, node string) ([]byte, int, error) {
 		ctx,
 		r.binary,
 		"--json=c",
+		"-n", "standby,"+strconv.Itoa(StandbyStatus),
 		"-a",
 		"/dev/"+node,
 	)
 	cmd.Stdout = &stdout
-	cmd.WaitDelay = waitDelay
+	cmd.WaitDelay = WaitDelay
 	err := cmd.Run()
 	if ctxErr := ctx.Err(); ctxErr != nil {
 		return nil, 0, fmt.Errorf("run %s for %s: %w", r.binary, node, ctxErr)

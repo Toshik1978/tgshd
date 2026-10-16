@@ -51,6 +51,18 @@ func (r *RateMarks) Allow(key, channel string, now time.Time, window time.Durati
 	return true
 }
 
+// Revert gives back the mark that Allow set at at, for a send that was
+// refused without being attempted; a mark set since is kept.
+func (r *RateMarks) Revert(key, channel string, at time.Time) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	k := rateKey{key: key, channel: channel}
+	if last, ok := r.marks[k]; ok && last.Equal(at) {
+		delete(r.marks, k)
+	}
+}
+
 // Export returns the marks ordered by key then channel, for persistence.
 func (r *RateMarks) Export() []RateMark {
 	r.mu.Lock()

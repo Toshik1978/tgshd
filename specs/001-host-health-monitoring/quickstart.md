@@ -38,7 +38,8 @@ Expected: one line per drive aspect, sensor, container, endpoint, file and probe
 `BAD` or `UNKNOWN` with text; exit 0; no Telegram/SMS/email sent; state DB unchanged
 (`stat` mtime of `health.db` unchanged).
 
-Compare by hand against `smartctl -a`, `sensors`, `docker ps`, `curl -I` for a few entries.
+Compare by hand against `smartctl -n standby,3 -a /dev/<node>` (exit 3: the drive is asleep and
+is skipped, not reported), `sensors`, `docker ps`, `curl -I` for a few entries.
 
 ## 4. Alert lifecycle (US1)
 

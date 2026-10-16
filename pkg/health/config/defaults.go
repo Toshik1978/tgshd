@@ -1,6 +1,10 @@
 package config
 
-import "time"
+import (
+	"time"
+
+	"github.com/Toshik1978/tgshd/pkg/health"
+)
 
 // Default values for every section, as shown in the configuration contract.
 
@@ -70,7 +74,7 @@ func defaultFreshness() Freshness {
 func defaultCommand() Command {
 	return Command{
 		Common:  common(5*time.Minute, 0, ModeTLG),
-		Timeout: Duration(time.Minute),
+		Timeout: Duration(health.MaxCheckTimeout),
 		Report:  ReportAlert,
 	}
 }

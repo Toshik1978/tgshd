@@ -1,5 +1,7 @@
 package health
 
+import "time"
+
 // Verdict is the judgement a check reaches about one condition in one run.
 type Verdict int
 
@@ -43,6 +45,11 @@ type Reading struct {
 	Text    string
 	Mode    Mode
 	Kind    Kind
+	// Since, when set, is when the check itself saw the violation begin. A
+	// check that withholds a Bad reading until its own threshold passes sets
+	// it so the PROBLEM states the real start of the streak. The engine uses
+	// it only when it first tracks the condition, and ignores a future time.
+	Since time.Time
 }
 
 // Sample is one numeric metric value recorded for history.
@@ -55,8 +62,13 @@ type Sample struct {
 // reported as a checker error; Readings returned alongside it (a partial
 // failure) are still judged, and conditions absent from them are untouched,
 // so a run that failed outright returns no Readings and changes nothing.
+// Forget lists condition keys to clear silently once the readings are
+// applied, as /clear does: no message is sent and the alert log records the
+// clear. A check uses it for a subject that is gone for good. The runner
+// honours it only for the check's own conditions, and also when Err is set.
 type CheckResult struct {
 	Readings []Reading
+	Forget   []string
 	Samples  []Sample
 	Err      error
 }

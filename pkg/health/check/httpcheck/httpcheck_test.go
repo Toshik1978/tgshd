@@ -1025,6 +1025,56 @@ func TestDialIsBoundedByTimeout(t *testing.T) {
 	}
 }
 
+// TestHangPastTheRunDeadlineIsBad: an endpoint that does not answer before
+// the run's deadline is judged Bad before that deadline, even when the entry's
+// own timeout is longer, so the runner never abandons the run.
+func TestHangPastTheRunDeadlineIsBad(t *testing.T) {
+	t.Parallel()
+
+	release := make(chan struct{})
+	srv := newHTTPServer(t, http.HandlerFunc(func(_ http.ResponseWriter, req *http.Request) {
+		select {
+		case <-req.Context().Done():
+		case <-release:
+		}
+	}))
+	t.Cleanup(func() { close(release) })
+
+	ctx, cancel := context.WithTimeout(t.Context(), 300*time.Millisecond)
+	defer cancel()
+
+	res := mustNew(t, entry(srv.URL), httpcheck.Options{}).Run(ctx)
+	if ctx.Err() != nil {
+		t.Fatal("the run returned only after its deadline")
+	}
+	if res.Err != nil {
+		t.Fatalf("err = %v, want none", res.Err)
+	}
+
+	wantVerdict(t, res, health.Bad, "no answer before the run deadline")
+}
+
+// TestInvalidURLErrorDoesNotEchoTheURL: the start error is pushed to Telegram
+// and email, so it never repeats the url (its userinfo or query may be secret).
+func TestInvalidURLErrorDoesNotEchoTheURL(t *testing.T) {
+	t.Parallel()
+
+	const secret = "s3cret-token"
+	for _, raw := range []string{
+		"https://user:" + secret + "@" + appHost + ":bad/",
+		"https://" + appHost + "/%zz?key=" + secret,
+		"ftp://user:" + secret + "@" + appHost + "/",
+	} {
+		_, err := httpcheck.New(entry(raw), httpcheck.Options{})
+		if err == nil || !strings.Contains(err.Error(), "url") {
+			t.Fatalf("err = %v, want an invalid url", err)
+		}
+		if strings.Contains(err.Error(), secret) {
+			t.Fatal("the error echoes the url")
+		}
+	}
+}
+
 // countEqual counts the values equal to want, so failures never print a secret.
 func countEqual(values []string, want string) int {
 	n := 0

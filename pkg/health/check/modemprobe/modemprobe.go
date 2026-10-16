@@ -44,6 +44,11 @@ type State struct {
 	Token          string    `json:"token"`
 	LastOKAt       time.Time `json:"last_ok_at"`
 	FirstMissingAt time.Time `json:"first_missing_at"`
+	// BadAt is when the check last decided Bad; a Good needs a return that
+	// is not older than this, so a restart never resolves an open problem.
+	BadAt time.Time `json:"bad_at,omitzero"`
+	// GoodForOKAt is the LastOKAt value whose Good was already decided.
+	GoodForOKAt time.Time `json:"good_for_ok_at,omitzero"`
 }
 
 // Probe is the modem round-trip check. It is safe for concurrent use: Match
@@ -58,9 +63,8 @@ type Probe struct {
 	replyWithin time.Duration
 	maxSilence  time.Duration
 
-	mu           sync.Mutex
-	state        State
-	goodReported bool
+	mu    sync.Mutex
+	state State
 }
 
 // New builds the probe. lookup resolves environment variable names (use
@@ -145,7 +149,6 @@ func (p *Probe) Match(sender, text string, _ time.Time) bool {
 	p.state.LastOKAt = p.now() // host clock: the message timestamp may be skewed
 	p.state.Token = ""
 	p.state.FirstMissingAt = time.Time{}
-	p.goodReported = false
 
 	return true
 }
@@ -239,6 +242,8 @@ func (p *Probe) judge(now time.Time, timedOut, sendFailed bool) health.CheckResu
 	defer p.mu.Unlock()
 
 	bad := func(text string) health.CheckResult {
+		p.state.BadAt = now
+
 		return health.CheckResult{Readings: []health.Reading{{Key: Key, Verdict: health.Bad, Text: text}}}
 	}
 
@@ -253,8 +258,8 @@ func (p *Probe) judge(now time.Time, timedOut, sendFailed bool) health.CheckResu
 		return bad(fmt.Sprintf("No modem probe has come back for %d days", int(now.Sub(ref)/day)))
 	}
 
-	if !p.state.LastOKAt.IsZero() && !p.goodReported && !p.outstanding() {
-		p.goodReported = true
+	if p.goodDue() {
+		p.state.GoodForOKAt = p.state.LastOKAt
 
 		return health.CheckResult{Readings: []health.Reading{{
 			Key: Key, Verdict: health.Good, Text: "Modem probe came back",
@@ -262,6 +267,15 @@ func (p *Probe) judge(now time.Time, timedOut, sendFailed bool) health.CheckResu
 	}
 
 	return health.CheckResult{}
+}
+
+// goodDue reports whether a return newer than the last Bad (and not yet
+// reported) is waiting to be judged Good. Callers hold p.mu.
+func (p *Probe) goodDue() bool {
+	st := p.state
+
+	return !st.LastOKAt.IsZero() && !p.outstanding() &&
+		!st.LastOKAt.Equal(st.GoodForOKAt) && !st.LastOKAt.Before(st.BadAt)
 }
 
 // outstanding reports whether a probe was sent and has not returned yet.

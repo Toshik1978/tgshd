@@ -18,9 +18,11 @@ import (
 	hcfg "github.com/Toshik1978/tgshd/pkg/health/config"
 	"github.com/Toshik1978/tgshd/pkg/health/store"
 	"github.com/Toshik1978/tgshd/pkg/host/edac"
+	"github.com/Toshik1978/tgshd/pkg/host/execprobe"
 	"github.com/Toshik1978/tgshd/pkg/host/hwmon"
 	"github.com/Toshik1978/tgshd/pkg/host/kmsg"
 	"github.com/Toshik1978/tgshd/pkg/host/nvidia"
+	"github.com/Toshik1978/tgshd/pkg/host/smartctl"
 )
 
 type fakeDriveBook struct{}
@@ -96,6 +98,35 @@ func TestHardwareChecksFollowTheConfig(t *testing.T) {
 	if set := kernelChecks(hs); len(set.Checks) != 1 || set.Checks[0].Name != kernelCheckName ||
 		len(set.Persisters) != 1 || len(set.Background) != 1 {
 		t.Fatalf("kernel section: %+v", set)
+	}
+}
+
+// TestStandbyStatusAgrees: the disks check skips exactly the status the
+// smartctl adapter asks smartctl to exit with for a drive in standby.
+func TestStandbyStatusAgrees(t *testing.T) {
+	t.Parallel()
+
+	if disks.StandbyStatus != smartctl.StandbyStatus {
+		t.Fatalf("disks.StandbyStatus = %d, smartctl.StandbyStatus = %d", disks.StandbyStatus, smartctl.StandbyStatus)
+	}
+}
+
+// TestWaitDelaysFitTheRunMargin: health.Bound keeps a margin of
+// min(RunMargin, a tenth of the time left) before the run's deadline. With
+// the full margin (at least 10×RunMargin left), a killed probe whose output
+// pipes stay open uses at most half of it, leaving the rest for the kill and
+// the check to return, so the check judges it rather than the run being
+// abandoned. With less than 10×WaitDelay left the margin is shorter than
+// WaitDelay and this does not hold; the adapters document that.
+func TestWaitDelaysFitTheRunMargin(t *testing.T) {
+	t.Parallel()
+
+	for name, d := range map[string]time.Duration{
+		"smartctl": smartctl.WaitDelay, "execprobe": execprobe.WaitDelay,
+	} {
+		if 2*d > health.RunMargin {
+			t.Errorf("%s.WaitDelay = %s, want at most half of health.RunMargin %s", name, d, health.RunMargin)
+		}
 	}
 }
 
@@ -456,5 +487,62 @@ func TestKernelCheckRunsAfterAFailedRestore(t *testing.T) {
 	}
 	if res := set.Checks[0].Run(t.Context()); errors.Is(res.Err, errKernelStateNotLoaded) {
 		t.Fatalf("run = %+v; a reported restore failure must not block the check for good", res)
+	}
+}
+
+// fakeSnapshot serves the one-shot kernel buffer read.
+type fakeSnapshot struct {
+	fakeKmsg
+
+	snapErr error
+}
+
+func (f *fakeSnapshot) Snapshot(_ context.Context, fn func(kmsg.Record)) error {
+	for _, r := range f.records {
+		fn(r)
+	}
+
+	return f.snapErr
+}
+
+func TestBuildKernelOneShotPrintsTheCurrentMatchesWithoutBackgroundOrSaving(t *testing.T) {
+	t.Parallel()
+
+	log := &fakeSnapshot{
+		records: []kmsg.Record{{Level: 3, Seq: 7, Message: "Buffer I/O error on dev sda, logical block 0"}},
+	}
+	set := buildKernelOneShot(&hcfg.Kernel{}, log, fakeEDAC{}, time.Now)
+	if len(set.Background) != 0 || len(set.Checks) != 1 {
+		t.Fatalf("set = %+v", set)
+	}
+	if err := set.Persisters[0].Restore(store.State{}); err != nil {
+		t.Fatal(err)
+	}
+	// No fresh-install suppression: the very first run shows the match.
+	res := set.Checks[0].Run(t.Context())
+	if res.Err != nil || len(res.Readings) != 1 {
+		t.Fatalf("res = %+v", res)
+	}
+}
+
+func TestBuildKernelOneShotUnreadableKmsgReportsTheError(t *testing.T) {
+	t.Parallel()
+
+	denied := errors.New("open kmsg: permission denied")
+	set := buildKernelOneShot(&hcfg.Kernel{}, &fakeSnapshot{snapErr: denied}, fakeEDAC{}, time.Now)
+	if err := set.Persisters[0].Restore(store.State{}); err != nil {
+		t.Fatal(err)
+	}
+	if res := set.Checks[0].Run(t.Context()); !errors.Is(res.Err, denied) {
+		t.Fatalf("err = %v, want the read error", res.Err)
+	}
+}
+
+func TestKernelChecksOneShotHasNoBackgroundReader(t *testing.T) {
+	t.Parallel()
+
+	hs := &healthSetup{Config: &hcfg.Config{Kernel: &hcfg.Kernel{}}, OneShot: true}
+	if set := kernelChecks(hs); len(set.Checks) != 1 || len(set.Background) != 0 {
+		t.Fatalf("one-shot kernel set: %+v", set)
 	}
 }

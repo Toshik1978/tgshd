@@ -642,6 +642,43 @@ func TestNewHealthSetupClaimsStateAndLocksOutASecondInstance(t *testing.T) {
 	thirdLC.RequireStart().RequireStop()
 }
 
+// TestNewHealthSetupRetriesAFailedStoreOpen: a state database that cannot be
+// opened at start is opened by a later use (the runner's Load each tick), so
+// the daemon does not run from memory until it restarts.
+func TestNewHealthSetupRetriesAFailedStoreOpen(t *testing.T) {
+	t.Parallel()
+
+	path, stateDir := writeHealthConfig(t, "")
+	// A directory where the database belongs: the open fails until it is gone.
+	dbPath := filepath.Join(stateDir, store.FileName)
+	if err := os.MkdirAll(dbPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	lc := fxtest.NewLifecycle(t)
+	hs := newHealthSetup(lc, zap.NewNop(), &config{HealthConfig: path, HostName: "box"})
+	if hs.Config == nil || hs.Store == nil {
+		t.Fatalf("setup = %+v, want monitoring with a store to retry", hs)
+	}
+	if !hs.Store.Degraded() {
+		t.Fatal("a store that is not open must read as degraded")
+	}
+	if _, err := hs.Store.Load(t.Context()); err == nil {
+		t.Fatal("Load must fail while the database cannot be opened")
+	}
+
+	if err := os.Remove(dbPath); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := hs.Store.Load(t.Context()); err != nil {
+		t.Fatalf("Load after the state directory recovered: %v", err)
+	}
+	if hs.Store.Degraded() {
+		t.Fatal("degraded once open")
+	}
+	lc.RequireStart().RequireStop()
+}
+
 func TestNewHealthSetupWithoutInstanceLockRunsFromMemory(t *testing.T) {
 	t.Parallel()
 

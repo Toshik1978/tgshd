@@ -160,7 +160,7 @@ func runCheckOnce(ctx context.Context, cfg *config, cio cliIO) int {
 	for _, e := range setupErrs {
 		writeError(cio.stdout, e.Key, e.Text, &t)
 	}
-	interrupted := runChecks(ctx, cio.stdout, set.Checks, set.Fixes, &t)
+	interrupted := runChecks(ctx, cio.stdout, set.Checks, set.Fixes, &t, runner.MaxRunTime)
 	fmt.Fprintln(cio.stdout, t)
 
 	switch {
@@ -230,7 +230,7 @@ func openStateReadOnly(ctx context.Context, stateDir string) (*store.Store, erro
 // an empty state is restored, like a first start). Nothing is ever saved back
 // and no background job runs. A store that cannot be read is a warning; a
 // persister that cannot restore is a setup error.
-func restoreChecks(ctx context.Context, st *store.Store, ps []runner.Persister, stderr io.Writer) []startError {
+func restoreChecks(ctx context.Context, st stateStore, ps []runner.Persister, stderr io.Writer) []startError {
 	var state store.State
 	if st != nil && len(ps) > 0 {
 		loaded, err := st.Load(ctx)
@@ -298,20 +298,22 @@ func collectCheckSets(
 	return sets, stop, nil
 }
 
-// runChecks runs every check once, in order, bounded by its interval like the
-// runner does, and prints its result into t, followed by the fixes it would
+// runChecks runs every check once, in order, bounded like the runner bounds
+// it: by its interval or runBudget (the daemon's run budget), whichever is
+// shorter. It prints its result into t, followed by the fixes it would
 // have taken (one-shot checks never fix). Quiet windows, the internet gate and
 // dependencies do not apply to a one-shot run. When ctx ends (Ctrl-C) the
 // check in flight is reported as interrupted, no further check starts, and
 // interrupted is true.
 func runChecks(
 	ctx context.Context, w io.Writer, checks []health.Check, fixes []runner.FixSource, t *tally,
+	runBudget time.Duration,
 ) (interrupted bool) {
 	for _, chk := range checks {
 		if ctx.Err() != nil {
 			return true
 		}
-		res := runner.RunBounded(ctx, chk, chk.Interval, nil)
+		res := runner.RunBounded(ctx, chk, min(chk.Interval, runBudget), nil)
 		if ctx.Err() != nil {
 			// The result may be cut short by the interruption: do not judge it.
 			res = health.CheckResult{Err: errInterrupted}

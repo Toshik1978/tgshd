@@ -251,7 +251,7 @@ func TestRunChecksRunsEveryCheckOnceInOrder(t *testing.T) {
 		buf bytes.Buffer
 		tl  tally
 	)
-	if interrupted := runChecks(t.Context(), &buf, checks, nil, &tl); interrupted {
+	if interrupted := runChecks(t.Context(), &buf, checks, nil, &tl, runner.MaxRunTime); interrupted {
 		t.Fatal("nothing interrupted the run")
 	}
 
@@ -273,6 +273,38 @@ func TestRunChecksRunsEveryCheckOnceInOrder(t *testing.T) {
 	}
 	if tl.checks != 3 || tl.good != 1 || tl.errors != 2 {
 		t.Fatalf("tally = %+v", tl)
+	}
+}
+
+// TestRunChecksBoundedByTheRunBudget: like the daemon, a one-shot run is cut
+// at the run budget when that is shorter than the check's interval.
+func TestRunChecksBoundedByTheRunBudget(t *testing.T) {
+	t.Parallel()
+
+	release := make(chan struct{})
+	defer close(release)
+	checks := []health.Check{{
+		Name:     "slow",
+		Interval: time.Hour,
+		Run: func(context.Context) health.CheckResult {
+			<-release // Hangs, ignoring its context.
+
+			return health.CheckResult{}
+		},
+	}}
+
+	var (
+		buf bytes.Buffer
+		tl  tally
+	)
+	start := time.Now()
+	runChecks(t.Context(), &buf, checks, nil, &tl, 50*time.Millisecond)
+
+	if elapsed := time.Since(start); elapsed > 5*time.Second {
+		t.Fatalf("run took %v, want it bounded by the run budget", elapsed)
+	}
+	if want := "ERROR slow/run/error: run did not finish within 50ms\n"; !strings.Contains(buf.String(), want) {
+		t.Fatalf("output lacks %q:\n%s", want, buf.String())
 	}
 }
 
@@ -692,7 +724,7 @@ func TestRunChecksStopsWhenInterrupted(t *testing.T) {
 		buf bytes.Buffer
 		tl  tally
 	)
-	if !runChecks(ctx, &buf, checks, nil, &tl) {
+	if !runChecks(ctx, &buf, checks, nil, &tl, runner.MaxRunTime) {
 		t.Fatal("the run must report the interruption")
 	}
 	if ranLater {

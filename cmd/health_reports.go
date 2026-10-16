@@ -172,7 +172,8 @@ func (h *healthReports) handlers(logger *zap.Logger, publisher command.Publisher
 // daily expires the runner's undelivered messages older than queueMaxAge
 // (the runner logs each, and the tick's flush no longer sends them), then
 // applies the store's retention rules in the host's zone. A stored message the
-// runner did not hold is logged here (never its text).
+// runner did not hold is logged here (never its text). A state database not
+// open (yet) or closed skips the retention quietly.
 func (h *healthReports) daily(ctx context.Context, now time.Time) error {
 	expired := map[int64]bool{}
 	if rh := h.bound(); rh.expire != nil {
@@ -181,7 +182,14 @@ func (h *healthReports) daily(ctx context.Context, now time.Time) error {
 		}
 	}
 	res, err := h.store.Retention(ctx, now.In(h.loc))
-	if err != nil {
+	switch {
+	case errors.Is(err, store.ErrNotOpen), errors.Is(err, store.ErrClosed):
+		// Nothing to prune; the runner's Load already reports a database it
+		// cannot open as a checker error.
+		h.logger.Debug("retention skipped: the state database is not open", zap.Error(err))
+
+		return nil
+	case err != nil:
 		return fmt.Errorf("retention: %w", err)
 	}
 	for _, m := range res.QueueDropped {

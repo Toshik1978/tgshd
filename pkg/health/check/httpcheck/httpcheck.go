@@ -93,9 +93,11 @@ type outcome struct {
 
 // New builds the check for one http entry of the configuration.
 func New(entry config.HTTP, opts Options) (*Check, error) {
+	// The url is never repeated in an error: its userinfo or query may be
+	// secret, and the start error is pushed to Telegram and email.
 	u, err := url.Parse(entry.URL)
 	if err != nil {
-		return nil, fmt.Errorf("http/%s: parse url: %w", entry.Name, err)
+		return nil, fmt.Errorf("http/%s: url is not a valid URL", entry.Name)
 	}
 
 	if (u.Scheme != "http" && u.Scheme != "https") || u.Hostname() == "" {
@@ -150,9 +152,14 @@ func (c *Check) Run(ctx context.Context) health.CheckResult {
 }
 
 // probe sends the request and judges the answer.
+//
+// The request gets the entry's timeout but ends before the run's deadline
+// (see health.Bound), so an endpoint that hangs past what is left of the run
+// is judged Bad too and the run is never abandoned with its reading.
 func (c *Check) probe(ctx context.Context, header string) outcome {
-	reqCtx, cancel := context.WithTimeout(ctx, c.timeout)
+	reqCtx, cancel, limit := health.Bound(ctx, c.timeout)
 	defer cancel()
+	within := withinText(limit, c.timeout)
 
 	trace := &dohTrace{}
 	reqCtx = context.WithValue(reqCtx, traceKey{}, trace)
@@ -170,7 +177,7 @@ func (c *Check) probe(ctx context.Context, header string) outcome {
 
 	resp, err := c.client.Do(req)
 	if err != nil {
-		return c.failure(ctx, trace, err)
+		return failure(ctx, trace, err, within)
 	}
 
 	_ = resp.Body.Close()
@@ -185,8 +192,8 @@ func (c *Check) probe(ctx context.Context, header string) outcome {
 // failure classifies a failed request: a DoH lookup that failed or did not
 // finish, or a run cancelled by the caller, is not a judgement; anything else
 // means the endpoint is down.
-func (c *Check) failure(ctx context.Context, trace *dohTrace, err error) outcome {
-	if dohErr := trace.failed(c.timeout); dohErr != nil {
+func failure(ctx context.Context, trace *dohTrace, err error, within string) outcome {
+	if dohErr := trace.failed(within); dohErr != nil {
 		return outcome{err: dohErr}
 	}
 
@@ -194,7 +201,17 @@ func (c *Check) failure(ctx context.Context, trace *dohTrace, err error) outcome
 		return outcome{err: fmt.Errorf("request not completed: %w", ctx.Err())}
 	}
 
-	return outcome{bad: true, text: describe(err, c.timeout)}
+	return outcome{bad: true, text: describe(err, within)}
+}
+
+// withinText says how long a request had: its timeout, or, when the run's
+// deadline cut it shorter, that deadline.
+func withinText(limit, timeout time.Duration) string {
+	if limit < timeout {
+		return "before the run deadline"
+	}
+
+	return "within " + timeout.String()
 }
 
 func (c *Check) checkContainer(ctx context.Context) outcome {
@@ -202,7 +219,7 @@ func (c *Check) checkContainer(ctx context.Context) outcome {
 		return outcome{}
 	}
 
-	ctx, cancel := context.WithTimeout(ctx, c.timeout)
+	ctx, cancel, _ := health.Bound(ctx, c.timeout)
 	defer cancel()
 
 	healthy, err := c.containers.ContainerHealthy(ctx, c.container)
@@ -307,13 +324,13 @@ func newClient(d *dialer, tlsConfig *tls.Config, redirect func(*http.Request, []
 
 // describe turns a transport error into a short text. It never includes the
 // URL (which may carry a query secret) nor any header.
-func describe(err error, timeout time.Duration) string {
+func describe(err error, within string) string {
 	if errors.Is(err, errTooManyRedirects) {
 		return errTooManyRedirects.Error()
 	}
 
 	if ne, ok := errors.AsType[net.Error](err); errors.Is(err, context.DeadlineExceeded) || (ok && ne.Timeout()) {
-		return fmt.Sprintf("no answer within %s", timeout)
+		return "no answer " + within
 	}
 
 	if dnsErr, ok := errors.AsType[*net.DNSError](err); ok {

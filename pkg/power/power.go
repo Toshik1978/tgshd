@@ -4,7 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sync/atomic"
+	"sync"
 	"time"
 
 	nut "github.com/robbiet480/go.nut"
@@ -25,8 +25,11 @@ type power struct {
 
 	// reader overrides the blocking status read in tests.
 	reader func() (Status, error)
-	// inflight is set while a go.nut read goroutine is running.
-	inflight atomic.Bool
+	// mu guards busy and idle: busy is set while a go.nut read goroutine is
+	// running, and idle is closed when it ends.
+	mu   sync.Mutex
+	busy bool
+	idle chan struct{}
 }
 
 // New instantiate power control object.
@@ -63,8 +66,10 @@ func (p *power) Voltage(ctx context.Context) (float64, error) {
 // bounded runs a blocking go.nut read so that it honors ctx. go.nut has no
 // cancellation or deadline support, so a read against a silent server keeps
 // its goroutine and socket until the OS gives up. To keep that bounded to one
-// leaked read, a new read is refused with ErrTimeout while a previous one is
-// still in flight.
+// leaked read, reads are serialised: a read that starts while a previous one
+// is still in flight waits for it (within ctx), so a healthy overlapping read
+// is not a fault, and fails with ErrTimeout only when the previous read
+// outlives ctx.
 func bounded[T any]( //nolint:ireturn // generic helper shared by Voltage and Status.
 	ctx context.Context,
 	p *power,
@@ -73,8 +78,8 @@ func bounded[T any]( //nolint:ireturn // generic helper shared by Voltage and St
 	T, error,
 ) {
 	var zero T
-	if !p.inflight.CompareAndSwap(false, true) {
-		return zero, fmt.Errorf("%w: previous read still in flight", ErrTimeout)
+	if err := p.acquire(ctx); err != nil {
+		return zero, err
 	}
 
 	type result struct {
@@ -84,7 +89,7 @@ func bounded[T any]( //nolint:ireturn // generic helper shared by Voltage and St
 	// Buffered so the goroutine never blocks on send after we return on ctx.Done().
 	ch := make(chan result, 1)
 	go func() {
-		defer p.inflight.Store(false)
+		defer p.release()
 
 		value, err := read()
 		ch <- result{value: value, err: err}
@@ -92,14 +97,50 @@ func bounded[T any]( //nolint:ireturn // generic helper shared by Voltage and St
 
 	select {
 	case <-ctx.Done():
-		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			return zero, fmt.Errorf("%w: %w", ErrTimeout, ctx.Err())
-		}
-
-		return zero, fmt.Errorf("ups read cancelled: %w", ctx.Err())
+		return zero, ctxError(ctx, "")
 	case r := <-ch:
 		return r.value, r.err
 	}
+}
+
+// acquire waits until no read is in flight, then marks one in flight.
+func (p *power) acquire(ctx context.Context) error {
+	for {
+		p.mu.Lock()
+		if !p.busy {
+			p.busy, p.idle = true, make(chan struct{})
+			p.mu.Unlock()
+
+			return nil
+		}
+		idle := p.idle
+		p.mu.Unlock()
+
+		select {
+		case <-idle:
+		case <-ctx.Done():
+			return ctxError(ctx, "previous read still in flight: ")
+		}
+	}
+}
+
+// release ends the read in flight and wakes the reads waiting for it.
+func (p *power) release() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	p.busy = false
+	close(p.idle)
+}
+
+// ctxError is the error of a read cut by ctx: ErrTimeout for its deadline,
+// a plain cancellation otherwise.
+func ctxError(ctx context.Context, detail string) error {
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return fmt.Errorf("%w: %s%w", ErrTimeout, detail, ctx.Err())
+	}
+
+	return fmt.Errorf("ups read cancelled: %s%w", detail, ctx.Err())
 }
 
 // readVoltage performs the blocking NUT read. It has no cancellation because

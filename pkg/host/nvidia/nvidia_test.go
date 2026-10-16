@@ -67,6 +67,34 @@ func TestGPUsFailingBinary(t *testing.T) {
 	}
 }
 
+func TestGPUsNoDevicesFound(t *testing.T) {
+	for name, script := range map[string]string{
+		"stdout":    "#!/bin/sh\necho 'No devices were found'\nexit 6\n",
+		"stderr":    "#!/bin/sh\necho 'No devices were found' >&2\nexit 6\n",
+		"mixedcase": "#!/bin/sh\necho 'NO DEVICES WERE FOUND.' >&2\nexit 6\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			got, err := nvidia.New(writeBin(t, script)).GPUs(context.Background())
+			if err != nil || got != nil {
+				t.Fatalf("got %+v, %v", got, err)
+			}
+		})
+	}
+}
+
+func TestGPUsOtherFailuresStayErrors(t *testing.T) {
+	for name, script := range map[string]string{
+		"driver mismatch": "#!/bin/sh\necho 'Failed to initialize NVML: Driver/library version mismatch' >&2\nexit 18\n",
+		"zero exit":       "#!/bin/sh\necho 'No devices were found'\nexit 0\n",
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := nvidia.New(writeBin(t, script)).GPUs(context.Background()); err == nil {
+				t.Fatal("expected error")
+			}
+		})
+	}
+}
+
 func TestParseSkipsUnavailable(t *testing.T) {
 	got, err := nvidia.Parse("0, Example GPU, [N/A]\n1, Example GPU, [Not Supported]\n2, Example GPU, 48\n")
 	if err != nil {

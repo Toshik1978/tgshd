@@ -180,7 +180,42 @@ func kernelChecks(hs *healthSetup) checkSet {
 		return checkSet{}
 	}
 
+	if hs.OneShot {
+		return buildKernelOneShot(hs.Config.Kernel, kmsg.NewDefault(), edac.NewDefault(), time.Now)
+	}
+
 	return buildKernelCheck(hs.Config.Kernel, kmsg.NewDefault(), edac.NewDefault(), time.Now)
+}
+
+// kmsgSnapshotter reads the kernel buffer once, without waiting for more.
+type kmsgSnapshotter interface {
+	BootID() (string, error)
+	Snapshot(ctx context.Context, fn func(kmsg.Record)) error
+}
+
+// buildKernelOneShot builds the kernel check for check --once: each run reads
+// what the kernel ring buffer holds right now (never blocking, no cursor kept)
+// and prints what the class table matches, whatever the stored cursor says;
+// EDAC is judged against the stored counters. Nothing is saved and no
+// background reader runs. An unreadable /dev/kmsg is reported as the run's
+// error next to the EDAC readings.
+func buildKernelOneShot(k *hcfg.Kernel, log kmsgSnapshotter, counters edacReader, now func() time.Time) checkSet {
+	chk := kernel.New(log, edacSource{reader: counters}, health.NewRateMarks(), now, kernel.WithReplay())
+	gate := &kernelGate{persister: runner.KVPersister{Key: kernelStateKey, State: chk}}
+	run := func(ctx context.Context) health.CheckResult {
+		readErr := log.Snapshot(ctx, func(r kmsg.Record) { chk.Consume(kernelRecord(r)) })
+		res := chk.Run(ctx)
+		if readErr != nil {
+			res.Err = errors.Join(res.Err, fmt.Errorf("read the kernel log: %w", readErr))
+		}
+
+		return res
+	}
+
+	return checkSet{
+		Checks:     []health.Check{newCheck(kernelCheckName, k.Common, gate.run(run))},
+		Persisters: []runner.Persister{gate},
+	}
 }
 
 // kmsgReader is the kernel log of pkg/host/kmsg.

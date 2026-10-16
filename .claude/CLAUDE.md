@@ -40,7 +40,8 @@ an fx lifecycle:
 Business logic sits behind small interfaces (`command.Publisher`, `command.Power`,
 `command.Pinger`, `command.Speedtest`, `command.Script`, `command.ZTE`,
 `command.SmsSender`, `sms.ZTE`, …). The concrete implementations
-(`pkg/ping`, `pkg/power`, `pkg/speedtest`, `pkg/zte`, `pkg/script`, `pkg/sms/gammu`)
+(`pkg/ping`, `pkg/power`, `pkg/speedtest`, `pkg/zte`, `pkg/script`,
+`pkg/sms/gammu`)
 are thin adapters over external systems.
 
 ### Optional features are env-gated
@@ -66,26 +67,28 @@ group, gated behind an env-var check in `main()`.
 
 | Package | Responsibility |
 | :--- | :--- |
-| `cmd` | `main.go`: fx composition root, config, env-gated wiring; `cli.go`: `check --once` / `heartbeat` subcommands; `health*.go`: health wiring and adapters |
+| `cmd` | `main.go`: fx composition root, config, env-gated wiring; `cli.go`: `check --once` and `heartbeat` subcommands |
+| `cmd` (health) | `health.go`, `health_adapters.go`, `health_hardware.go`, `health_services.go`, `health_sms.go`, `health_reports.go`: health wiring, adapters and report/summary providers |
 | `cmd/app` | `Application` lifecycle, gocron worker scheduler |
-| `pkg/telegram` | Telegram consumer (routing) + publisher (replies) |
-| `pkg/command` | Command handlers (`/ping`, `/power`, `/speed`, `/5g` `/4g` `/3g`, `/sms`, script) |
+| `pkg/telegram` | Telegram consumer (routing, `access.go` allow-list) + publisher (replies) |
+| `pkg/command` | Command handlers (`/ping`, `/power`, `/speed`, `/5g` `/4g` `/3g`, `/sms`, `/status`, `/clear`, `/retire`, `/history`, `/temp`, `/disks`, script) |
 | `pkg/ping` | ICMP ping (pro-bing) |
 | `pkg/power` | UPS voltage via NUT |
 | `pkg/speedtest` | Internet speed test |
 | `pkg/script` | Runs a user-provided script for unknown commands |
 | `pkg/zte` | ZTE MC888 modem HTTP client (network switch, SMS read) |
-| `pkg/sms` | Incoming-SMS worker (modem → Telegram) + GSM encoding |
-| `pkg/sms/gammu` | Outgoing SMS via a gammu-smsd PostgreSQL outbox |
+| `pkg/sms` | Incoming-SMS worker (modem and gammu inbox → Telegram) + GSM encoding |
+| `pkg/sms/gammu` | Outgoing and incoming SMS via the gammu-smsd PostgreSQL outbox/inbox |
 | `pkg/health` | Pure alert engine: readings, conditions, thresholds, quiet windows, rate limits (no I/O) |
 | `pkg/health/config` | Strict YAML loader and validation for `BOT_HEALTH_CONFIG` (`config/health.example.yaml`) |
 | `pkg/health/notify` | Alert and checker-error delivery (Telegram, SMS, email) |
-| `pkg/health/runner` | Schedules checks, bounds each run, drives the engine |
-| `pkg/health/report` | Renders state and history as Telegram reply text (`/status`) |
-| `pkg/health/store` | SQLite state store that survives restarts |
-| `pkg/health/check/*` | One package per check type (`network`, `ups`, ...); pure, I/O behind small source interfaces |
-| `pkg/host/*` | Thin host adapters (`sysfs`, `lockfile`, ...) behind the check source interfaces |
+| `pkg/health/runner` | 30 s tick: heartbeat, scheduling, bounded runs, fix actions, persistence, drive retire |
+| `pkg/health/report` | Telegram reply and weekly-summary text (`/status`, `/history`, `/temp`, `/disks`, summary) |
+| `pkg/health/store` | SQLite state and history store that survives restarts |
+| `pkg/health/check/*` | One pure package per check type (`network`, `ups`, `disks`, `temps`, `kernel`, `containers`, `httpcheck`, `freshness`, `command`, `modemprobe`); I/O behind small source interfaces |
+| `pkg/host/*` | Thin host adapters behind the check sources: `smartctl`, `nvidia`, `hwmon`, `edac`, `kmsg`, `sysfs`, `docker`, `execprobe`, `lockfile` (heartbeat and state lock) |
 | `pkg/mail` | Plain-text email through an SMTP relay |
+| `pkg/doh` | Minimal RFC 8484 DNS-over-HTTPS resolver (used by the `http` check) |
 
 ---
 
@@ -101,7 +104,8 @@ These are non-negotiable for changes in this repo.
 3. **New third-party dependencies require approval.** State the package, what it
    solves, and why the standard library is insufficient before adding it.
 4. **Commit style.** Plain, capitalized imperative subjects (e.g. `Add gammu SMS
-   builder`). No conventional-commit prefixes. Work is committed directly on `main` in this repo.
+   builder`). No conventional-commit prefixes. Work is committed directly on
+   `main` in this repo.
 5. **`CGO_ENABLED=0`.** The Docker image is distroless and static; do not
    introduce a CGO dependency.
 
@@ -110,11 +114,13 @@ These are non-negotiable for changes in this repo.
 ## Testing coverage
 
 The CI coverage gate (80% floor) measures the packages that can be cleanly
-unit-tested — `task test:coverage`'s `-coverpkg` scope: `pkg/command`,
-`pkg/sms`, `pkg/script`, `cmd/app`, and `pkg/health/...`. Everything that only
-runs against real hardware/services is excluded from the gate: the I/O adapters
-(`pkg/ping`, `pkg/power`, `pkg/speedtest`, the Telegram transport), the ZTE
-device HTTP client (`pkg/zte`), the gammu Postgres repository (`pkg/sms/gammu`), and the fx
-root (`cmd`). Their tests still run in CI (`go test ./...`) — e.g. the
-gammu message-part builder is unit-tested — they just don't count toward the
-coverage gate.
+unit-tested. The scope is the `COVERPKG` variable in `Taskfile.yml`, repeated
+as `-coverpkg` in `.github/workflows/ci.yml` (keep the two in sync):
+`pkg/command/...`, `pkg/sms`, `pkg/script`, `cmd/app` and `pkg/health/...`.
+Everything that only runs against real hardware/services is excluded from the
+gate: the I/O adapters (`pkg/ping`, `pkg/power`, `pkg/speedtest`, the Telegram
+transport), the host adapters (`pkg/host/...`, `pkg/mail`, `pkg/doh`), the ZTE
+device HTTP client (`pkg/zte`), the gammu Postgres repository
+(`pkg/sms/gammu`), and the fx root (`cmd`). Their tests still run in CI
+(`go test ./...`) — e.g. the gammu message-part builder is unit-tested — they
+just don't count toward the coverage gate.

@@ -6,6 +6,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	"github.com/Toshik1978/tgshd/pkg/health"
 )
 
 // problems accumulates validation failures of one entry.
@@ -40,6 +42,17 @@ func (p *problems) nonNegative(key string, d Duration) {
 func (p *problems) positive(key string, d Duration) {
 	if d <= 0 {
 		p.addf("%s %v must be greater than zero", key, d.Duration())
+	}
+}
+
+// checkTimeout validates a per-check timeout: positive and at most
+// health.MaxCheckTimeout, so it ends well inside the runner's run budget and
+// a hung probe is judged Bad instead of abandoned.
+func (p *problems) checkTimeout(key string, d Duration) {
+	p.positive(key, d)
+
+	if d.Duration() > health.MaxCheckTimeout {
+		p.addf("%s %v must be at most %v", key, d.Duration(), health.MaxCheckTimeout)
 	}
 }
 
@@ -181,7 +194,7 @@ func validateModemProbe(m *ModemProbe, p *problems) {
 
 func validateHTTP(h *HTTP, p *problems) {
 	p.common(&h.Common)
-	p.positive("timeout", h.Timeout)
+	p.checkTimeout("timeout", h.Timeout)
 	validateURL(p, "url", h.URL)
 
 	if lo, hi := h.Status[0], h.Status[1]; lo < 100 || hi > 599 || lo > hi {
@@ -226,7 +239,9 @@ func checkKinds() []string {
 func validateURL(p *problems, key, raw string) {
 	u, err := url.Parse(raw)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
-		p.addf("%s %q must be an http or https URL", key, raw)
+		// The value is not repeated: its userinfo or query may be secret, and
+		// entry errors are pushed to Telegram and email.
+		p.addf("%s must be an http or https URL", key)
 	}
 }
 
@@ -239,7 +254,7 @@ func validateFreshness(f *Freshness, p *problems) {
 
 func validateCommand(c *Command, p *problems) {
 	p.common(&c.Common)
-	p.positive("timeout", c.Timeout)
+	p.checkTimeout("timeout", c.Timeout)
 	p.oneOf("report", string(c.Report), string(ReportJournal), string(ReportAlert))
 
 	if len(c.Run) == 0 || c.Run[0] == "" {

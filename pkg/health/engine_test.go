@@ -125,6 +125,27 @@ func TestGoodResetsStreakWithoutMessage(t *testing.T) {
 	}
 }
 
+func TestReadingSinceSetsStreakStart(t *testing.T) {
+	t0 := start()
+	e := NewEngine()
+	since := t0.Add(-15 * time.Minute)
+	r := []Reading{{Key: key, Verdict: Bad, Text: "hot", Since: since}}
+	alerts := e.Apply(t0, "c", iv, 0, r)
+	if len(alerts) != 1 || !alerts[0].StreakStart.Equal(since) {
+		t.Fatalf("got %+v, want streak start %v", alerts, since)
+	}
+	// A later Since never moves an existing streak, and a future one is ignored.
+	r[0].Since = t0.Add(time.Hour)
+	e.Apply(t0.Add(iv), "c", iv, 0, r)
+	if got := e.Conditions()[0].StreakStart; !got.Equal(since) {
+		t.Fatalf("streak start moved to %v", got)
+	}
+	e2 := NewEngine()
+	if got := e2.Apply(t0, "c", iv, 0, r); !got[0].StreakStart.Equal(t0) {
+		t.Fatalf("future Since honoured: %+v", got)
+	}
+}
+
 func TestResolvedCarriesStreakStart(t *testing.T) {
 	t0 := start()
 	e := NewEngine()

@@ -177,6 +177,9 @@ func (e *Engine) bad(out []Alert, now time.Time, check string, interval, thresho
 	c, ok := e.conds[r.Key]
 	if !ok {
 		c = &Condition{Key: r.Key, Check: check, StreakStart: now}
+		if !r.Since.IsZero() && r.Since.Before(now) {
+			c.StreakStart = r.Since
+		}
 		e.conds[r.Key] = c
 	} else if !c.LastReadingAt.IsZero() {
 		elapsed := min(now.Sub(c.LastReadingAt), time.Duration(gapCapFactor*float64(interval)))

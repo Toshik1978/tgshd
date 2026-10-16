@@ -3,6 +3,7 @@ package temps_test
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 
 	"github.com/Toshik1978/tgshd/pkg/health"
@@ -117,7 +118,7 @@ func TestGoneReportedOnce(t *testing.T) {
 			good++
 		}
 	}
-	if ev != 1 || good != 1 {
+	if ev != 1 || good != 0 || !slices.Equal(res.Forget, []string{"temps/acpitz/temp1"}) {
 		t.Fatalf("event=%d good=%d in %+v", ev, good, res.Readings)
 	}
 	if r := c.Run(context.Background()); len(find(r, "temps/acpitz/temp1")) != 0 {
@@ -182,7 +183,7 @@ func TestGPUGone(t *testing.T) {
 		t.Fatalf("got %+v", r)
 	}
 	gpu.gpus = nil
-	if r := find(c.Run(context.Background()), "temps/gpu/1"); len(r) != 2 {
+	if r := find(c.Run(context.Background()), "temps/gpu/1"); len(r) != 1 || r[0].Kind != health.Event {
 		t.Fatalf("got %+v", r)
 	}
 }
@@ -203,19 +204,24 @@ func TestBadSensorDisappears(t *testing.T) {
 	c := temps.New(hw, nil, limits())
 	c.Run(context.Background())
 	hw.sensors = nil
-	var sawGood, sawEvent bool
-	for _, r := range c.Run(context.Background()).Readings {
-		if r.Kind == health.Event {
-			sawEvent = r.Text == "acpitz temp1 gone"
-		} else if r.Verdict == health.Good {
-			sawGood = true
-			if r.Text != "" {
-				t.Errorf("resolving reading text = %q, want empty", r.Text)
-			}
+	res := c.Run(context.Background())
+	var events int
+	for _, r := range res.Readings {
+		if r.Kind != health.Event {
+			t.Errorf("unexpected state reading %+v, want only the gone event", r)
+
+			continue
+		}
+		events++
+		if r.Text != "acpitz temp1 gone" {
+			t.Errorf("event text = %q", r.Text)
 		}
 	}
-	if !sawGood || !sawEvent {
-		t.Errorf("good=%v event=%v", sawGood, sawEvent)
+	if events != 1 {
+		t.Errorf("events = %d, want 1", events)
+	}
+	if len(res.Forget) != 1 || res.Forget[0] != "temps/acpitz/temp1" {
+		t.Errorf("Forget = %q, want the sensor key", res.Forget)
 	}
 }
 
@@ -237,8 +243,8 @@ func TestExportRestore(t *testing.T) {
 	}
 	res := c2.Run(context.Background())
 	for _, k := range []string{"temps/acpitz/temp1", "temps/gpu/0"} {
-		if r := find(res, k); len(r) != 2 {
-			t.Errorf("%s = %+v, want good + gone event", k, r)
+		if r := find(res, k); len(r) != 1 || r[0].Kind != health.Event {
+			t.Errorf("%s = %+v, want one gone event", k, r)
 		}
 	}
 	if err := c2.Restore(""); err != nil {

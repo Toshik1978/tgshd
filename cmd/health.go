@@ -70,14 +70,23 @@ type healthSetup struct {
 	Config *hcfg.Config
 	// Host prefixes every pushed health message.
 	Host string
-	// Store is nil when the state database cannot be opened (memory only).
-	// Under check --once it is the read-only view, nil when there is none.
-	Store *store.Store
+	// Store is the daemon's state database, opened on first use and retried
+	// on each later use while it cannot be opened; nil without the instance
+	// lock (memory only). Under check --once it is the read-only view, nil
+	// when there is none.
+	Store stateStore
 	// Errors are raised as checker errors at start.
 	Errors []startError
 	// OneShot is set by check --once: checks only report what they would
 	// fix and never act.
 	OneShot bool
+}
+
+// stateStore is the state database as the runner and the reports use it;
+// *store.Deferred (the daemon) and *store.Store (check --once) satisfy it.
+type stateStore interface {
+	runner.Store
+	reportStore
 }
 
 // healthParams are the dependencies of the health runner.
@@ -200,23 +209,27 @@ func claimState(lc fx.Lifecycle, logger *zap.Logger, hs *healthSetup, dir string
 		return true
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), storeOpenTimeout)
-	defer cancel()
-
 	// The store's *sql.DB keeps its single connection for the daemon's life;
 	// OpenReadOnly (the CLI) relies on that, so no connection lifetime is set.
-	st, err := store.Open(ctx, dir)
-	if err != nil {
-		hs.Errors = append(hs.Errors, startError{
-			"health/store/open", "cannot open the state database, running from memory: " + err.Error(),
-		})
-	} else {
-		hs.Store = st
+	open := func(ctx context.Context) (*store.Store, error) {
+		ctx, cancel := context.WithTimeout(ctx, storeOpenTimeout)
+		defer cancel()
+
+		return store.Open(ctx, dir)
 	}
+	st, err := open(context.Background())
+	if err != nil {
+		// The runner retries the open with its Load each tick and raises the
+		// failure as a checker error; it runs from memory meanwhile.
+		logger.Warn("Cannot open the state database yet; retrying every tick",
+			zap.String("state_dir", dir), zap.Error(err))
+	}
+	deferred := store.NewDeferred(st, open)
+	hs.Store = deferred
 
 	lc.Append(fx.Hook{
 		OnStop: func(context.Context) error {
-			return closeState(st, inst)
+			return closeState(deferred, inst)
 		},
 	})
 
@@ -224,7 +237,7 @@ func claimState(lc fx.Lifecycle, logger *zap.Logger, hs *healthSetup, dir string
 }
 
 // closeState closes the store, then releases the instance lock.
-func closeState(st *store.Store, inst *lockfile.Instance) error {
+func closeState(st *store.Deferred, inst *lockfile.Instance) error {
 	var errs []error
 	if st != nil {
 		errs = append(errs, st.Close())

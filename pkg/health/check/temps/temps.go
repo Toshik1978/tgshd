@@ -223,9 +223,8 @@ func (c *Check) apply(res *health.CheckResult, src source, ok bool, obs []observ
 			continue
 		}
 		res.Readings = append(res.Readings,
-			health.Reading{Key: key, Verdict: health.Good, Kind: health.State},
-			health.Reading{Key: key, Verdict: health.Good, Text: name + " gone", Kind: health.Event},
-		)
+			health.Reading{Key: key, Verdict: health.Good, Text: name + " gone", Kind: health.Event})
+		res.Forget = append(res.Forget, key)
 	}
 	c.seen[src] = cur
 }

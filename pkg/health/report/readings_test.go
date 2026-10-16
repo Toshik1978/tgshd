@@ -36,9 +36,9 @@ func TestTemps(t *testing.T) {
 func TestDisks(t *testing.T) {
 	const s = "TEST0000000001"
 	stats := []store.MetricStats{
-		{Metric: "drive." + s + ".wear", Current: 7, HasCurrent: true},
+		{Metric: "drive." + s + ".wear", Current: 7, HasCurrent: true, Min: 3, Avg: 5.4, Max: 7, N: 10},
 		{Metric: "drive." + s + ".written_bytes", Current: 5.5e12, Min: 5.0e12, HasCurrent: true},
-		{Metric: "temp.drive." + s, Current: 38.2, HasCurrent: true},
+		{Metric: "temp.drive." + s, Current: 38.2, HasCurrent: true, Min: 35, Avg: 37.6, Max: 44, N: 10},
 	}
 	cases := []struct {
 		name   string
@@ -53,7 +53,13 @@ func TestDisks(t *testing.T) {
 				SparePct: new(float64(100)), SelfTestAge: new(50 * time.Hour),
 			}},
 			stats,
-			"nvme Example &lt;NVMe&gt; SSD …0001: health OK, wear 7%, spare 100%, temp 38°C, written 7d 500 GB, self-test 2d ago",
+			"nvme Example &lt;NVMe&gt; SSD …0001: health OK, wear 7% (7d 3/5/7), spare 100%, temp 38°C (7d 35/38/44), written 7d 500 GB, self-test 2d ago",
+		},
+		{
+			"stats only",
+			[]Drive{{Bus: "sata", Model: "M", Serial: "XXXX1234", HealthOK: true}},
+			[]store.MetricStats{{Metric: "temp.drive.XXXX1234", Min: 35, Avg: 38, Max: 44, N: 3}},
+			"sata M …1234: health OK, wear n/a, spare n/a, temp n/a (7d 35/38/44), written 7d n/a, self-test n/a",
 		},
 		{
 			"unknowns",

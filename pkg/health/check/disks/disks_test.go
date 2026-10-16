@@ -7,6 +7,7 @@ import (
 	"math"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -33,16 +34,26 @@ type fakeSource struct {
 	nodes     []string
 	drivesErr error
 	runs      map[string]output
-	calls     []string
+	// hook, when set, runs first in Run (drives are read concurrently).
+	hook  func(ctx context.Context, node string) error
+	mu    sync.Mutex
+	calls []string
 }
 
 func (f *fakeSource) Drives() ([]string, error) {
 	return f.nodes, f.drivesErr
 }
 
-func (f *fakeSource) Run(_ context.Context, node string) ([]byte, int, error) {
+func (f *fakeSource) Run(ctx context.Context, node string) ([]byte, int, error) {
+	f.mu.Lock()
 	f.calls = append(f.calls, node)
 	o := f.runs[node]
+	f.mu.Unlock()
+	if f.hook != nil {
+		if err := f.hook(ctx, node); err != nil {
+			return nil, 0, err
+		}
+	}
 
 	return o.stdout, o.status, o.err
 }
@@ -642,10 +653,14 @@ func TestTemperatureThreshold(t *testing.T) {
 		{65, 15 * time.Minute, health.Good}, // cooled down
 		{72, 15 * time.Minute, notJudged},   // a new streak starts from zero
 	}
+	var overSince time.Time
 	for i, s := range steps {
 		clk.add(s.advance)
 		d.temp = s.temp
 		src.set("nvme0n1", d)
+		if i == 0 {
+			overSince = clk.now()
+		}
 		res := c.Run(t.Context())
 		if s.want == notJudged {
 			if r, ok := find(res, key); ok {
@@ -657,8 +672,39 @@ func TestTemperatureThreshold(t *testing.T) {
 
 			continue
 		}
-		if r := mustFind(t, res, key); r.Verdict != s.want {
+		r := mustFind(t, res, key)
+		if r.Verdict != s.want {
 			t.Errorf("step %d: %+v, want %v", i, r, s.want)
+		}
+		if i == 1 && !r.Since.Equal(overSince) {
+			t.Errorf("step %d: Since = %v, want the first over-limit run %v", i, r.Since, overSince)
+		}
+	}
+}
+
+// TestTemperatureIsPerDrive covers two same-model NVMe drives (identical
+// sensor names) of which only one overheats: only its serial is Bad.
+func TestTemperatureIsPerDrive(t *testing.T) {
+	const serialHot, serialCool = "TEST0000000003", "TEST0000000004"
+	src := &fakeSource{}
+	hot, cool := nvme(serialHot), nvme(serialCool)
+	hot.temp, cool.temp = 75, 45
+	src.set("nvme0n1", hot)
+	src.set("nvme1n1", cool)
+
+	res := newLoaded(src, disksCfg(), tempsCfg(0), newClock().now).Run(t.Context())
+	if res.Err != nil {
+		t.Fatalf("Run: %v", res.Err)
+	}
+	if r := mustFind(t, res, "disks/"+serialHot+"/temp"); r.Verdict != health.Bad {
+		t.Errorf("hot drive = %+v, want Bad", r)
+	}
+	if r := mustFind(t, res, "disks/"+serialCool+"/temp"); r.Verdict != health.Good {
+		t.Errorf("cool drive = %+v, want Good", r)
+	}
+	for _, r := range res.Readings {
+		if r.Verdict == health.Bad && r.Key != "disks/"+serialHot+"/temp" {
+			t.Errorf("unexpected Bad reading %+v", r)
 		}
 	}
 }

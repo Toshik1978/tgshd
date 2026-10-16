@@ -480,3 +480,114 @@ func TestReportOnlyJudgesTheRestoredState(t *testing.T) {
 		t.Fatalf("returned, again: %+v ok=%v", r, ok)
 	}
 }
+
+// returnedProbe runs one full round trip, reports its Good and leaves the
+// clock a minute after the return.
+func returnedProbe(t *testing.T, c *clock) (*Probe, *fakeSender) {
+	t.Helper()
+
+	s := &fakeSender{}
+	p := newProbe(t, s, c)
+	p.Run(t.Context())
+
+	c.now = sunday(11, 2)
+	p.Run(t.Context())
+	c.add(time.Minute)
+
+	if !p.Match(phone, s.texts[0], c.now) {
+		t.Fatal("probe did not match")
+	}
+
+	if r, ok := only(t, p.Run(t.Context())); !ok || r.Verdict != health.Good {
+		t.Fatalf("want Good, got %+v", r)
+	}
+
+	return p, s
+}
+
+func restarted(t *testing.T, p *Probe, s Sender, c *clock) *Probe {
+	t.Helper()
+
+	data, err := p.Export()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	q := newProbe(t, &fakeSender{}, c)
+	q.sender = s
+
+	if err := q.Restore(data); err != nil {
+		t.Fatal(err)
+	}
+
+	return q
+}
+
+func TestRestartAfterSendFailureDoesNotResolve(t *testing.T) {
+	c := wednesday()
+	p, _ := returnedProbe(t, c)
+
+	failing := &fakeSender{err: errors.New("outbox down")}
+	p.sender = failing
+	c.now = sunday(11, 2).AddDate(0, 0, 7)
+
+	if r, ok := only(t, p.Run(t.Context())); !ok || r.Verdict != health.Bad {
+		t.Fatalf("want Bad, got %+v", r)
+	}
+
+	q := restarted(t, p, failing, c)
+
+	c.add(time.Minute)
+
+	if r, ok := only(t, q.Run(t.Context())); ok {
+		t.Fatalf("restart resolved the open problem: %+v", r)
+	}
+
+	// A new probe that returns clears the problem.
+	good := &fakeSender{}
+	q.sender = good
+	c.now = sunday(11, 2).AddDate(0, 0, 14)
+	q.Run(t.Context())
+	c.add(time.Minute)
+
+	if !q.Match(phone, good.texts[0], c.now) {
+		t.Fatal("new probe did not match")
+	}
+
+	if r, ok := only(t, q.Run(t.Context())); !ok || r.Verdict != health.Good {
+		t.Fatalf("want Good, got %+v", r)
+	}
+}
+
+func TestRestartAfterTimeoutDoesNotResolve(t *testing.T) {
+	c := wednesday()
+	p, s := returnedProbe(t, c)
+
+	c.now = sunday(11, 2).AddDate(0, 0, 7)
+	p.Run(t.Context())
+	c.add(time.Hour)
+
+	if r, ok := only(t, p.Run(t.Context())); !ok || r.Verdict != health.Bad {
+		t.Fatalf("want Bad, got %+v", r)
+	}
+
+	q := restarted(t, p, s, c)
+
+	c.add(time.Minute)
+
+	if r, ok := only(t, q.Run(t.Context())); ok && r.Verdict == health.Good {
+		t.Fatalf("restart resolved the open problem: %+v", r)
+	}
+}
+
+func TestRestartAfterGoodDoesNotRepeatIt(t *testing.T) {
+	c := wednesday()
+	p, s := returnedProbe(t, c)
+	q := restarted(t, p, s, c)
+
+	c.add(time.Minute)
+
+	if r, ok := only(t, q.Run(t.Context())); ok {
+		t.Fatalf("Good repeated after restart: %+v", r)
+	}
+}

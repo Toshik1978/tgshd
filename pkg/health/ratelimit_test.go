@@ -33,6 +33,21 @@ func TestRateMarksAllow(t *testing.T) {
 	}
 }
 
+func TestRateMarksRevert(t *testing.T) {
+	t0 := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	m := health.NewRateMarks()
+	m.Allow("disk", "email", t0, time.Hour)
+
+	m.Revert("disk", "email", t0.Add(time.Minute)) // Not the mark taken: kept.
+	if m.Allow("disk", "email", t0.Add(2*time.Minute), time.Hour) {
+		t.Fatal("reverting a different mark must keep the window")
+	}
+	m.Revert("disk", "email", t0)
+	if !m.Allow("disk", "email", t0.Add(2*time.Minute), time.Hour) {
+		t.Fatal("a reverted mark must not limit the next send")
+	}
+}
+
 func TestRateMarksKeyChannelNoCollision(t *testing.T) {
 	now := time.Now()
 	m := health.NewRateMarks()

@@ -76,8 +76,8 @@ func (t *dohTrace) finish(err error) {
 }
 
 // failed returns the error of a failed lookup, or an error for a lookup that
-// has not finished within timeout, or nil.
-func (t *dohTrace) failed(timeout time.Duration) error {
+// has not finished in time (within says when: "within 15s"), or nil.
+func (t *dohTrace) failed(within string) error {
 	t.mu.Lock()
 	defer t.mu.Unlock()
 
@@ -85,7 +85,7 @@ func (t *dohTrace) failed(timeout time.Duration) error {
 	case t.err != nil:
 		return t.err
 	case t.pending > 0:
-		return &resolveError{host: t.host, err: fmt.Errorf("no answer within %s", timeout)}
+		return &resolveError{host: t.host, err: errors.New("no answer " + within)}
 	default:
 		return nil
 	}

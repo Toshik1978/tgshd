@@ -173,6 +173,26 @@ func TestHeartbeatTickPreservesAndExpiresPlanned(t *testing.T) {
 	}
 }
 
+func TestSetPlannedOnAFreshFileWritesTheCurrentTime(t *testing.T) {
+	now := time.Unix(1_000_000, 0)
+
+	missing := filepath.Join(t.TempDir(), "heartbeat")
+	corrupt := filepath.Join(t.TempDir(), "heartbeat")
+	if err := os.WriteFile(corrupt, []byte("garbage\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for name, path := range map[string]string{"missing": missing, "corrupt": corrupt} {
+		if err := lockfile.SetPlanned(path, now, 600); err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		hb, err := lockfile.ReadHeartbeat(path)
+		want := lockfile.Heartbeat{TS: now.Unix(), PlannedUntil: now.Unix() + 600}
+		if err != nil || hb != want {
+			t.Fatalf("%s: got %+v %v, want %+v", name, hb, err, want)
+		}
+	}
+}
+
 func TestSetPlannedRange(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "heartbeat")
 	for _, s := range []int{-1, 86401} {
@@ -203,6 +223,45 @@ func TestHeartbeatFileModesAndNoTemp(t *testing.T) {
 	for _, e := range entries {
 		if e.Name() != "heartbeat" && e.Name() != "heartbeat.lock" {
 			t.Fatalf("stray file %s", e.Name())
+		}
+	}
+}
+
+// TestHeartbeatReadErrorKeepsThePlannedWindow: a heartbeat that cannot be
+// read (not missing, not corrupt) is not rewritten, so a live planned_until
+// is never dropped; the error is returned for the caller to report.
+func TestHeartbeatReadErrorKeepsThePlannedWindow(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a file without read permission")
+	}
+	path := filepath.Join(t.TempDir(), "heartbeat")
+	if err := os.WriteFile(path, []byte("ts=10 planned_until=1000\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(path, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := lockfile.WriteTick(path, time.Unix(50, 0)); err == nil {
+		t.Fatal("WriteTick must report an unreadable heartbeat")
+	}
+	if err := lockfile.SetPlanned(path, time.Unix(50, 0), 0); err == nil {
+		t.Fatal("SetPlanned must report an unreadable heartbeat")
+	}
+
+	if err := os.Chmod(path, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	hb, err := lockfile.ReadHeartbeat(path)
+	if err != nil || hb.TS != 10 || hb.PlannedUntil != 1000 {
+		t.Fatalf("heartbeat = %+v, %v; want it untouched", hb, err)
+	}
+}
+
+func TestParseErrorsAreCorrupt(t *testing.T) {
+	for _, s := range []string{"garbage", "ts=1", "ts=x planned_until=0"} {
+		if _, err := lockfile.ParseHeartbeat(s); !errors.Is(err, lockfile.ErrCorrupt) {
+			t.Errorf("%q: err = %v, want ErrCorrupt", s, err)
 		}
 	}
 }

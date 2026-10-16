@@ -102,8 +102,23 @@ func TestRunReturnsOutputAndExitStatus(t *testing.T) {
 	if exit != 8 {
 		t.Errorf("exit = %d, want 8", exit)
 	}
-	if want := "--json=c -a /dev/sda\n"; string(out) != want {
+	// -n standby,3: a sleeping drive is not spun up and gets its own status.
+	if want := "--json=c -n standby,3 -a /dev/sda\n"; string(out) != want {
 		t.Errorf("out = %q, want %q", out, want)
+	}
+}
+
+func TestRunStandbyIsAStatusNotAnError(t *testing.T) {
+	bin := script(t, `echo '{"smartctl":{"exit_status":3}}'; exit 3`)
+	_, exit, err := smartctl.New("", bin, 5*time.Second).Run(context.Background(), "sda")
+	if err != nil || exit != smartctl.StandbyStatus {
+		t.Fatalf("got %d, %v; want status %d", exit, err, smartctl.StandbyStatus)
+	}
+}
+
+func TestDefaultTimeoutIsWellUnderTheRunBudget(t *testing.T) {
+	if smartctl.DefaultTimeout > 10*time.Second {
+		t.Fatalf("DefaultTimeout = %v, want at most 10s per drive", smartctl.DefaultTimeout)
 	}
 }
 

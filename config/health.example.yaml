@@ -63,7 +63,7 @@ http:
     url: https://app.example.org/health
     interval: 10m
     threshold: 10m
-    timeout: 15s
+    timeout: 15s                            # at most 20s, well inside the 40 s run budget
     status: [200, 399]
     connect_to: 192.0.2.5                   # optional: dial this address, keep URL host for TLS/Host
     # doh: https://dns.example.org/dns-query  # optional, mutually exclusive with connect_to
@@ -82,7 +82,7 @@ command:
   - name: port-guard
     run: [ "/usr/local/bin/probe-port" ]    # argv, no shell
     interval: 5m
-    timeout: 60s
+    timeout: 20s                            # at most 20s; the probe and its fix each get it
     threshold: 0
     fix:                                    # optional
       after: 2                              # consecutive failures

@@ -6,11 +6,13 @@ package notify
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"html"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf16"
 )
 
 // Mode selects the delivery channel of a message.
@@ -48,8 +50,9 @@ const (
 	// CheckNetwork is the check whose PROBLEM goes by SMS, since Telegram is
 	// unreachable while the network is down.
 	CheckNetwork = "network"
-	// MaxBodyRunes is the Telegram limit for a message after the host prefix.
-	MaxBodyRunes = 4096
+	// MaxMessageUnits is the Telegram message length limit, counted in UTF-16
+	// code units, for the whole HTML message including the host prefix.
+	MaxMessageUnits = 4096
 	// MaxQueue bounds the retry queue; the oldest messages are dropped first.
 	MaxQueue = 1000
 
@@ -113,6 +116,9 @@ type Notifier struct {
 	nextID   int64
 	offline  bool
 	degraded bool
+	// inflight are the queued messages whose abandoned send is still in
+	// progress, by ID.
+	inflight map[int64]*flight
 }
 
 // New creates a Notifier.
@@ -125,7 +131,7 @@ func New(opts Options) *Notifier {
 		opts.Now = time.Now
 	}
 
-	return &Notifier{opts: opts, nextID: 1}
+	return &Notifier{opts: opts, nextID: 1, inflight: map[int64]*flight{}}
 }
 
 // SetOffline marks the outside as known down: Telegram messages are queued
@@ -165,8 +171,9 @@ func (n *Notifier) Notify(ctx context.Context, msg Message) error {
 }
 
 // Flush retries queued messages in order, per channel. It stops a channel at
-// its first failure so ordering is kept, and does nothing for Telegram while
-// offline.
+// its first failure, or at a message whose abandoned send is still in
+// progress, so ordering is kept and nothing is sent twice; it does nothing
+// for Telegram while offline.
 func (n *Notifier) Flush(ctx context.Context) {
 	n.mu.Lock()
 	pending := append([]QueuedMessage(nil), n.queue...)
@@ -187,10 +194,17 @@ func (n *Notifier) Flush(ctx context.Context) {
 			continue
 		}
 
+		if n.inFlight(item.ID) {
+			blocked[item.Channel] = true
+
+			continue
+		}
+
 		if err := n.send(ctx, item.Channel, item.Text); err != nil {
 			blocked[item.Channel] = true
 
 			n.bumpAttempts(item.ID)
+			n.track(item.ID, err)
 
 			continue
 		}
@@ -212,6 +226,7 @@ func (n *Notifier) Restore(items []QueuedMessage) {
 	n.mu.Lock()
 
 	n.queue = append([]QueuedMessage(nil), items...)
+	n.inflight = map[int64]*flight{}
 
 	for _, item := range items {
 		n.nextID = max(n.nextID, item.ID+1)
@@ -237,11 +252,14 @@ func (n *Notifier) Merge(stored []QueuedMessage) {
 	}
 
 	merged := append([]QueuedMessage(nil), stored...)
+	ids := make(map[int64]int64, len(n.queue))
 	for _, item := range n.queue {
 		top++
+		ids[item.ID] = top
 		item.ID = top
 		merged = append(merged, item)
 	}
+	n.renumberLocked(ids)
 
 	n.queue = merged
 	n.nextID = max(n.nextID, top+1)
@@ -322,13 +340,19 @@ func (n *Notifier) degrade(mode *Mode) func(key, text string) {
 
 func (n *Notifier) sendSMS(ctx context.Context, plain string) {
 	if err := n.opts.SMS.Send(ctx, plain); err != nil {
-		n.enqueue(ChannelSMS, plain)
+		n.enqueueTracked(ChannelSMS, plain, err)
 	}
 }
 
 func (n *Notifier) sendTelegram(ctx context.Context, rich string, offline bool) {
-	if offline || n.opts.Telegram == nil || n.opts.Telegram.Send(ctx, rich) != nil {
+	if offline || n.opts.Telegram == nil {
 		n.enqueue(ChannelTelegram, rich)
+
+		return
+	}
+
+	if err := n.opts.Telegram.Send(ctx, rich); err != nil {
+		n.enqueueTracked(ChannelTelegram, rich, err)
 	}
 }
 
@@ -339,25 +363,48 @@ func (n *Notifier) sendTelegramOrSMS(ctx context.Context, plain, rich string, of
 		return
 	}
 
-	if !offline && n.opts.Telegram != nil && n.opts.Telegram.Send(ctx, rich) == nil {
-		return
+	var tlgErr error
+	if !offline && n.opts.Telegram != nil {
+		if tlgErr = n.opts.Telegram.Send(ctx, rich); tlgErr == nil {
+			return
+		}
+		// Past the tick's deadline the SMS lane refuses too: queue the
+		// Telegram copy. A busy lane (an abandoned Telegram send still hangs,
+		// a sign Telegram is down) falls back to SMS like a failure.
+		if errors.Is(tlgErr, ErrPastDeadline) {
+			n.enqueue(ChannelTelegram, rich)
+
+			return
+		}
 	}
 
 	if err := n.opts.SMS.Send(ctx, plain); err != nil {
-		n.enqueue(ChannelTelegram, rich)
+		// The queued Telegram copy follows an abandoned Telegram send.
+		n.enqueueTracked(ChannelTelegram, rich, tlgErr)
 	}
 }
 
+// enqueue queues a message.
 func (n *Notifier) enqueue(channel, text string) {
+	n.enqueueTracked(channel, text, nil)
+}
+
+// enqueueTracked queues a message and, when err says its send was abandoned
+// while still in progress, marks it in flight in the same lock step: a Merge
+// cannot renumber the message in between and leave the mark on a stale ID.
+func (n *Notifier) enqueueTracked(channel, text string, err error) {
 	n.mu.Lock()
 
+	id := n.nextID
 	n.queue = append(n.queue, QueuedMessage{
-		ID:        n.nextID,
+		ID:        id,
 		CreatedAt: n.opts.Now(),
 		Channel:   channel,
 		Text:      text,
 	})
 	n.nextID++
+
+	n.trackLocked(id, err)
 
 	dropped := n.trim()
 	n.mu.Unlock()
@@ -393,6 +440,11 @@ func (n *Notifier) bumpAttempts(id int64) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
+	n.bumpLocked(id)
+}
+
+// bumpLocked counts a failed attempt; the caller holds the lock.
+func (n *Notifier) bumpLocked(id int64) {
 	for i := range n.queue {
 		if n.queue[i].ID == id {
 			n.queue[i].Attempts++
@@ -404,6 +456,11 @@ func (n *Notifier) remove(id int64) {
 	n.mu.Lock()
 	defer n.mu.Unlock()
 
+	n.removeLocked(id)
+}
+
+// removeLocked drops a message from the queue; the caller holds the lock.
+func (n *Notifier) removeLocked(id int64) {
 	for i := range n.queue {
 		if n.queue[i].ID == id {
 			n.queue = append(n.queue[:i], n.queue[i+1:]...)
@@ -414,7 +471,8 @@ func (n *Notifier) remove(id int64) {
 }
 
 // render returns the plain (SMS) and HTML (Telegram) forms of a message, both
-// with the host prefix and a body of at most MaxBodyRunes.
+// with the host prefix. The HTML form, as sent, is at most MaxMessageUnits
+// UTF-16 code units; the body is truncated with an ellipsis if needed.
 func (n *Notifier) render(msg Message) (plain, rich string) {
 	var label, suffix string
 
@@ -422,34 +480,69 @@ func (n *Notifier) render(msg Message) (plain, rich string) {
 	case KindProblem:
 		label = "PROBLEM: "
 		if !msg.Since.IsZero() {
-			suffix = " (since " + msg.Since.Format("15:04") + ")"
+			suffix = " (since " + n.sinceText(msg.Since) + ")"
 		}
 	case KindResolved:
 		label = "RESOLVED: "
 	case KindEvent:
 	}
 
-	text := truncate(msg.Text, MaxBodyRunes-len([]rune(label))-len([]rune(suffix)))
 	prefix := n.opts.Host + ": "
-	richPrefix := html.EscapeString(prefix)
+	richPrefix := html.EscapeString(prefix + label)
+	richSuffix := html.EscapeString(suffix)
+	budget := MaxMessageUnits - utf16Len(richPrefix) - utf16Len(richSuffix)
+	text := truncate(strings.ToValidUTF8(msg.Text, "\uFFFD"), budget)
 
-	var b strings.Builder
-
-	b.WriteString(prefix + label)
-	b.WriteString(text)
-	b.WriteString(suffix)
-
-	plain = b.String()
-	rich = richPrefix + html.EscapeString(label+text+suffix)
+	plain = prefix + label + text + suffix
+	rich = richPrefix + html.EscapeString(text) + richSuffix
 
 	return plain, rich
 }
 
+// sinceText renders the start of a streak as HH:MM, with the date ("02 Jan
+// 15:04") when it began on an earlier day than now; days are taken in since's
+// own zone (the host's).
+func (n *Notifier) sinceText(since time.Time) string {
+	sy, sm, sd := since.Date()
+	ny, nm, nd := n.opts.Now().In(since.Location()).Date()
+	if sy == ny && sm == nm && sd == nd {
+		return since.Format("15:04")
+	}
+
+	return since.Format("02 Jan 15:04")
+}
+
+// utf16Len returns the length of s in UTF-16 code units, the unit Telegram
+// measures message length in.
+func utf16Len(s string) int {
+	n := 0
+	for _, r := range s {
+		n += utf16.RuneLen(r)
+	}
+
+	return n
+}
+
+// truncate shortens s so that its HTML-escaped form is at most limit UTF-16
+// code units, ending in an ellipsis when it had to cut. It cuts between
+// runes, so neither a surrogate pair nor an HTML entity is split.
 func truncate(s string, limit int) string {
-	runes := []rune(s)
-	if limit < 1 || len(runes) <= limit {
+	if limit < 1 {
+		return ellipsis
+	}
+
+	if utf16Len(html.EscapeString(s)) <= limit {
 		return s
 	}
 
-	return string(runes[:limit-1]) + ellipsis
+	used := utf16Len(ellipsis)
+
+	for i, r := range s {
+		used += utf16Len(html.EscapeString(string(r)))
+		if used > limit {
+			return s[:i] + ellipsis
+		}
+	}
+
+	return s
 }

@@ -150,6 +150,7 @@ type Check struct {
 	classes []class
 
 	timeout time.Duration
+	replay  bool
 
 	mu      sync.Mutex
 	st      state
@@ -167,6 +168,14 @@ type Option func(*Check)
 // WithTimeout bounds every call into a source adapter (default 10 s).
 func WithTimeout(d time.Duration) Option {
 	return func(c *Check) { c.timeout = d }
+}
+
+// WithReplay makes the check judge the records it was handed as a whole, as a
+// one-shot report: the stored cursor and episodes are ignored, nothing is
+// committed to the state, and a fresh install is not silenced. Every class
+// with matching records reads as found.
+func WithReplay() Option {
+	return func(c *Check) { c.replay = true }
 }
 
 // New returns a kernel check. now is the clock; marks rate-limits the "still
@@ -243,7 +252,12 @@ func (c *Check) Run(ctx context.Context) health.CheckResult {
 	}
 
 	now := c.now()
-	readings := c.kernelReadings(now)
+	var readings []health.Reading
+	if c.replay {
+		readings = c.replayReadings(c.takeInbox())
+	} else {
+		readings = c.kernelReadings(now)
+	}
 
 	edacReadings, err := c.checkEDAC(ctx)
 	readings = append(readings, edacReadings...)
@@ -360,6 +374,39 @@ func (c *Check) kernelReadings(now time.Time) []health.Reading {
 	return c.drainRecords(now, agg)
 }
 
+// takeInbox hands out the buffered entries and empties the buffer.
+func (c *Check) takeInbox() []entry {
+	inbox := c.inbox
+	c.inbox = nil
+
+	return inbox
+}
+
+// replayReadings reports every class the records match, once each, leaving the
+// cursor and the episodes alone.
+func (c *Check) replayReadings(inbox []entry) []health.Reading {
+	agg := make(map[string]*pending)
+	for _, e := range inbox {
+		p := agg[e.key]
+		if p == nil {
+			p = &pending{}
+			agg[e.key] = p
+		}
+		p.count++
+		p.sample = e.msg
+	}
+
+	var out []health.Reading
+	for _, cl := range c.classes {
+		if p := agg[cl.key]; p != nil {
+			out = append(out, event(cl.key, fmt.Sprintf("Kernel: %s found in the kernel log (%s). Last: %s",
+				cl.label, records(p.count), clip(p.sample))))
+		}
+	}
+
+	return out
+}
+
 func (c *Check) drainRecords(now time.Time, agg map[string]*pending) []health.Reading {
 	var out []health.Reading
 	for _, cl := range c.classes {
@@ -368,25 +415,42 @@ func (c *Check) drainRecords(now time.Time, agg map[string]*pending) []health.Re
 			continue
 		}
 
-		ep, ok := c.st.Episodes[cl.key]
-		if !ok || now.Sub(ep.LastAt) >= quietAfter {
-			c.marks.Allow(cl.key, channel, now, stillWindow)
-			c.st.Episodes[cl.key] = Episode{FirstAt: now, LastAt: now, LastStillAt: now, Count: p.count}
-			out = append(out, event(cl.key, fmt.Sprintf("Kernel: %s started (%s). Last: %s",
-				cl.label, records(p.count), clip(p.sample))))
-
-			continue
-		}
-
-		ep.LastAt = now
-		ep.Count += p.count
-		if now.Sub(ep.LastStillAt) >= stillWindow && c.marks.Allow(cl.key, channel, now, stillWindow) {
-			ep.LastStillAt = now
-			out = append(out, event(cl.key, fmt.Sprintf("Kernel: %s still happening (%s since %s). Last: %s",
-				cl.label, records(ep.Count), ep.FirstAt.UTC().Format(time.RFC3339), clip(p.sample))))
-		}
-		c.st.Episodes[cl.key] = ep
+		out = append(out, c.episode(cl.key, now, p.count,
+			func() string {
+				return fmt.Sprintf("Kernel: %s started (%s). Last: %s", cl.label, records(p.count), clip(p.sample))
+			},
+			func(ep Episode) string {
+				return fmt.Sprintf("Kernel: %s still happening (%s since %s). Last: %s",
+					cl.label, records(ep.Count), ep.FirstAt.UTC().Format(time.RFC3339), clip(p.sample))
+			})...)
 	}
+
+	return out
+}
+
+// episode applies the shared episode rules to n new occurrences under key: one
+// message when an episode starts (none yet, or the last occurrence is at least
+// quietAfter old), then at most one "still happening" per stillWindow. The
+// caller holds c.mu.
+func (c *Check) episode(
+	key string, now time.Time, n int, start func() string, still func(Episode) string,
+) []health.Reading {
+	ep, ok := c.st.Episodes[key]
+	if !ok || now.Sub(ep.LastAt) >= quietAfter {
+		c.marks.Allow(key, channel, now, stillWindow)
+		c.st.Episodes[key] = Episode{FirstAt: now, LastAt: now, LastStillAt: now, Count: n}
+
+		return []health.Reading{event(key, start())}
+	}
+
+	var out []health.Reading
+	ep.LastAt = now
+	ep.Count += n
+	if now.Sub(ep.LastStillAt) >= stillWindow && c.marks.Allow(key, channel, now, stillWindow) {
+		ep.LastStillAt = now
+		out = append(out, event(key, still(ep)))
+	}
+	c.st.Episodes[key] = ep
 
 	return out
 }
@@ -404,27 +468,38 @@ func (c *Check) checkEDAC(ctx context.Context) ([]health.Reading, error) {
 		return nil, fmt.Errorf("read EDAC counters: %w", err)
 	}
 
+	now := c.now()
+
 	var out []health.Reading
 	for _, ctrl := range ctrls {
 		prev, known := c.st.EDAC[ctrl.Controller]
 		if known {
-			if ctrl.Correctable > prev.Correctable {
-				out = append(out, event("kernel/edac/"+ctrl.Controller+"/ce", fmt.Sprintf(
-					"Kernel: EDAC controller %s corrected memory errors rose from %d to %d",
-					ctrl.Controller, prev.Correctable, ctrl.Correctable,
-				)))
-			}
-			if ctrl.Uncorrectable > prev.Uncorrectable {
-				out = append(out, event("kernel/edac/"+ctrl.Controller+"/ue", fmt.Sprintf(
-					"Kernel: EDAC controller %s uncorrected memory errors rose from %d to %d",
-					ctrl.Controller, prev.Uncorrectable, ctrl.Uncorrectable,
-				)))
-			}
+			id, cur := ctrl.Controller, ctrl
+			out = append(out, c.edacRise(now, id, "ce", "corrected", prev.Correctable, cur.Correctable)...)
+			out = append(out, c.edacRise(now, id, "ue", "uncorrected", prev.Uncorrectable, cur.Uncorrectable)...)
 		}
 		c.st.EDAC[ctrl.Controller] = ctrl
 	}
 
 	return out, nil
+}
+
+// edacRise runs one counter of one controller through the episode rules. A
+// counter that did not rise (or was reset) changes nothing.
+func (c *Check) edacRise(now time.Time, ctrl, kind, adj string, prev, cur uint64) []health.Reading {
+	if cur <= prev {
+		return nil
+	}
+
+	return c.episode("kernel/edac/"+ctrl+"/"+kind, now, 1,
+		func() string {
+			return fmt.Sprintf("Kernel: EDAC controller %s %s memory errors started rising (from %d to %d)",
+				ctrl, adj, prev, cur)
+		},
+		func(ep Episode) string {
+			return fmt.Sprintf("Kernel: EDAC controller %s %s memory errors still rising (%d rises since %s, now %d)",
+				ctrl, adj, ep.Count, ep.FirstAt.UTC().Format(time.RFC3339), cur)
+		})
 }
 
 func event(key, text string) health.Reading {

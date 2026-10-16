@@ -340,8 +340,8 @@ func TestQuietWindowsStillWriteHeartbeat(t *testing.T) {
 			if got := f.r.Snapshot().Quiet; got != tt.reason {
 				t.Fatalf("quiet reason = %q, want %q", got, tt.reason)
 			}
-			if f.st.checkpoints != 0 || len(f.tlg.texts()) != 0 {
-				t.Fatalf("quiet tick checkpointed %d times and sent %v", f.st.checkpoints, f.tlg.texts())
+			if f.st.checkpoints != 1 || len(f.tlg.texts()) != 0 {
+				t.Fatalf("quiet tick checkpointed %d times (want 1) and sent %v", f.st.checkpoints, f.tlg.texts())
 			}
 
 			f.maint.held, f.up.up = false, time.Hour
@@ -903,7 +903,7 @@ func TestRunDeadline(t *testing.T) {
 		interval time.Duration
 		want     time.Duration
 	}{
-		{"capped at 45s", 5 * time.Minute, 45 * time.Second},
+		{"capped at MaxRunTime", 5 * time.Minute, MaxRunTime},
 		{"interval when shorter", Tick, Tick},
 	}
 
@@ -1013,6 +1013,75 @@ func TestClear(t *testing.T) {
 	}
 	if a := st.alerts[1]; a.Key != "ups/main" || a.Check != "ups" || !a.At.Equal(t0()) {
 		t.Fatalf("cleared record = %+v", a)
+	}
+}
+
+func TestForgetClearsSilently(t *testing.T) {
+	st := &fakeStore{}
+	c := newFakeCheck(nil, "temps", reading("temps/s1", health.Bad, "s1 hot"))
+	f := newFixture(t, st, checkOf(c))
+	f.tick(t)
+
+	sent := len(f.tlg.texts())
+	c.set(health.CheckResult{Forget: []string{"temps/s1", "temps/unknown"}})
+	f.next(t)
+
+	if len(f.tlg.texts()) != sent {
+		t.Fatalf("Forget sent %q", f.tlg.texts()[sent:])
+	}
+	if open := f.r.Snapshot().Open; len(open) != 0 {
+		t.Fatalf("open after forget = %+v", open)
+	}
+	want := []store.AlertKind{store.KindProblem, store.KindCleared}
+	if got := st.alertKinds(); !slices.Equal(got, want) {
+		t.Fatalf("alert log = %v, want %v", got, want)
+	}
+	if a := st.alerts[1]; a.Key != "temps/s1" || a.Check != "temps" || a.Text != "sensor gone" {
+		t.Fatalf("cleared record = %+v", a)
+	}
+}
+
+func TestForgetIsScopedToTheReportingCheck(t *testing.T) {
+	st := &fakeStore{}
+	a := newFakeCheck(nil, "a", reading("a/x", health.Bad, "a bad"))
+	b := newFakeCheck(nil, "b", reading("b/y", health.Bad, "b bad"))
+	f := newFixture(t, st, checkOf(a), checkOf(b))
+	f.tick(t)
+
+	a.set(health.CheckResult{Forget: []string{"b/y"}})
+	b.set(health.CheckResult{})
+	f.next(t)
+
+	open := f.r.Snapshot().Open
+	if len(open) != 2 {
+		t.Fatalf("open = %+v, want both conditions still open", open)
+	}
+	if slices.Contains(st.alertKinds(), store.KindCleared) {
+		t.Fatalf("alert log = %v, want no cleared record", st.alertKinds())
+	}
+}
+
+func TestForgetWithErrAndRecordOrder(t *testing.T) {
+	st := &fakeStore{}
+	c := newFakeCheck(nil, "temps", reading("temps/s1", health.Bad, "s1 hot"))
+	f := newFixture(t, st, checkOf(c))
+	f.tick(t)
+
+	c.set(health.CheckResult{
+		Readings: []health.Reading{{Key: "temps/s1", Verdict: health.Good, Text: "s1 gone", Kind: health.Event}},
+		Forget:   []string{"temps/s1"},
+		Err:      errors.New("gpu: timeout"),
+	})
+	f.next(t)
+
+	if open := f.r.Snapshot().Open; len(open) != 0 {
+		t.Fatalf("open = %+v, want Forget applied despite Err", open)
+	}
+	got := st.alertKinds()
+	iEvent := slices.Index(got, store.KindEvent)
+	iClear := slices.Index(got, store.KindCleared)
+	if iEvent < 0 || iClear < iEvent {
+		t.Fatalf("alert log = %v, want the event before the clear", got)
 	}
 }
 

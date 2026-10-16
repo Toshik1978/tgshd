@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"strings"
 	"sync"
@@ -230,6 +231,15 @@ func TestHealthReportsDailyRunsRetention(t *testing.T) {
 	st.retainErr = errors.New("disk full")
 	if err := opts.Daily(t.Context(), now); err == nil || !strings.Contains(err.Error(), "disk full") {
 		t.Fatalf("err = %v, want the retention failure", err)
+	}
+
+	// A store not open yet (the runner's Load reports that) or closed is
+	// skipped quietly.
+	for _, notOpen := range []error{store.ErrNotOpen, store.ErrClosed} {
+		st.retainErr = fmt.Errorf("wrapped: %w", notOpen)
+		if err := opts.Daily(t.Context(), now); err != nil {
+			t.Fatalf("err = %v, want the unopened store skipped quietly", err)
+		}
 	}
 }
 

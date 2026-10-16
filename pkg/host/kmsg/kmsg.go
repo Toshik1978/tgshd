@@ -95,6 +95,39 @@ func (r *Reader) Run(ctx context.Context, fn func(Record)) error {
 	}
 }
 
+// Snapshot reads the records currently in the kernel buffer, from its start,
+// and calls fn for each, then returns without waiting for new ones: the source
+// is opened non-blocking and reading stops at EAGAIN (or EOF for a plain
+// file). No cursor is kept. Records overwritten before being read (EPIPE) are
+// skipped; ctx cancellation stops the read with its error.
+func (r *Reader) Snapshot(ctx context.Context, fn func(Record)) error {
+	fd, err := syscall.Open(r.path, syscall.O_RDONLY|syscall.O_NONBLOCK|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		return fmt.Errorf("open kmsg: %w", &os.PathError{Op: "open", Path: r.path, Err: err})
+	}
+	defer func() { _ = syscall.Close(fd) }()
+
+	buf := make([]byte, readBufSize)
+	for {
+		if err = ctx.Err(); err != nil {
+			return fmt.Errorf("read kmsg: %w", err)
+		}
+		n, err := syscall.Read(fd, buf)
+		switch {
+		case err == nil && n > 0:
+			for _, rec := range ParseChunk(string(buf[:n])) {
+				fn(rec)
+			}
+		case err == nil, errors.Is(err, syscall.EAGAIN): // EOF or the end of the buffer
+			return nil
+		case errors.Is(err, syscall.EPIPE), errors.Is(err, syscall.EINTR):
+			continue
+		default:
+			return fmt.Errorf("read kmsg: %w", err)
+		}
+	}
+}
+
 // ParseChunk parses every record in text, skipping continuation lines and malformed records.
 func ParseChunk(text string) []Record {
 	var out []Record

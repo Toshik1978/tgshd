@@ -33,10 +33,17 @@ type FixSource interface {
 }
 
 // takeFixes collects the fixes made by this tick's runs (and by runs that
-// finished late, after their deadline) into the cycle.
+// finished late, after their deadline) into the cycle. Every fix is logged,
+// so one that is not pushed (report: journal) still reaches the journal; at
+// Warn, the level the daemon logs at in production.
 func (r *Runner) takeFixes(c *cycle) {
 	for _, s := range r.opts.Fixes {
-		c.fixes = append(c.fixes, s.TakeFixes()...)
+		for _, f := range s.TakeFixes() {
+			r.opts.Logger.Warn("health fix action",
+				zap.String("check", f.Check), zap.String("key", f.Key),
+				zap.String("outcome", f.Text), zap.Bool("reported", f.Send))
+			c.fixes = append(c.fixes, f)
+		}
 	}
 }
 

@@ -3,10 +3,14 @@ package runner
 import (
 	"context"
 	"errors"
+	"maps"
 	"slices"
 	"sync"
 	"testing"
 	"time"
+
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/Toshik1978/tgshd/pkg/health"
 	"github.com/Toshik1978/tgshd/pkg/health/notify"
@@ -244,5 +248,38 @@ func TestFixesWithoutStoreAreStillSent(t *testing.T) {
 	f.tick(t)
 	if countContaining(f.tlg.texts(), "fix ran restart.sh") != 1 {
 		t.Fatalf("telegram = %q", f.tlg.texts())
+	}
+}
+
+// The daemon logs at Warn in production (cmd newLogger), so a fix is logged at
+// Warn to reach the journal.
+func TestEveryFixReachesTheProductionLog(t *testing.T) {
+	core, logs := observer.New(zap.WarnLevel)
+	src := &fakeFixes{}
+	src.add(
+		Fix{At: t0(), Check: "command", Key: "command/app/fix", Text: "command app: fix ran restart.sh", Send: true},
+		Fix{At: t0(), Check: "command", Key: "command/quiet/fix", Text: "command quiet: fix failed: exit status 2"},
+	)
+	f := newFixture(t, &fakeStore{})
+	f.r.opts.Fixes = []FixSource{src}
+	f.r.opts.Logger = zap.New(core)
+
+	f.tick(t)
+
+	entries := logs.FilterMessage("health fix action").All()
+	want := []map[string]any{
+		{"check": "command", "key": "command/app/fix", "outcome": "command app: fix ran restart.sh", "reported": true},
+		{
+			"check": "command", "key": "command/quiet/fix", "outcome": "command quiet: fix failed: exit status 2",
+			"reported": false,
+		},
+	}
+	if len(entries) != len(want) {
+		t.Fatalf("fix log = %+v, want one Warn entry per fix", entries)
+	}
+	for i, e := range entries {
+		if e.Level != zap.WarnLevel || !maps.Equal(e.ContextMap(), want[i]) {
+			t.Fatalf("entry %d = %v %v, want Warn %v", i, e.Level, e.ContextMap(), want[i])
+		}
 	}
 }

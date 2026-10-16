@@ -157,8 +157,8 @@ roll-up, summary content and length limit
 
 ## Phase 8: Polish & Cross-Cutting Concerns
 
-- [ ] T044 Final documentation pass in README.md and CLAUDE.md (feature table, env table, package map, coverage-gate scope) and run every scenario of specs/001-host-health-monitoring/quickstart.md on a test host, recording any gaps as new tasks via `/speckit-converge`
-- [ ] T045 Pre-push privacy sweep: review `git diff origin/main` and all `testdata/` fixtures for real host names, addresses, phone numbers, container names, drive serials or models and references to private repositories (patterns kept outside the repository); fix any hit before pushing (SC-009)
+- [x] T044 Final documentation pass in README.md and CLAUDE.md (feature table, env table, package map, coverage-gate scope) and run every scenario of specs/001-host-health-monitoring/quickstart.md on a test host, recording any gaps as new tasks via `/speckit-converge`
+- [x] T045 Pre-push privacy sweep: review `git diff origin/main` and all `testdata/` fixtures for real host names, addresses, phone numbers, container names, drive serials or models and references to private repositories (patterns kept outside the repository); fix any hit before pushing (SC-009)
 
 ---
 
@@ -186,3 +186,23 @@ roll-up, summary content and length limit
 2. Add US2, then US3; after each, run the one-shot mode on the host and retire the matching old
    checks.
 3. US4 requires the gammu hook change on the host; US5 adds value without replacing anything.
+
+## Phase 9: Convergence
+
+- [x] T046 Run EDAC counter rises through the kernel check's episode logic (one message at start, at most one "still happening" per 6 h, quiet after 24 h), keyed per controller and error type, in pkg/health/check/kernel/kernel.go per FR-026 (partial)
+- [x] T047 Treat nvidia-smi's "no devices were found" outcome as zero GPUs in pkg/host/nvidia/nvidia.go so a removed GPU is reported gone once and its temperature conditions clear, per FR-027 (partial)
+- [x] T048 Persist whether the last returned modem probe was already reported (or emit Good only after a return newer than the last Bad) in pkg/health/check/modemprobe/modemprobe.go so a restart never resolves an open probe problem, per FR-036 (contradicts)
+- [x] T049 Add 7-day min/avg/max for drive temperature and wear to the /disks reply in pkg/health/report/readings.go per FR-039 (partial)
+- [x] T050 Keep the heartbeat fresh independently of a long tick (own 30 s ticker, or one deadline bounding all deliveries of a tick) in pkg/health/runner per SC-006 (partial)
+- [x] T051 Clear a gone sensor's conditions silently (no RESOLVED), leaving the "gone" event as the only message, in pkg/health/check/temps/temps.go per FR-027 (partial)
+- [x] T052 Carry the real start of the drive over-temperature streak into the PROBLEM "since" time in pkg/health/check/disks/disks.go per FR-002 (partial)
+- [x] T053 In check --once read the current kernel ring buffer once (cursor not saved) and print what the class table matches, in cmd/health_hardware.go, per FR-018 (partial)
+- [x] T054 Add a disks test with two same-model NVMe drives where only one overheats, asserting only that serial's disks/<serial>/temp is Bad, in pkg/health/check/disks/disks_test.go per SC-002 (missing)
+- [x] T055 Log every fix action that runs (check, key, outcome) at Info level so report: journal fixes reach the journal, in pkg/health/runner/fix.go per contracts/config.md command report (partial)
+- [x] T056 Record github.com/moby/moby/api as approved (companion types module of the approved moby client) in specs/001-host-health-monitoring/plan.md Technical Context per CLAUDE.md dependency rule (unrequested)
+- [x] T057 Update specs/001-host-health-monitoring/data-model.md to the ruled partial-failure CheckResult semantics and the drive.<serial>.spare / drive.<serial>.selftest_age_h metrics per data-model (contradicts)
+
+## Phase 10: Convergence
+
+- [x] T058 Guarantee a tick's Telegram and SMS sends a delivery window after the check runs end (e.g. start the send deadline when runChecks returns, or keep RunBudget below the send budget) while the heartbeat stays within cycle + 1 min, with a runner test where a full-run-budget check still delivers a PROBLEM in the same tick, in pkg/health/runner per FR-008 (partial)
+- [x] T059 Update specs/001-host-health-monitoring/data-model.md with Reading.Since, CheckResult.Forget and the silent clear (alert kind cleared) of a gone sensor after its single "gone" event, per data-model (contradicts)

@@ -26,9 +26,25 @@ const (
 	Tick = 30 * time.Second
 	// DefaultConcurrency bounds parallel checks when Options.Concurrency is unset.
 	DefaultConcurrency = 4
-	// MaxRunTime is the default tick budget: the network run and the batch
-	// together finish within it; a check's shorter interval caps its run further.
-	MaxRunTime = 45 * time.Second
+	// MaxRunTime is the default run budget of a tick: the network run and the
+	// batch together finish within it; a check's shorter interval caps its run
+	// further. With MaxTickTime it bounds a tick to 70 s plus store work.
+	MaxRunTime = 40 * time.Second
+	// MaxTickTime is the default delivery budget of a tick, counted from the
+	// end of its runs (from the start of a quiet tick): every Telegram, SMS
+	// and email send of the tick (checker errors, flush, dispatch, fixes,
+	// weekly push) ends by it, also when a channel hangs. Telegram and SMS get
+	// its first 27 s even when a run used the whole MaxRunTime; the last 3 s
+	// (a tenth) are kept for email. Load, the daily job and the checkpoint are
+	// not bounded; they are local store work. The worst tick is thus 40 s of
+	// runs + 30 s of deliveries = 70 s plus store work, which leaves 20 s for
+	// the store under the 90 s of three periods. gocron (singleton,
+	// reschedule) runs ticks on fixed 30 s slots and skips a slot while a tick
+	// is still running, so a tick of duration D makes the next heartbeat
+	// 30·ceil(D/30) old: 90 s whenever a tick exceeds 60 s, which is one cycle
+	// plus one minute (SC-006). A watchdog must therefore alarm only on an age
+	// strictly greater than 90 s.
+	MaxTickTime = 30 * time.Second
 
 	// KeyRouter and KeyInternet are the network conditions that, while bad,
 	// mean the outside is known down.
@@ -71,7 +87,16 @@ type Options struct {
 	BootGrace   time.Duration
 	Concurrency int
 	// RunBudget bounds all check runs of one tick; defaults to MaxRunTime.
-	RunBudget   time.Duration
+	// RunBudget + TickBudget plus local store work must stay under 90 s (three
+	// periods) to keep the heartbeat within one cycle plus one minute.
+	RunBudget time.Duration
+	// TickBudget is the tick's delivery budget, counted from the end of its
+	// runs (from its start in a quiet tick), so a run that uses all of
+	// RunBudget never eats it: Telegram and SMS sends end by it less a tenth
+	// kept for email, emails by all of it. Defaults to MaxTickTime. A tick
+	// lasts at most RunBudget + TickBudget plus local store work: 70 s plus
+	// store work by default (see MaxTickTime). Undelivered messages stay queued.
+	TickBudget  time.Duration
 	Heartbeat   Heartbeat
 	Maintenance Maintenance
 	Uptime      Uptime
@@ -133,6 +158,8 @@ type Runner struct {
 	notifier *notify.Notifier
 	checker  *notify.CheckerErrors
 	network  int // index of the network check, -1 when absent
+	// sends bounds every delivery by the running tick's deadline.
+	sends deliveries
 
 	// lastRun is indexed like opts.Checks and only touched by Do.
 	lastRun []time.Time
@@ -177,6 +204,7 @@ type outcome struct {
 type cycle struct {
 	now     time.Time
 	alerts  []health.Alert
+	cleared []store.Alert // silent clears (CheckResult.Forget), logged after the alerts
 	samples []store.SampleRow
 	fixes   []Fix
 	errs    [][2]string // checker errors as key, text
@@ -202,6 +230,9 @@ func New(opts Options) *Runner {
 	if opts.RunBudget <= 0 {
 		opts.RunBudget = MaxRunTime
 	}
+	if opts.TickBudget <= 0 {
+		opts.TickBudget = MaxTickTime
+	}
 
 	r := &Runner{
 		opts:    opts,
@@ -218,11 +249,12 @@ func New(opts Options) *Runner {
 			break
 		}
 	}
+	r.sends.bind(&r.opts)
 	r.notifier = notify.New(notify.Options{
 		Host:           opts.Host,
 		Mode:           opts.Mode,
-		Telegram:       opts.Telegram,
-		SMS:            opts.SMS,
+		Telegram:       r.opts.Telegram,
+		SMS:            r.opts.SMS,
 		OnCheckerError: func(key, text string) { r.checker.CheckerError(key, text) },
 		OnDrop:         r.logDrop,
 		Now:            opts.Now,
@@ -230,7 +262,7 @@ func New(opts Options) *Runner {
 	r.checker = notify.NewCheckerErrors(notify.CheckerOptions{
 		Host:     opts.Host,
 		Notifier: r.notifier,
-		Mailer:   opts.Mailer,
+		Mailer:   r.opts.Mailer,
 		Marks:    r.marks,
 		Logger:   opts.Logger,
 		Now:      opts.Now,
@@ -245,24 +277,28 @@ func (*Runner) Name() string { return WorkerName }
 // Duration implements app.Worker.
 func (*Runner) Duration() time.Duration { return Tick }
 
-// Do runs one tick: heartbeat first, then nothing more inside a quiet window;
-// otherwise network first, the other due checks, flush, dispatch, checkpoint.
+// Do runs one tick: heartbeat first, then inside a quiet window only its
+// checker errors and a checkpoint; otherwise network first, the other due
+// checks, flush, dispatch, checkpoint.
+// The tick sends nothing before its runs end; its deliveries (not Load, the
+// daily job or the checkpoint) then end by its TickBudget, so a hung run never
+// leaves them without a window and a slow channel never delays the next
+// tick's heartbeat; what is not delivered stays queued.
 func (r *Runner) Do(ctx context.Context) error {
 	c := &cycle{now: r.opts.Now()}
 	r.writeHeartbeat(c)
-	// A failure is reported as a checker error; the tick runs from memory and
-	// does not checkpoint, so stored state is never overwritten unseen.
+
+	// A failure is reported as a checker error once the tick's sends begin;
+	// the tick runs from memory and does not checkpoint, so stored state is
+	// never overwritten unseen.
 	loaded := r.Load(ctx) == nil
-	r.raiseLoadFailure()
 
 	reason := r.quietReason(c)
 	r.mu.Lock()
 	r.quiet = reason
 	r.mu.Unlock()
 	if reason != "" {
-		r.raise(c)
-
-		return nil
+		return r.quietTick(ctx, c, loaded)
 	}
 
 	if loaded {
@@ -272,6 +308,8 @@ func (r *Runner) Do(ctx context.Context) error {
 		c.before = r.engine.Conditions()
 	}
 	if !r.runChecks(ctx, c) {
+		_, endSends := r.beginSends(ctx)
+		defer endSends()
 		r.saveInterruptedFixes(ctx, c, loaded)
 
 		return fmt.Errorf("health tick interrupted: %w", ctx.Err())
@@ -282,13 +320,17 @@ func (r *Runner) Do(ctx context.Context) error {
 	if loaded {
 		r.runDaily(ctx, c)
 	}
+	// The delivery budget starts only now, when the runs have ended.
+	sendCtx, endSends := r.beginSends(ctx)
+	defer endSends()
 	// Queued messages (e.g. an outage's PROBLEMs) go before this tick's news.
-	r.notifier.Flush(ctx)
-	r.dispatch(ctx, c)
-	r.dispatchFixes(ctx, c)
-	// The weekly job pushes the summary after the older news.
+	r.notifier.Flush(sendCtx)
+	r.dispatch(sendCtx, c)
+	r.dispatchFixes(sendCtx, c)
+	// The weekly job pushes the summary after the older news; cut off by the
+	// tick deadline, it is retried next tick.
 	if loaded {
-		r.runWeekly(ctx, c)
+		r.runWeekly(sendCtx, c)
 	}
 	r.raise(c)
 	err := r.checkpoint(ctx, c, loaded)
@@ -409,6 +451,15 @@ func (r *Runner) ExpireQueue(now time.Time, maxAge time.Duration) []notify.Queue
 	return r.notifier.Expire(now, maxAge)
 }
 
+// beginSends starts the tick's delivery budget (boundSends), then raises the
+// load failures within it.
+func (r *Runner) beginSends(ctx context.Context) (context.Context, func()) {
+	sendCtx, endSends := r.boundSends(ctx)
+	r.raiseLoadFailure()
+
+	return sendCtx, endSends
+}
+
 // raiseLoadFailure reports the last failed Load and the persister restore
 // failures, if any, as checker errors, once the load lock is released.
 func (r *Runner) raiseLoadFailure() {
@@ -437,6 +488,17 @@ func (r *Runner) writeHeartbeat(c *cycle) {
 	if err := r.opts.Heartbeat.WriteTick(c.now); err != nil {
 		c.fail(keyHeartbeat, "cannot write heartbeat: "+err.Error())
 	}
+}
+
+// quietTick ends a tick inside a quiet window: it runs no check, raises the
+// tick's checker errors and checkpoints, so what it raised (messages queued,
+// rate marks, alert-log records) survives a crash during a long window.
+func (r *Runner) quietTick(ctx context.Context, c *cycle, loaded bool) error {
+	_, endSends := r.beginSends(ctx)
+	defer endSends()
+	r.raise(c)
+
+	return r.checkpoint(ctx, c, loaded)
 }
 
 // quietReason probes the maintenance lock and the uptime. A probe that fails
@@ -594,8 +656,31 @@ func (r *Runner) apply(c *cycle, chk health.Check, res health.CheckResult) {
 		}
 		c.alerts = append(c.alerts, a)
 	}
+	r.forget(c, chk.Name, res.Forget)
 	for _, s := range res.Samples {
 		c.samples = append(c.samples, store.SampleRow{At: c.now, Metric: s.Metric, Value: s.Value})
+	}
+}
+
+// forget silently clears the check's own conditions named by keys and queues
+// their cleared records; another check's condition is left alone.
+func (r *Runner) forget(c *cycle, check string, keys []string) {
+	for _, key := range keys {
+		cond, ok := r.engine.Condition(key)
+		if !ok {
+			continue
+		}
+		if cond.Check != check {
+			r.opts.Logger.Debug("ignored a forget of another check's condition",
+				zap.String("check", check), zap.String("key", key))
+
+			continue
+		}
+		if r.engine.Clear(key) {
+			c.cleared = append(c.cleared, store.Alert{
+				At: c.now, Kind: store.KindCleared, Check: check, Key: key, Text: "sensor gone",
+			})
+		}
 	}
 }
 
@@ -671,6 +756,7 @@ func (r *Runner) records(c *cycle) []store.Alert {
 			At: c.now, Kind: storeKind(a.Kind), Check: a.Check, Key: a.Key, Text: a.Text,
 		})
 	}
+	alerts = append(alerts, c.cleared...)
 	alerts = append(alerts, fixRecords(c)...)
 	for _, ce := range r.checker.Drain() {
 		alerts = append(alerts, store.Alert{

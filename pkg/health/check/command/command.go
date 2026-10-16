@@ -139,8 +139,13 @@ func (c *Check) Restore(data []byte) error {
 // timeout is Bad too (the guarded thing is hung). A probe that cannot be
 // started (missing binary, permission denied) is a configuration problem and
 // is returned as a checker error with no readings.
+//
+// The probe gets its timeout, but ends before the run's deadline (see
+// health.Bound): a probe that hangs past what is left of the run is judged
+// Bad too, so the run is never abandoned with its reading.
 func (c *Check) Run(ctx context.Context) health.CheckResult {
-	pctx, cancel := context.WithTimeout(ctx, c.cfg.Timeout.Duration())
+	timeout := c.cfg.Timeout.Duration()
+	pctx, cancel, limit := health.Bound(ctx, timeout)
 	code, err := c.runner.Run(pctx, c.cfg.Run)
 	timedOut := ctx.Err() == nil &&
 		(errors.Is(pctx.Err(), context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded))
@@ -148,8 +153,10 @@ func (c *Check) Run(ctx context.Context) health.CheckResult {
 
 	var text string
 	switch {
+	case timedOut && limit < timeout:
+		text = "probe did not finish before the run deadline"
 	case timedOut:
-		text = fmt.Sprintf("probe timed out after %s", c.cfg.Timeout.Duration())
+		text = fmt.Sprintf("probe timed out after %s", timeout)
 	case err != nil:
 		return health.CheckResult{Err: fmt.Errorf("run probe %q: %w", c.cfg.Name, err)}
 	case code != 0:
@@ -307,7 +314,8 @@ func (c *Check) doFix(ctx context.Context) string {
 		// Only the program: its arguments may carry secrets.
 		return "would run " + fix.Run[0]
 	}
-	fctx, cancel := context.WithTimeout(ctx, c.cfg.Timeout.Duration())
+	// Bounded like the probe, so the fix record is returned with the run.
+	fctx, cancel, _ := health.Bound(ctx, c.cfg.Timeout.Duration())
 	defer cancel()
 	if fix.RestartContainer != "" {
 		if err := c.docker.Restart(fctx, fix.RestartContainer); err != nil {

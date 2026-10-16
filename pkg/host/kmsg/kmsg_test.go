@@ -155,3 +155,46 @@ func TestParseChunk(t *testing.T) {
 		t.Fatalf("got %+v", recs)
 	}
 }
+
+func TestSnapshotReadsWhatIsBufferedAndReturns(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "kmsg")
+	if err := syscall.Mkfifo(p, 0o600); err != nil {
+		t.Skipf("mkfifo: %v", err)
+	}
+	w, err := os.OpenFile(p, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w.Close()
+	if _, err = w.WriteString("3,5,1,-;one\n6,6,2,-;two\n"); err != nil {
+		t.Fatal(err)
+	}
+
+	var got []kmsg.Record
+	// The writer stays open and idle: a blocking read would hang here.
+	if err = kmsg.New(p, "").Snapshot(context.Background(), func(r kmsg.Record) { got = append(got, r) }); err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].Message != "one" || got[1].Seq != 6 {
+		t.Fatalf("got %+v", got)
+	}
+}
+
+func TestSnapshotPlainFileAndErrors(t *testing.T) {
+	p := filepath.Join(t.TempDir(), "kmsg")
+	if err := os.WriteFile(p, []byte("4,1,1,-;x\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	n := 0
+	if err := kmsg.New(p, "").Snapshot(context.Background(), func(kmsg.Record) { n++ }); err != nil || n != 1 {
+		t.Fatalf("n=%d err=%v", n, err)
+	}
+	if err := kmsg.New(p+".missing", "").Snapshot(context.Background(), func(kmsg.Record) {}); err == nil {
+		t.Fatal("missing source: want an error")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := kmsg.New(p, "").Snapshot(ctx, func(kmsg.Record) {}); err == nil {
+		t.Fatal("cancelled: want an error")
+	}
+}

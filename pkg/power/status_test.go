@@ -101,12 +101,45 @@ func TestStatusSingleFlight(t *testing.T) {
 	}
 
 	close(release)
-	deadline := time.Now().Add(time.Second)
-	for p.inflight.Load() && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
-	}
+	// The next read waits for the released one to end.
 	if _, err := p.Status(context.Background()); err != nil {
 		t.Fatalf("after release: %v", err)
+	}
+	if got := calls.Load(); got != 2 {
+		t.Fatalf("reader calls %d, want 2", got)
+	}
+}
+
+// TestOverlappingReadWaitsForTheHealthyOne: a read that starts while another
+// healthy read is in flight waits for it instead of failing, so an overlap is
+// never reported as a UPS fault.
+func TestOverlappingReadWaitsForTheHealthyOne(t *testing.T) {
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var calls atomic.Int32
+	p := &power{reader: func() (Status, error) {
+		if calls.Add(1) == 1 {
+			close(started)
+			<-release
+		}
+
+		return Status{State: "OL"}, nil
+	}}
+
+	first := make(chan error, 1)
+	go func() {
+		_, err := p.Status(context.Background())
+		first <- err
+	}()
+	<-started
+	time.AfterFunc(50*time.Millisecond, func() { close(release) })
+
+	st, err := p.Status(context.Background())
+	if err != nil || st.State != "OL" {
+		t.Fatalf("overlapping read = %+v, %v; want a fresh reading", st, err)
+	}
+	if err := <-first; err != nil {
+		t.Fatalf("first read: %v", err)
 	}
 	if got := calls.Load(); got != 2 {
 		t.Fatalf("reader calls %d, want 2", got)

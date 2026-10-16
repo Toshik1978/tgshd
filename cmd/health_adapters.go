@@ -28,8 +28,8 @@ const (
 	fallbackHostName = "tgshd"
 	// upsCheckName is the name of the UPS check (its keys are ups/<name>).
 	upsCheckName = "ups"
-	// smsSendTimeout bounds one gammu outbox insert: the runner sends with a
-	// context that has no deadline.
+	// smsSendTimeout bounds one gammu outbox insert: the runner bounds only
+	// the sends of a tick (by its deadline), not a push made between ticks.
 	smsSendTimeout = 30 * time.Second
 )
 

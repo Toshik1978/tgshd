@@ -36,7 +36,8 @@ func NewDefault() *Reader {
 	return New(defaultBinary)
 }
 
-// GPUs queries every GPU. An absent binary means no GPUs and no error.
+// GPUs queries every GPU. An absent binary, or nvidia-smi reporting that no devices were found, means no
+// GPUs and no error.
 func (r *Reader) GPUs(ctx context.Context) ([]GPU, error) {
 	path, err := exec.LookPath(r.binary)
 	if err != nil {
@@ -56,6 +57,9 @@ func (r *Reader) GPUs(ctx context.Context) ([]GPU, error) {
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
+		if noDevices(err, stdout.String(), stderr.String()) {
+			return nil, nil
+		}
 		if msg := strings.TrimSpace(stderr.String()); msg != "" {
 			return nil, fmt.Errorf("run %s: %w: %s", r.binary, err, msg)
 		}
@@ -64,6 +68,19 @@ func (r *Reader) GPUs(ctx context.Context) ([]GPU, error) {
 	}
 
 	return Parse(stdout.String())
+}
+
+// noDevices reports whether a failed run is nvidia-smi's "No devices were found"
+// outcome (driver present, no GPU visible): a non-zero exit status together with
+// that message on stdout or stderr, matched case-insensitively.
+func noDevices(err error, stdout, stderr string) bool {
+	if _, ok := errors.AsType[*exec.ExitError](err); !ok {
+		return false
+	}
+
+	const marker = "no devices were found"
+
+	return strings.Contains(strings.ToLower(stdout), marker) || strings.Contains(strings.ToLower(stderr), marker)
 }
 
 // Parse parses nvidia-smi CSV output ("index, name, temperature"). The name may

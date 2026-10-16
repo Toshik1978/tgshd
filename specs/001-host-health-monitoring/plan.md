@@ -20,8 +20,9 @@ stories; the access filter is the first task.
 
 **Primary Dependencies**: existing — uber/fx, gocron v2, zap, telebot v4, pgx (gammu DB),
 robbiet480/go.nut, pro-bing, caarlos0/env. New (approved) — `modernc.org/sqlite`,
-`github.com/moby/moby/client`, `go.yaml.in/yaml/v3`. Promoted from indirect to direct (approved) —
-`golang.org/x/net` (DoH message encoding). Approved but **not used** —
+`github.com/moby/moby/client` (with its companion types module
+`github.com/moby/moby/api`, approved), `go.yaml.in/yaml/v3`. Promoted from indirect to direct
+(approved) — `golang.org/x/net` (DoH message encoding). Approved but **not used** —
 `github.com/shirou/gopsutil/v4` (research R5). External host tools — `smartctl` (required for
 disk checks), `nvidia-smi` (optional).
 
@@ -37,7 +38,9 @@ the existing features but is not supported for hardware checks
 
 **Project Type**: daemon + CLI subcommands
 
-**Performance Goals**: a full tick (all due checks) < 60 s with default timeouts; command replies
+**Performance Goals**: a tick's check runs end within the 40 s run budget (per-check timeouts
+≤ 20 s, smartctl 10 s per drive, drives read concurrently) and its deliveries within 30 s more;
+command replies
 < 5 s (SC-007)
 
 **Constraints**: no cgo; monitoring starts without Docker/Postgres; no real host data anywhere in
@@ -55,7 +58,7 @@ non-negotiable conventions of `CLAUDE.md`.
 |---|---|---|
 | Idiomatic Go, stdlib first, errors wrapped with `%w` | PASS | hwmon, sysfs, kmsg, flock, SMTP, HTTP all stdlib; gopsutil and ghw dropped |
 | Tests: stdlib `testing`, hand-written fakes, no test deps | PASS | every adapter behind an interface; fixtures, no mocks library |
-| New third-party deps need approval | PASS | sqlite, moby client, yaml approved in brainstorming; `golang.org/x/net` promotion approved 2026-10-16 |
+| New third-party deps need approval | PASS | sqlite, moby client, yaml approved in brainstorming; `github.com/moby/moby/api` approved as the companion types module of the moby client; `golang.org/x/net` promotion approved 2026-10-16 |
 | `CGO_ENABLED=0` | PASS | go-nvml, mattn/go-sqlite3, sdjournal rejected for cgo |
 | Optional features env-gated in `main()` | PASS | `BOT_HEALTH_CONFIG` gates `healthProviders()`; SMTP gated by `BOT_SMTP_ADDR`; gammu inbox by `BOT_GAMMU_DSN` |
 | 80 % coverage on cleanly testable packages | PASS | `./pkg/health/...` added to `COVERPKG`; parsers sit in check packages, adapters stay thin and outside the gate |
@@ -109,7 +112,7 @@ pkg/
 │       ├── command/            # probe + fix action
 │       └── modemprobe/         # weekly round-trip (R14)
 ├── host/                       # THIN I/O ADAPTERS (outside coverage gate)
-│   ├── smartctl/               # exec smartctl, list /sys/block
+│   ├── smartctl/               # exec smartctl -n standby,3 (10 s per drive), list /sys/block
 │   ├── hwmon/                  # read /sys/class/hwmon
 │   ├── nvidia/                 # exec nvidia-smi
 │   ├── kmsg/                   # /dev/kmsg reader, boot id
