@@ -43,6 +43,13 @@ that feature is simply inactive and the daemon still runs.
   a ZTE MC888 modem (network switching + incoming SMS), and a
   [gammu-smsd](https://wammu.eu/smsd/) instance with a **PostgreSQL** backend
   (outgoing SMS).
+- Host health monitoring (`BOT_HEALTH_CONFIG`), hardware checks: the `disks`
+  check needs **[smartmontools](https://www.smartmontools.org/)** (`smartctl`
+  7.0+ for JSON output) on `PATH`; GPU temperatures use `nvidia-smi` when it is
+  installed (optional, absent means no GPUs). `disks` and `kernel` read
+  `/dev/*` and `/dev/kmsg`, so run the daemon as root (the systemd unit below).
+  Hardware checks are not supported in the Docker image (distroless, nonroot,
+  no `smartctl`/`nvidia-smi`).
 
 ## Configuration
 

@@ -138,6 +138,15 @@ func (f *fakeStore) Checkpoint(_ context.Context, dirty store.State, alerts []st
 		f.state.KV = map[string]string{}
 	}
 	maps.Copy(f.state.KV, dirty.KV)
+	for i := range dirty.Baselines { // Upserted by serial, like the real store.
+		b := &dirty.Baselines[i]
+		j := slices.IndexFunc(f.state.Baselines, func(o store.Baseline) bool { return o.Serial == b.Serial })
+		if j >= 0 {
+			f.state.Baselines[j] = *b
+		} else {
+			f.state.Baselines = append(f.state.Baselines, *b)
+		}
+	}
 	f.alerts = append(f.alerts, f.pendingAlerts...)
 	f.samples = append(f.samples, f.pendingSamples...)
 	f.pendingAlerts, f.pendingSamples = nil, nil

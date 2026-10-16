@@ -18,6 +18,7 @@ import (
 
 	"github.com/Toshik1978/tgshd/pkg/health"
 	hcfg "github.com/Toshik1978/tgshd/pkg/health/config"
+	"github.com/Toshik1978/tgshd/pkg/health/runner"
 	"github.com/Toshik1978/tgshd/pkg/health/store"
 	"github.com/Toshik1978/tgshd/pkg/host/lockfile"
 )
@@ -496,8 +497,11 @@ func TestCollectCheckSetsUsesTheDaemonProviders(t *testing.T) {
 	t.Parallel()
 
 	hs := &healthSetup{Config: &hcfg.Config{
-		Network: &hcfg.Network{InternetTargets: []string{"198.51.100.20"}},
-		UPS:     &hcfg.UPS{},
+		Network:      &hcfg.Network{InternetTargets: []string{"198.51.100.20"}},
+		UPS:          &hcfg.UPS{},
+		Disks:        &hcfg.Disks{},
+		Temperatures: &hcfg.Temperatures{},
+		Kernel:       &hcfg.Kernel{},
 	}}
 	cfg := &config{NutIP: "192.0.2.10", NutName: "ups", NutUser: "monitor", NutPassword: "secret"}
 
@@ -507,13 +511,121 @@ func TestCollectCheckSetsUsesTheDaemonProviders(t *testing.T) {
 	}
 	defer stop()
 
-	checks, errs := mergeCheckSets(sets)
-	names := make([]string, 0, len(checks))
-	for _, c := range checks {
+	set := mergeCheckSets(sets)
+	names := make([]string, 0, len(set.Checks))
+	for _, c := range set.Checks {
 		names = append(names, c.Name)
 	}
-	if !slices.Equal(names, []string{"network", "ups"}) || len(errs) != 0 {
-		t.Fatalf("checks = %v, errors = %+v", names, errs)
+	if !slices.Equal(names, []string{"disks", "kernel", "network", "temps", "ups"}) || len(set.Errors) != 0 {
+		t.Fatalf("checks = %v, errors = %+v", names, set.Errors)
+	}
+	if len(set.Persisters) != 3 || set.Drives == nil || len(set.Background) != 1 {
+		t.Fatalf("persisters = %d, drives = %v, background = %d", len(set.Persisters), set.Drives, len(set.Background))
+	}
+}
+
+// persistingProviders contributes one check whose persister must be restored
+// before it runs.
+func persistingProviders(t *testing.T, p *fakePersister) fx.Option {
+	t.Helper()
+
+	return fx.Provide(fx.Annotate(
+		func() checkSet {
+			return checkSet{
+				Checks: []health.Check{
+					{Name: "kernel", Interval: time.Minute, Run: func(context.Context) health.CheckResult {
+						p.mu.Lock()
+						defer p.mu.Unlock()
+						if len(p.restored) != 1 {
+							t.Error("the check ran before its state was restored")
+						}
+
+						return health.CheckResult{}
+					}},
+				},
+				Persisters: []runner.Persister{p},
+			}
+		},
+		fx.ResultTags(healthCheckGroup),
+	))
+}
+
+func TestRunCheckOnceRestoresTheStoredStateAndNeverSaves(t *testing.T) {
+	t.Parallel()
+
+	path, stateDir := writeHealthConfig(t, "")
+	if err := os.MkdirAll(stateDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	st, err := store.Open(t.Context(), stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stored := store.State{
+		KV:        map[string]string{"kernel.state": "stored"},
+		Baselines: []store.Baseline{{Serial: "TEST0000000001", Model: "Example NVMe SSD", Bus: "nvme", Retired: true}},
+	}
+	if err = st.Checkpoint(t.Context(), stored, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err = st.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	p := &fakePersister{}
+	cio, _, stderr := testIO(nil, time.Unix(0, 0))
+	cio.checkProviders = persistingProviders(t, p)
+	if code := runCheckOnce(t.Context(), &config{HealthConfig: path}, cio); code != exitOK {
+		t.Fatalf("code = %d, stderr %q", code, stderr)
+	}
+
+	if len(p.restored) != 1 || p.restored[0].KV["kernel.state"] != "stored" ||
+		len(p.restored[0].Baselines) != 1 || !p.restored[0].Baselines[0].Retired {
+		t.Fatalf("restored = %+v, want the stored state", p.restored)
+	}
+	if p.saves != 0 {
+		t.Fatalf("saved %d times; check --once must never save", p.saves)
+	}
+}
+
+func TestRunCheckOnceWithoutStoredStateRestoresAnEmptyState(t *testing.T) {
+	t.Parallel()
+
+	path, _ := writeHealthConfig(t, "")
+	p := &fakePersister{}
+	cio, _, stderr := testIO(nil, time.Unix(0, 0))
+	cio.checkProviders = persistingProviders(t, p)
+	if code := runCheckOnce(t.Context(), &config{HealthConfig: path}, cio); code != exitOK {
+		t.Fatalf("code = %d, stderr %q", code, stderr)
+	}
+	if len(p.restored) != 1 || p.restored[0].KV != nil || p.restored[0].Baselines != nil || p.saves != 0 {
+		t.Fatalf("restored = %+v, saves = %d; want one empty restore and no save", p.restored, p.saves)
+	}
+}
+
+type failingPersister struct{}
+
+func (failingPersister) Restore(store.State) error {
+	return errors.New("decode kernel state: bad json")
+}
+func (failingPersister) Save(*store.State) error { return errors.New("never called") }
+
+func TestRunCheckOnceRestoreFailureIsASetupError(t *testing.T) {
+	t.Parallel()
+
+	path, _ := writeHealthConfig(t, "")
+	cio, stdout, _ := testIO(nil, time.Unix(0, 0))
+	cio.checkProviders = fx.Provide(fx.Annotate(
+		func() checkSet { return checkSet{Persisters: []runner.Persister{failingPersister{}}} },
+		fx.ResultTags(healthCheckGroup),
+	))
+	if code := runCheckOnce(t.Context(), &config{HealthConfig: path}, cio); code != exitError {
+		t.Fatalf("code = %d", code)
+	}
+	if want := "ERROR health/state/restore: cannot restore state: decode kernel state: bad json\n"; !strings.Contains(
+		stdout.String(), want,
+	) {
+		t.Fatalf("stdout = %q, want %q", stdout, want)
 	}
 }
 

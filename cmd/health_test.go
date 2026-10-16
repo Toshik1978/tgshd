@@ -27,6 +27,7 @@ import (
 	"github.com/Toshik1978/tgshd/pkg/host/sysfs"
 	"github.com/Toshik1978/tgshd/pkg/mail"
 	"github.com/Toshik1978/tgshd/pkg/power"
+	"github.com/Toshik1978/tgshd/pkg/telegram"
 )
 
 // fakePublisher records Telegram messages; it is safe for concurrent use.
@@ -220,16 +221,33 @@ func TestConfigErrors(t *testing.T) {
 func TestMergeCheckSets(t *testing.T) {
 	t.Parallel()
 
-	checks, errs := mergeCheckSets([]checkSet{
-		{Checks: []health.Check{{Name: "ups"}}, Errors: []startError{{Key: "ups/a", Text: "a"}}},
+	book := &fakeDriveBook{}
+	p1, p2 := &fakePersister{}, &fakePersister{}
+	set := mergeCheckSets([]checkSet{
+		{
+			Checks: []health.Check{{Name: "ups"}}, Errors: []startError{{Key: "ups/a", Text: "a"}},
+			Persisters: []runner.Persister{p1},
+		},
 		{},
-		{Checks: []health.Check{{Name: "network"}}},
+		{
+			Checks: []health.Check{{Name: "network"}}, Persisters: []runner.Persister{p2}, Drives: book,
+			Background: []background{{Key: "kernel/kmsg/read"}},
+		},
 	})
-	if len(checks) != 2 || checks[0].Name != "network" || checks[1].Name != "ups" {
-		t.Fatalf("checks = %+v, want network then ups", checks)
+	if len(set.Checks) != 2 || set.Checks[0].Name != "network" || set.Checks[1].Name != "ups" {
+		t.Fatalf("checks = %+v, want network then ups", set.Checks)
 	}
-	if len(errs) != 1 || errs[0].Key != "ups/a" {
-		t.Fatalf("errors = %+v", errs)
+	if len(set.Errors) != 1 || set.Errors[0].Key != "ups/a" {
+		t.Fatalf("errors = %+v", set.Errors)
+	}
+	if len(set.Persisters) != 2 || set.Persisters[0] != p1 || set.Persisters[1] != p2 {
+		t.Fatalf("persisters = %+v", set.Persisters)
+	}
+	if set.Drives != book || len(set.Background) != 1 || set.Background[0].Key != "kernel/kmsg/read" {
+		t.Fatalf("drives = %v, background = %+v", set.Drives, set.Background)
+	}
+	if empty := mergeCheckSets(nil); empty.Drives != nil {
+		t.Fatalf("no disks check: drives = %v, want a nil interface", empty.Drives)
 	}
 }
 
@@ -436,8 +454,9 @@ func TestRunnerOptions(t *testing.T) {
 	d := delivery{telegram: telegramSender{}}
 	checks := []health.Check{{Name: "network"}}
 
-	opts := runnerOptions(hs, d, checks, sysfs.NewDefault(), zap.NewNop())
-	if opts.Store != nil || opts.Maintenance != nil || opts.SMS != nil || opts.Mailer != nil {
+	opts := runnerOptions(hs, d, checkSet{Checks: checks}, sysfs.NewDefault(), zap.NewNop())
+	if opts.Store != nil || opts.Maintenance != nil || opts.SMS != nil || opts.Mailer != nil ||
+		opts.Drives != nil || len(opts.Persisters) != 0 {
 		t.Fatalf("absent facilities must be nil interfaces: %+v", opts)
 	}
 	if opts.Heartbeat == nil || opts.Uptime == nil || opts.Telegram == nil || opts.Host != "box" ||
@@ -450,8 +469,16 @@ func TestRunnerOptions(t *testing.T) {
 	}
 
 	hc.General.MaintenanceLock = "/run/maintenance.lock"
-	if opts = runnerOptions(hs, d, checks, sysfs.NewDefault(), zap.NewNop()); opts.Maintenance == nil {
+	opts = runnerOptions(hs, d, checkSet{Checks: checks}, sysfs.NewDefault(), zap.NewNop())
+	if opts.Maintenance == nil {
 		t.Fatal("maintenance lock configured: want a probe")
+	}
+
+	book, p := &fakeDriveBook{}, &fakePersister{}
+	set := checkSet{Checks: checks, Drives: book, Persisters: []runner.Persister{p}}
+	opts = runnerOptions(hs, d, set, sysfs.NewDefault(), zap.NewNop())
+	if opts.Drives != book || len(opts.Persisters) != 1 || opts.Persisters[0] != p {
+		t.Fatalf("drives = %v, persisters = %v; want the disks book and the persisters", opts.Drives, opts.Persisters)
 	}
 }
 
@@ -719,7 +746,7 @@ func TestNewHealthEnabledRegistersRunnerAndCommands(t *testing.T) {
 	for _, h := range out.Handlers {
 		names = append(names, h.Name())
 	}
-	if !slices.Equal(names, []string{"status", "clear"}) {
+	if !slices.Equal(names, []string{"status", "clear", "retire"}) {
 		t.Fatalf("handlers = %v", names)
 	}
 
@@ -780,5 +807,118 @@ func TestAppOptionsGraphIsComplete(t *testing.T) {
 				t.Fatalf("fx graph: %v", err)
 			}
 		})
+	}
+}
+
+// orderedPersister records its restore into a shared log.
+type orderedPersister struct{ record func(string) }
+
+func (p orderedPersister) Restore(store.State) error { p.record("restore"); return nil }
+func (orderedPersister) Save(*store.State) error     { return nil }
+
+func enabledHealthParams(t *testing.T, pub *fakePublisher, lc fx.Lifecycle, sets ...checkSet) healthParams {
+	t.Helper()
+
+	dir := t.TempDir()
+
+	return healthParams{
+		Lifecycle: lc, Logger: zap.NewNop(), Config: &config{ChatID: 9},
+		Setup: &healthSetup{Host: "box", Config: &hcfg.Config{General: hcfg.General{
+			StateDir: dir, HeartbeatFile: filepath.Join(dir, "heartbeat"), Concurrency: 1,
+		}}},
+		Publisher: pub, Uptime: sysfs.NewDefault(), Sets: sets,
+	}
+}
+
+func TestNewHealthRestoresStateBeforeBackgroundJobsStart(t *testing.T) {
+	t.Parallel()
+
+	var (
+		mu     sync.Mutex
+		events []string
+	)
+	record := func(e string) {
+		mu.Lock()
+		defer mu.Unlock()
+
+		events = append(events, e)
+	}
+	started := make(chan struct{})
+	job := background{Key: "kernel/kmsg/read", Run: func(ctx context.Context) error {
+		record("job")
+		close(started)
+		<-ctx.Done()
+
+		return nil
+	}}
+
+	lc := fxtest.NewLifecycle(t)
+	newHealth(enabledHealthParams(t, &fakePublisher{}, lc, checkSet{
+		Persisters: []runner.Persister{orderedPersister{record: record}},
+		Background: []background{job},
+	}))
+	lc.RequireStart()
+	<-started
+	lc.RequireStop()
+
+	mu.Lock()
+	defer mu.Unlock()
+	if !slices.Equal(events, []string{"restore", "job"}) {
+		t.Fatalf("events = %v, want the state restored before the job starts", events)
+	}
+}
+
+// retireIndex returns the index of the /retire handler in out.Handlers.
+func retireIndex(t *testing.T, out healthOut) int {
+	t.Helper()
+
+	i := slices.IndexFunc(out.Handlers, func(h telegram.Handler) bool { return h.Name() == "retire" })
+	if i < 0 {
+		t.Fatal("no /retire handler")
+	}
+
+	return i
+}
+
+func TestNewHealthRetireWithoutDisks(t *testing.T) {
+	t.Parallel()
+
+	pub := &fakePublisher{}
+	out := newHealth(enabledHealthParams(t, pub, fxtest.NewLifecycle(t)))
+	h := out.Handlers[retireIndex(t, out)]
+	if !h.Enabled() {
+		t.Fatal("/retire must stay enabled")
+	}
+	if err := h.Handle(t.Context(), 42, "/retire TEST"); err != nil {
+		t.Fatal(err)
+	}
+	if got := pub.messages(); !slices.Equal(got, []string{"No drives are monitored."}) {
+		t.Fatalf("reply = %q", got)
+	}
+	pub.mu.Lock()
+	to := slices.Clone(pub.to)
+	pub.mu.Unlock()
+	if !slices.Equal(to, []int64{42}) {
+		t.Fatalf("replied to %v, want the sender", to)
+	}
+
+	failing := newHealth(
+		enabledHealthParams(t, &fakePublisher{err: errors.New("telegram down")}, fxtest.NewLifecycle(t)),
+	)
+	if err := failing.Handlers[retireIndex(t, failing)].Handle(t.Context(), 42, "/retire"); err == nil {
+		t.Fatal("a failed reply must be returned")
+	}
+}
+
+func TestNewHealthRetireWithDisks(t *testing.T) {
+	t.Parallel()
+
+	pub := &fakePublisher{}
+	out := newHealth(enabledHealthParams(t, pub, fxtest.NewLifecycle(t), checkSet{Drives: &fakeDriveBook{}}))
+	if err := out.Handlers[retireIndex(t, out)].Handle(t.Context(), 42, "/retire TEST"); err != nil {
+		t.Fatal(err)
+	}
+	if got := pub.messages(); len(got) != 1 || !strings.HasPrefix(got[0], "Unknown drive.") {
+		t.Fatalf("reply = %q, want the disks-backed /retire", got)
 	}
 }

@@ -97,6 +97,22 @@ func (e *Engine) Clear(key string) bool {
 	return ok
 }
 
+// ClearPrefix returns every condition whose key starts with prefix to Healthy
+// without any message and reports how many were tracked.
+func (e *Engine) ClearPrefix(prefix string) int {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	n := 0
+	for k := range e.conds {
+		if strings.HasPrefix(k, prefix) {
+			delete(e.conds, k)
+			n++
+		}
+	}
+
+	return n
+}
+
 // Condition returns a copy of the state tracked for key.
 func (e *Engine) Condition(key string) (Condition, bool) {
 	e.mu.Lock()

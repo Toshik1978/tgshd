@@ -149,14 +149,15 @@ func runCheckOnce(ctx context.Context, cfg *config, cio cliIO) int {
 	}
 	defer stopAdapters()
 
-	checks, checkErrs := mergeCheckSets(sets)
-	setupErrs := slices.Concat(hs.Errors, checkErrs)
+	set := mergeCheckSets(sets)
+	restoreErrs := restoreChecks(ctx, hs.Store, set.Persisters, cio.stderr)
+	setupErrs := slices.Concat(hs.Errors, set.Errors, restoreErrs)
 
 	var t tally
 	for _, e := range setupErrs {
 		writeError(cio.stdout, e.Key, e.Text, &t)
 	}
-	interrupted := runChecks(ctx, cio.stdout, checks, &t)
+	interrupted := runChecks(ctx, cio.stdout, set.Checks, &t)
 	fmt.Fprintln(cio.stdout, t)
 
 	switch {
@@ -218,6 +219,33 @@ func openStateReadOnly(ctx context.Context, stateDir string) (*store.Store, erro
 	}
 
 	return st, nil
+}
+
+// restoreChecks hands the stored state to the checks' persisters, as the
+// daemon's first load does, so the run judges against the stored baselines,
+// cursors and counters. st is the read-only store (nil when there is none:
+// an empty state is restored, like a first start). Nothing is ever saved back
+// and no background job runs. A store that cannot be read is a warning; a
+// persister that cannot restore is a setup error.
+func restoreChecks(ctx context.Context, st *store.Store, ps []runner.Persister, stderr io.Writer) []startError {
+	var state store.State
+	if st != nil && len(ps) > 0 {
+		loaded, err := st.Load(ctx)
+		if err != nil {
+			fmt.Fprintf(stderr, "tgshd check: stored state not used: %v\n", err)
+		} else {
+			state = loaded
+		}
+	}
+
+	var errs []startError
+	for _, p := range ps {
+		if err := p.Restore(state); err != nil {
+			errs = append(errs, startError{Key: runner.KeyRestore, Text: "cannot restore state: " + err.Error()})
+		}
+	}
+
+	return errs
 }
 
 // checkGraph is the fx graph of `check --once`: the daemon's check providers

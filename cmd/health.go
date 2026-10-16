@@ -46,11 +46,17 @@ type startError struct {
 	Text string
 }
 
-// checkSet is what one check provider contributes: the checks to run and the
-// checker errors to raise at start (e.g. a section that cannot run).
+// checkSet is what one check provider contributes: the checks to run, the
+// checker errors to raise at start (e.g. a section that cannot run), the
+// persisters of the checks' own state, the drive book for /retire and the
+// background jobs the daemon runs alongside (never check --once).
 type checkSet struct {
-	Checks []health.Check
-	Errors []startError
+	Checks     []health.Check
+	Errors     []startError
+	Persisters []runner.Persister
+	// Drives is set by the disks check only; nil otherwise.
+	Drives     runner.DriveBook
+	Background []background
 }
 
 // healthSetup is the outcome of loading the health configuration and claiming
@@ -115,12 +121,18 @@ func healthProviders() fx.Option {
 // graph supplies nothing else; TestCheckGraphIsComplete guards it). It returns
 // an empty checkSet when setup.Config is nil or its section is absent, must
 // not need Docker or Postgres to construct (FR-019), and must not send or
-// write anything while constructed: check --once only reads.
+// write anything while constructed: check --once only reads. State a check
+// keeps across restarts goes through checkSet.Persisters (check --once
+// restores it from the read-only store and never saves), and long-running
+// work (a log reader) through checkSet.Background, never a lifecycle hook.
 func healthCheckProviders() fx.Option {
 	return fx.Provide(
 		sysfs.NewDefault,
 		fx.Annotate(networkChecks, fx.ResultTags(healthCheckGroup)),
 		fx.Annotate(upsChecks, fx.ResultTags(healthCheckGroup)),
+		fx.Annotate(disksChecks, fx.ResultTags(healthCheckGroup)),
+		fx.Annotate(tempsChecks, fx.ResultTags(healthCheckGroup)),
+		fx.Annotate(kernelChecks, fx.ResultTags(healthCheckGroup)),
 	)
 }
 
@@ -212,8 +224,9 @@ func closeState(st *store.Store, inst *lockfile.Instance) error {
 	return errors.Join(errs...)
 }
 
-// newHealth builds the runner and its /status and /clear commands. When the
-// configuration could not be parsed it only reports that as a checker error.
+// newHealth builds the runner and its /status, /clear and /retire commands,
+// and runs the checks' background jobs. When the configuration could not be
+// parsed it only reports that as a checker error.
 func newHealth(p healthParams) healthOut {
 	d := newDelivery(p.Config, p.Publisher, p.SMS)
 	errs := slices.Concat(p.Setup.Errors, d.errors)
@@ -233,27 +246,38 @@ func newHealth(p healthParams) healthOut {
 		return healthOut{}
 	}
 
-	checks, checkErrs := mergeCheckSets(p.Sets)
-	r := runner.New(runnerOptions(p.Setup, d, checks, p.Uptime, p.Logger))
-	registerStart(p.Lifecycle, r.Load, startLoadTimeout, r.CheckerError, slices.Concat(errs, checkErrs))
+	set := mergeCheckSets(p.Sets)
+	r := runner.New(runnerOptions(p.Setup, d, set, p.Uptime, p.Logger))
+	registerStart(p.Lifecycle, r.Load, startLoadTimeout, r.CheckerError, slices.Concat(errs, set.Errors))
+	// After registerStart: the stored state is restored before a job (the
+	// kernel log reader) starts.
+	registerBackground(p.Lifecycle, set.Background, r.CheckerError, backgroundRetry)
+
+	var retire telegram.Handler = noDrivesCommand{logger: p.Logger, publisher: p.Publisher}
+	if set.Drives != nil {
+		retire = command.NewRetireCommand(p.Logger, p.Publisher, r)
+	}
 
 	return healthOut{
 		Workers: []app.Worker{r},
 		Handlers: []telegram.Handler{
 			command.NewStatusCommand(p.Logger, p.Publisher, r),
 			command.NewClearCommand(p.Logger, p.Publisher, r),
+			retire,
 		},
 	}
 }
 
-// runnerOptions maps the setup and delivery onto runner options. Absent
-// facilities stay nil interfaces, never typed nils.
+// runnerOptions maps the setup, delivery and checks onto runner options.
+// Absent facilities stay nil interfaces, never typed nils.
 func runnerOptions(
-	hs *healthSetup, d delivery, checks []health.Check, uptime *sysfs.Reader, logger *zap.Logger,
+	hs *healthSetup, d delivery, set checkSet, uptime *sysfs.Reader, logger *zap.Logger,
 ) runner.Options {
 	g := hs.Config.General
 	opts := runner.Options{
-		Checks:      checks,
+		Checks:      set.Checks,
+		Persisters:  set.Persisters,
+		Drives:      set.Drives,
 		BootGrace:   g.BootGrace.Duration(),
 		Concurrency: g.Concurrency,
 		Heartbeat:   heartbeatFile(g.HeartbeatFile),
@@ -322,19 +346,22 @@ func registerStart(
 }
 
 // mergeCheckSets joins the check sets, ordering checks by name so the
-// runner's order does not depend on fx's value-group order.
-func mergeCheckSets(sets []checkSet) ([]health.Check, []startError) {
-	var (
-		checks []health.Check
-		errs   []startError
-	)
+// runner's order does not depend on fx's value-group order. Drives is the
+// first set's that has one (only the disks check does).
+func mergeCheckSets(sets []checkSet) checkSet {
+	var out checkSet
 	for _, s := range sets {
-		checks = append(checks, s.Checks...)
-		errs = append(errs, s.Errors...)
+		out.Checks = append(out.Checks, s.Checks...)
+		out.Errors = append(out.Errors, s.Errors...)
+		out.Persisters = append(out.Persisters, s.Persisters...)
+		out.Background = append(out.Background, s.Background...)
+		if out.Drives == nil && s.Drives != nil {
+			out.Drives = s.Drives
+		}
 	}
-	slices.SortStableFunc(checks, func(a, b health.Check) int { return strings.Compare(a.Name, b.Name) })
+	slices.SortStableFunc(out.Checks, func(a, b health.Check) int { return strings.Compare(a.Name, b.Name) })
 
-	return checks, errs
+	return out
 }
 
 // configErrors turns configuration entry errors into start errors keyed

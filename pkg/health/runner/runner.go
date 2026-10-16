@@ -7,6 +7,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -75,6 +76,10 @@ type Options struct {
 	Maintenance Maintenance
 	Uptime      Uptime
 	Store       Store
+	// Drives is the drive book /retire works on; nil means no drives are known.
+	Drives DriveBook
+	// Persisters keep the checks' own state in the store.
+	Persisters []Persister
 	// Host prefixes every pushed message.
 	Host string
 	// Mode is the notifier's default delivery mode.
@@ -144,6 +149,9 @@ type Runner struct {
 	loaded bool
 	// loadErr is the last failed Load, not yet raised by Do.
 	loadErr error
+	// restoreErrs are the persister failures of the successful Load, not yet
+	// raised by Do.
+	restoreErrs []error
 	// loadedKV is the stored kv of the successful Load.
 	loadedKV map[string]string
 
@@ -286,6 +294,7 @@ func (r *Runner) Load(ctx context.Context) error {
 	}
 	if r.opts.Store == nil {
 		r.loaded = true
+		r.restore(store.State{})
 
 		return nil
 	}
@@ -301,6 +310,7 @@ func (r *Runner) Load(ctx context.Context) error {
 	r.engine.Merge(st.Conditions)
 	r.marks.Merge(st.RateMarks)
 	r.notifier.Merge(st.Queue)
+	r.restore(st)
 
 	return nil
 }
@@ -354,16 +364,24 @@ func (r *Runner) CheckerError(key, text string) {
 	r.checker.CheckerError(key, text)
 }
 
-// raiseLoadFailure reports the last failed Load, if any, as a checker error,
-// once the load lock is released.
+// raiseLoadFailure reports the last failed Load and the persister restore
+// failures, if any, as checker errors, once the load lock is released.
 func (r *Runner) raiseLoadFailure() {
 	r.loadMu.Lock()
-	err := r.loadErr
-	r.loadErr = nil
+	err, restoreErrs := r.loadErr, r.restoreErrs
+	r.loadErr, r.restoreErrs = nil, nil
 	r.loadMu.Unlock()
 
 	if err != nil {
 		r.CheckerError(keyLoad, "cannot load state: "+err.Error())
+	}
+	if len(restoreErrs) > 0 {
+		// One message: the key is rate-limited, so a second one would be lost.
+		texts := make([]string, 0, len(restoreErrs))
+		for _, e := range restoreErrs {
+			texts = append(texts, e.Error())
+		}
+		r.CheckerError(KeyRestore, "cannot restore state: "+strings.Join(texts, "; "))
 	}
 }
 
@@ -511,6 +529,7 @@ func (r *Runner) runOne(tickCtx context.Context, idx int) health.CheckResult {
 // absent from them are untouched. An Unknown reading is a checker error and
 // changes no state.
 func (r *Runner) apply(c *cycle, chk health.Check, res health.CheckResult) {
+	res.Readings = r.dropRetired(chk.Name, res.Readings)
 	if res.Err != nil {
 		c.fail(chk.Name+"/run/error", res.Err.Error())
 	}
@@ -578,6 +597,7 @@ func (r *Runner) checkpoint(ctx context.Context, c *cycle, loaded bool) error {
 		Conditions: r.engine.Conditions(), RateMarks: r.marks.Export(), Queue: r.notifier.Export(),
 		KV: r.scheduleKV(),
 	}
+	r.persist(&st)
 	err := r.opts.Store.Checkpoint(ctx, st, alerts, samples)
 	switch {
 	case err == nil:
