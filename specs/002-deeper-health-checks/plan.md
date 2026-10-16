@@ -21,7 +21,8 @@ every uncorrectable memory error. Temperatures judge one sensor per CPU package,
 sensors only, and never treat a failed read as "gone". Network becomes one condition with
 no-route as router down; endpoint, DoH, command and freshness checks gain the rules of US5,
 including an HTTP freshness source. The weekly summary shows every drive and service in one
-message with a defined cut order. One store migration (`user_version` 2) adds message metadata to
+message with a defined cut order. Two store migrations (`user_version` 3: migration 2 adds the queue `kind`, `check_name`, `key`;
+migration 3 adds the queue `plain` and `since`) add message metadata to
 the retry queue; everything else is JSON in existing columns. No new dependency. A foundational
 phase (keyed checker errors, migration 2) comes first; six delivery phases then follow the user
 stories in priority order, and a polish phase closes.
@@ -100,7 +101,7 @@ No violation; Complexity Tracking lists notable choices only.
 specs/002-deeper-health-checks/
 ├── plan.md              # this file
 ├── research.md          # R1–R28
-├── data-model.md        # entity and state deltas, schema v2
+├── data-model.md        # entity and state deltas, schema v3
 ├── quickstart.md        # validation scenarios (fixtures and fakes only)
 ├── contracts/
 │   ├── config.md              # amends 001 contracts/config.md

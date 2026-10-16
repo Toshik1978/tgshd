@@ -26,7 +26,7 @@ One line per active drive:
 <node> <bus> <model> …<last 4 of serial>: health <OK|FAILING|unknown|missing>, wear <n>% (7d a/b/c), spare <n>% (floor <f>%, drive <t>%), temp <n>°C (7d a/b/c), written 7d <size>, self-test <result> <age>, last read <age> ago[, asleep since <time>][, unreadable since <time>]
 ```
 
-- `wear` covers NVMe percentage used and SATA SSD wear (100 − attribute 177).
+- `wear` covers NVMe percentage used and SATA SSD wear (100 − attribute 177, only when smartctl names it `Wear_Leveling_Count`).
 - `spare` appears for NVMe drives only.
 - `self-test` reads `passed 12 d ago`, `failed 3 d ago`, `none (first seen 5 d ago)`, or
   `not readable` for a drive whose log format is not supported (always for SAS/SCSI drives).

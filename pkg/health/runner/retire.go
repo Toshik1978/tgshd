@@ -88,7 +88,9 @@ func (r *Runner) Retire(ctx context.Context, serial string) (RetireResult, error
 	if !r.opts.Drives.Retire(d.Serial) {
 		return RetireResult{Candidates: r.activeDrives()}, ErrNoDrive
 	}
-	cleared := r.engine.ClearPrefix(retirePrefix + d.Serial + "/")
+	prefix := retirePrefix + d.Serial + "/"
+	cleared := r.engine.ClearPrefix(prefix)
+	r.notifier.ForgetEnded(func(key string) bool { return strings.HasPrefix(key, prefix) })
 	text := "Drive retired: " + d.Label()
 
 	r.mu.Lock()

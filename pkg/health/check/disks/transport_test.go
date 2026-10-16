@@ -9,6 +9,9 @@ func TestClassifyTransport(t *testing.T) {
 		{"usb", "/sys/devices/pci0000:00/0000:00:14.0/usb2/2-1/2-1:1.0/host6/target6:0:0/6:0:0:0/block/sdb", "usb"},
 		{"usb segment", "/sys/devices/pci0000:00/usb/2-1/host6/block/sdb", "usb"},
 		{"nvme", "/sys/devices/pci0000:00/0000:00:1d.0/0000:01:00.0/nvme/nvme0/nvme0n1", "nvme"},
+		{"nvme multipath", "/sys/devices/virtual/nvme-subsystem/nvme-subsys0/nvme0n1", "nvme"},
+		{"nvme subsystem", "/sys/devices/virtual/nvme-subsys1/nvme1n1", "nvme"},
+		{"nvme as a name part is not a segment", "/sys/devices/example/nvmex/block/sda", "other"},
 		{"sata", "/sys/devices/pci0000:00/0000:00:1f.2/ata1/host0/target0:0:0/0:0:0:0/block/sda", "sata"},
 		{
 			"sas end device",

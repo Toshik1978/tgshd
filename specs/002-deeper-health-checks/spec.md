@@ -310,7 +310,7 @@ summary with and without a length overflow; verify each line and the cut order.
 - The NVMe error count in the built-in set is the drive's media and data-integrity error count; attribute 252 (added bad blocks) and other vendor-specific attributes are not in the built-in set and can be added by the operator.
 - A drive on which a built-in counter climbs during normal operation alerts on every rise, by design; the operator's recourse is excluding that drive from the disks check. Built-in counters cannot be turned off individually.
 - "Asleep" means the drive reports a standby or sleep power state when asked without waking it; drives that cannot report their power state are read normally.
-- The plausible physical range for temperature readings is −40 °C to 150 °C.
+- The plausible physical range for temperature readings is −40 °C to 150 °C. It applies to drive temperatures too, where 0 °C (smartctl's value for a drive without a reading) is also unreadable: such a reading is not sampled and neither opens nor resolves the drive's temperature problem.
 - The email checker error of FR-029 needs an SMTP relay; without one, the Telegram failure is written to the log and PROBLEMs still go by SMS when SMS is configured. A PROBLEM sent by SMS under FR-030 is still delivered to Telegram when it recovers, so the chat history stays complete.
 - Under FR-031 the system prefers leaving the condition not open (so it is raised again); listing in a later message is used for PROBLEMs whose condition has meanwhile resolved or started a new streak.
 - The freshness future tolerance (1 h) absorbs clock differences between the host and a stamp writer elsewhere; it is configurable per check.

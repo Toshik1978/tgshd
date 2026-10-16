@@ -30,8 +30,8 @@ type JournalSource interface {
 // health.MaxCheckTimeout, and reports each class found as one Event. A read cut by that limit
 // or by the source's record cap still reports what was read and raises a checker error. A read
 // that fails otherwise reports what was read and logs a warning. No journal source or no
-// persistent journal skip the tail. The caller holds c.mu
-// and moves the cursor afterwards unless ctx itself ended.
+// persistent journal skip the tail. The caller holds c.mu and moves the cursor afterwards
+// unless ctx itself ended.
 func (c *Check) bootTail(ctx context.Context) ([]health.Reading, error) {
 	if c.journal == nil {
 		return nil, nil

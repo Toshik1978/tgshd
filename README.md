@@ -60,8 +60,12 @@ that feature is simply inactive and the daemon still runs.
   7.0+ for JSON output) on `PATH`; GPU temperatures use `nvidia-smi` when it is
   installed (optional, absent means no GPUs). `disks` reads every drive with
   `smartctl -n standby`, so a spun-down drive is skipped that run rather than
-  woken. `disks` and `kernel` read
+  woken (see the forced daily read below). `disks` and `kernel` read
   `/dev/*` and `/dev/kmsg`, so run the daemon as root (the systemd unit below).
+  `journalctl` (systemd) is an optional host tool: after a reboot the `kernel`
+  check uses it to read the previous boot's kernel log tail from the persistent
+  journal. Without it, or without a persistent journal, that tail is skipped
+  and a log line says so.
   Hardware checks are not supported in the Docker image (distroless, nonroot,
   no `smartctl`/`nvidia-smi`).
 - Health monitoring, service checks: `containers`, the `container` option of an
@@ -105,11 +109,11 @@ Configuration is read from the environment (a local `.env` is auto-loaded; see
 ## Host health monitoring
 
 tgshd can watch the host it runs on and push alerts to Telegram (and, per
-check, by SMS). Alerts are state based: `PROBLEM` when a condition goes bad for
+check, by SMS). Alerts are state based: `PROBLEM` when a condition stays bad for
 longer than its threshold, `RESOLVED` when it recovers, and the state survives
 restarts. It is **off** unless `BOT_HEALTH_CONFIG` points at a health YAML file;
 start from [`config/health.example.yaml`](config/health.example.yaml), which
-documents every section.
+shows every key with a comment.
 
 ```bash
 sudo install -d /usr/local/etc
@@ -119,57 +123,146 @@ sudo install -m 0644 config/health.example.yaml /usr/local/etc/tgshd-health.yaml
 sudo systemctl restart tgshd
 ```
 
-The file is strict YAML: an invalid entry is reported as a checker error and
-skipped, and a file that cannot be parsed disables health monitoring. Omitted
-sections take their defaults and a check type that is absent is not run.
-Durations use Go syntax plus `d` for days (`8d`). Each check accepts `interval`,
-`threshold`, `mode` (`tlg`, `sms` or `tlg-or-sms`) and `needs_internet`.
-The `timeout` of `http` and `command` entries is at most `20s`, so a hung probe
-is judged inside the 40 s run budget of a cycle (a PROBLEM, and a strike
-towards a `command` fix) rather than abandoned.
-Checker errors are also emailed when `BOT_SMTP_ADDR` is set.
+### Configuration file
 
-**Checks.** Each check type runs when its section is configured: `network`
-(connectivity, evaluated first every cycle), `ups` (NUT power, using the
-`BOT_NUT_*` settings), `disks` (SMART via smartmontools), `temperatures`
-(hwmon sensors, and GPUs via nvidia-smi), `kernel` (EDAC counters and the
-kernel log), `containers` (Docker), `http` (endpoint probes), `freshness`
-(age of a status file: its mtime or a Unix time it holds), `command` (custom
-probe commands with optional fix actions) and `modem_probe` (a weekly SMS round
-trip; it needs `BOT_GAMMU_DSN`). A `summary` section adds the weekly summary
-described below.
+The file is strict YAML: an unknown key is an error. An invalid entry is
+reported as a checker error and skipped; a file that cannot be parsed disables
+health monitoring. Every top-level section is optional: an omitted section
+takes its defaults, and a check whose section is absent does not run.
+Durations use Go syntax (`30s`, `15m`, `6h`) plus `d` for days (`8d`). Checker
+errors (problems of the monitor itself, such as an invalid entry or an
+unreadable sensor) go to Telegram, and are also emailed when `BOT_SMTP_ADDR`
+is set.
+
+**`general`** (daemon-wide):
+
+| Key | Default | Meaning |
+| :--- | :--- | :--- |
+| `state_dir` | `/var/lib/tgshd` | State database and instance lock |
+| `heartbeat_file` | `/run/tgshd/heartbeat` | Written every 30 s for an external watchdog |
+| `maintenance_lock` | none | A file whose exclusive lock opens a maintenance window; none means no maintenance windows |
+| `maintenance_max_hold` | `6h` | A maintenance lock held longer raises a checker error (the window stays) |
+| `boot_grace` | `10m` | Quiet window after the host boots |
+| `concurrency` | `4` | Checks run at the same time |
+| `telegram_failing_after` | `15m` | Telegram failing this long sends one email notice |
+
+**Keys every check accepts** (`modem_probe` takes none of them):
+
+| Key | Default | Meaning |
+| :--- | :--- | :--- |
+| `interval` | per check, below | How often the check runs |
+| `threshold` | per check, below | How long a condition must stay bad before its PROBLEM is sent; `0` sends it at once |
+| `mode` | `tlg` | `tlg`, `sms` or `tlg-or-sms` (SMS needs gammu and `BOT_SMS_PHONE`) |
+| `needs_internet` | `false` (`true` for an `http` entry with `doh`) | Skip the check while the `network` check finds the internet down or has not read it yet |
+| `pause_in_quiet_windows` | `true`; `false` for `disks`, `temperatures`, `kernel` | Hold the check back during quiet windows |
+| `summary_group` | none | Checks naming the same group (`[a-z0-9-]+`) share one line of the weekly summary; no effect on `disks`, `temperatures` and `kernel` |
+
+### Checks
+
+| Section | Watches | Interval / threshold | Keys of its own |
+| :--- | :--- | :--- | :--- |
+| `network` | Default route, gateway and internet reachability, as one condition; evaluated first every cycle | `5m` / its interval | `internet_targets` (any one answering means the internet is up). Mode is `sms`: the PROBLEM goes by SMS, the RESOLVED by `tlg-or-sms` |
+| `ups` | NUT power status, using the `BOT_NUT_*` settings | `5m` / `5m` | — |
+| `disks` | SMART health of NVMe, SATA and SAS drives (smartmontools) | `15m` / `0` | `wear_percent` (`80`), `selftest_max_age` (`40d` since a passed self-test was last seen), `spare_floor_percent` (`20`, NVMe), `force_read_after` (`24h`, at least `1h`), `include_serials` (USB and other hot-pluggable drives are skipped unless listed), `exclude_serials`, `extra_counters` and `extra_counters_by_serial` (extra ATA attribute ids, 1–255) |
+| `temperatures` | One package sensor per CPU, GPUs (nvidia-smi), listed board sensors; drive limits are judged by `disks` | `15m` / `0` | `limits` in °C, a PROBLEM at or above: `cpu: 90`, `drive_nvme: 60`, `drive_sata: 60` (also SAS), `gpu: 85`, `board: 75`; `limits_by_serial` (per drive); `board_sensors` (`{chip, label, limit}`, `*` globs; only listed board sensors are judged) |
+| `kernel` | EDAC memory error counters and the kernel log (read continuously) | `15m` / `0` | — |
+| `containers` | Docker container health | `5m` / `15m` | `exclude` (globs on the container name) |
+| `http` (list) | One endpoint per entry | `10m` / `10m` | `name`, `url`, `timeout` (`15s`, at most `20s`), `status` (`[200, 399]`), `connect_to` or `doh`, `header`, `follow_redirects` (`false`: a redirect is judged by its own status), `auth_refusal` (`down` or `checker_error`: what a 401/403 means), `depends_on`, `container` (also require this container healthy) |
+| `freshness` (list) | Age of a status stamp: a file's mtime or a Unix time in a file or at a URL | `15m` / `0` | `name`, `path` or `url` (exactly one), `content` (`epoch` or `mtime`), `max_age`, `future_tolerance` (`1h`), and for `url`: `timeout` (`15s`, at most `20s`) and `header` |
+| `command` (list) | A probe command you provide, with an optional fix | `5m` / `0` | `name`, `run` (argv, no shell), `timeout` (`20s`, at most `20s`), `expect_output` and `forbid_output` (Go RE2), `timeout_verdict` (`broken` or `unreadable`), `fix`, `report` |
+| `modem_probe` | A weekly SMS round trip through the modem (needs `BOT_GAMMU_DSN`) | weekly | `phone_env`, `weekday` (`sunday`), `time` (`11:02`), `reply_within` (`30m`), `max_silence` (`8d`, longer than a week plus `reply_within`) |
+
+A `summary` section (`weekday`, default `monday`; `time`, default `09:00`)
+enables the weekly summary.
+
+**`header`** (`http` and `freshness`): `{name, value_env, prefix,
+placeholders}`. The value is read from the environment variable `value_env`
+and sent after `prefix`; a value containing one of the `placeholders`
+(case-insensitive) means the secret was never set and is reported as a checker
+error.
+
+**`depends_on`** (`http`): a condition `kind/name`, such as
+`network/connectivity`, `command/port-guard` or another `http/<name>`; the
+check is skipped while that condition is bad. An entry is rejected at load
+when its `depends_on` names the entry itself, forms a cycle, names a condition
+no configured check raises, or names a `disks` or `temperatures` condition
+(those are per drive or sensor and have no `kind/name` key).
+`network/router` and `network/internet` are accepted as aliases of
+`network/connectivity`.
+
+**`fix`** (`command`): `after` (consecutive failures, default `2`), either
+`restart_container` or `run`, `max_per_hour` (`3`) and `grace_after_start`
+(`2m`). `report: alert` (the default) sends each fix as a message;
+`report: journal` only logs it.
+
+**Timeouts.** The checks of one 30 s cycle share a run budget of 40 s. That is
+why `http`, `freshness` and `command` timeouts are at most `20s`: a hung probe
+is judged (a PROBLEM, and a strike towards a `command` fix) instead of being
+abandoned.
+
+### Behaviour
+
+**Quiet windows.** A maintenance window (while `general.maintenance_lock` is
+held) or the boot grace pauses every check except the hardware ones: `disks`,
+`temperatures` and `kernel` keep running, because a failing drive matters most
+during a reboot. Set `pause_in_quiet_windows: true` on one of them to pause it
+as well, or `false` on any other check except `modem_probe` to keep it running.
+Setting it `false` on a `command` check that has a fix lets the fix run during
+maintenance windows. A check with `needs_internet: true` runs only once the
+`network` check has read the network, so while `network` pauses (its default)
+a maintenance lock held from boot keeps such a check waiting until the lock is
+released.
+
+**Delivery.** While Telegram keeps failing, each queued PROBLEM also goes by
+SMS (needs gammu and `BOT_SMS_PHONE`), and the RESOLVED of a PROBLEM sent by SMS
+goes by SMS too. The PROBLEM's Telegram copy stays queued and is delivered to
+Telegram later. When Telegram has been failing for longer than
+`general.telegram_failing_after`, one email names the failing channel and since
+when (needs `BOT_SMTP_ADDR`; without it the failure is only logged). A PROBLEM
+that leaves the retry queue undelivered is never dropped silently: its
+condition is reopened so it is raised again, or it is listed under
+`Undelivered earlier:` in the next delivered message (up to 50 listed, the rest
+counted in a line that is always shown).
+
+**Sleeping drives.** `disks` never wakes a drive on a routine read. A drive
+whose last successful read is older than `disks.force_read_after` is read even
+if that wakes it, at most one such drive per run.
 
 **Telegram commands.** `/status` lists open problems (or `All checks OK`) and
 notes a degraded store or quiet window; `/clear <condition key>` drops an open
 condition without sending RESOLVED; `/retire <serial>` retires a drive that was
 removed (the full serial or its last 4+ characters; an unknown or ambiguous
-value lists the known drives) and clears its conditions. `/history [check] [24h|7d|30d]` lists the
-alert log newest first (a check name or condition key prefix filters it; the
-default period is 7d), `/temp` shows each sensor's current value next to its
-7-day min/avg/max, and `/disks` shows each drive by bus, model and the last 4
-serial characters with its health (OK, FAILING or missing), wear and temperature (each
-followed by its 7-day min/avg/max, e.g. `temp 41°C (7d 35/38/44)`), spare (NVMe),
-data written in the last 7 days and the age of its newest
-self-test. These three read the state database; while the daemon runs from
-memory they reply that history is unavailable. All commands are accepted only
-from `TELEGRAM_CHAT_ID` and `TELEGRAM_ALLOWED_IDS`.
+value lists the known drives) and clears its conditions.
+`/history [check] [24h|7d|30d]` lists the alert log newest first (a check name
+or condition key prefix filters it; the default period is 7d), `/temp` shows
+each sensor's current value next to its 7-day min/avg/max, and `/disks` shows
+each drive by bus, model and the last 4 serial characters with its health (OK,
+FAILING or missing), wear and temperature (each followed by its 7-day
+min/avg/max, e.g. `temp 41°C (7d 35/38/44)`), spare (NVMe), data written in the
+last 7 days and the age of its newest self-test. These three read the state
+database; while the daemon runs from memory they reply that history is
+unavailable. All commands are accepted only from `TELEGRAM_CHAT_ID` and
+`TELEGRAM_ALLOWED_IDS`.
 
-**Weekly summary.** With a `summary` section (default Monday 09:00, host local
-time) the daemon pushes one message, prefixed with the host name, listing each
-drive (health, wear, data written this week), a services block (containers,
-http, freshness and command checks: OK or how many problems are open) and the
-open problems. It fits one Telegram message and is cut with `…` when longer; a
-section that cannot be built reads "unavailable". Once a day the daemon also
-prunes the state database: alerts after 365 days, raw samples after 90 days
-(rolled up into daily min/avg/max that `/temp` and `/disks` keep using) and
-undelivered messages after 7 days (each dropped one is logged).
+**Weekly summary.** With a `summary` section the daemon pushes one message
+(host local time), prefixed with the host name, listing each drive (health,
+wear, data written this week), a services block (one line per configured check
+other than `disks`, `temperatures` and `kernel`, or per `summary_group`: OK or
+its open problems, with freshness ages and the modem probe state) and the open
+problems. It fits one Telegram message and is cut with `…` when longer; a
+section that cannot be built reads "unavailable".
 
-**CLI subcommands.**
+**Retention.** Once a day the daemon prunes the state database: alerts after
+365 days, raw samples after 90 days (rolled up into daily min/avg/max that
+`/temp` and `/disks` keep using) and undelivered messages after 7 days (each
+dropped one is logged).
+
+### CLI subcommands
 
 | Invocation | What it does |
 | :--- | :--- |
 | `tgshd` | Runs the daemon; health monitoring runs when `BOT_HEALTH_CONFIG` is set |
-| `tgshd check --once` | Runs every configured check once with the real adapters and prints `<VERDICT> <key>: <text>` per reading plus a summary line; sends and writes nothing. Exit 0 ran, 1 config/setup error |
+| `tgshd check --once` | Runs every configured check once with the real adapters and prints `<VERDICT> <key>: <text>` per reading plus a summary line; sends and writes nothing. A sleeping drive is never woken and prints `ASLEEP disks/<serial>: last read <age> ago` (or `never read`); each distinct checker error prints as `ERROR <check>/<subject>/<kind>: <text>`; the previous boot's kernel log is not read. If the state database is at an older schema version (the daemon has not been restarted since the upgrade) it runs without stored state and says so. Exit 0 ran, 1 config/setup error |
 | `tgshd heartbeat --planned-reboot <seconds>` | Sets `planned_until` in the heartbeat file so an external watchdog tolerates a planned reboot; `0` clears it. Runs no checks. Exit 0 ok, 1 bad argument or write error |
 
 `sudo` drops the service environment. When running a subcommand by hand, pass
@@ -191,14 +284,17 @@ customised.
 It also exits 1 when `BOT_HEALTH_CONFIG` points at an unreadable or
 unparsable file, since the heartbeat path cannot then be determined.
 
-**Heartbeat.** The daemon writes `ts=<epoch> planned_until=<epoch>` to
-`general.heartbeat_file` every 30 seconds. An external watchdog should treat a
-missing file or an old `ts` as "daemon quiet", unless `now < planned_until`. `tgshd heartbeat` keeps an existing `ts`, and on a
-missing or corrupt file writes the current time as `ts`.
+### Heartbeat and host requirements
 
-**Host requirements.** Run tgshd as root on the host itself (not in the
-distroless container) so it can read host state; the state database and
-instance lock live in `general.state_dir` (default `/var/lib/tgshd`).
+The daemon writes `ts=<epoch> planned_until=<epoch>` to
+`general.heartbeat_file` every 30 seconds. An external watchdog should treat a
+missing file or an old `ts` as "daemon quiet", unless `now < planned_until`.
+`tgshd heartbeat` keeps an existing `ts`, and on a missing or corrupt file
+writes the current time as `ts`.
+
+Run tgshd as root on the host itself (not in the distroless container) so it
+can read host state; the state database and instance lock live in
+`general.state_dir` (default `/var/lib/tgshd`).
 
 ## Incoming SMS through gammu
 
@@ -219,8 +315,10 @@ modem and SIM still work: once a week (`weekday`, `time`) tgshd sends an SMS
 with a random token to the modem's own number, and the inbox poll recognises
 the reply (sender compared by digits, by the last 9 digits when the lengths
 differ; exact text) and does not forward it. A PROBLEM is raised at once when
-the send fails, when the reply has not come back within `reply_within`, or when
-no probe has come back for `max_silence`; the next returned probe resolves it.
+the send fails (it is retried every minute until it goes out), when the reply
+has not come back within `reply_within`, or when no probe has come back for
+`max_silence` (which must be longer than a week plus `reply_within`); the next
+returned probe resolves it.
 `phone_env` names the environment variable holding the modem's number, so the
 number stays out of the YAML:
 

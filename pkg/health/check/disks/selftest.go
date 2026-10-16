@@ -15,6 +15,11 @@ type SelfTestState struct {
 	// last time, newest first. Empty on a first sighting and for a baseline
 	// stored before the head existed.
 	Head []SelfTestID
+	// Seen is true once the log has been read, even when it was empty: the
+	// entries that appear in a log seen empty are new. False on a first
+	// sighting and for a baseline stored before it existed, whose head (when
+	// not empty) tells the same.
+	Seen bool
 	// OKAt is when a passed self-test was last newly observed (Unix seconds),
 	// zero when never.
 	OKAt int64
@@ -37,8 +42,9 @@ type SelfTestUpdate struct {
 	// entry, newest first. Each one is reported once; the newest finished
 	// entry is reported by the self-test condition instead.
 	Failures []SelfTestEntry
-	// Head is the state to store.
+	// Head and Seen are the state to store.
 	Head []SelfTestID
+	Seen bool
 	// OKAt is the ok time to store, never later than now.
 	OKAt int64
 	// Newest is the newest finished entry, nil when the log has none.
@@ -50,12 +56,13 @@ type SelfTestUpdate struct {
 // matches are new. When the head cannot be aligned (log cleared or wrapped),
 // only entries newer than the stored newest power-on hours are new.
 //
-// A newly observed passed entry sets OKAt to now. With no stored head the
-// whole log is adopted as the head: nothing is new, OKAt is left alone (a
-// stale adopted log must not make an overdue drive look freshly tested), and
-// the age then rests on the first-sighting grace (see SelfTestAge).
+// A newly observed passed entry sets OKAt to now. A log never seen before is
+// adopted whole as the head: nothing is new, OKAt is left alone (a stale
+// adopted log must not make an overdue drive look freshly tested), and the
+// age then rests on the first-sighting grace (see SelfTestAge). Every entry
+// of a log last seen empty is new.
 func AlignSelfTests(prev SelfTestState, log []SelfTestEntry, now time.Time) SelfTestUpdate {
-	out := SelfTestUpdate{Head: prev.Head, OKAt: min(prev.OKAt, now.Unix())}
+	out := SelfTestUpdate{Head: prev.Head, Seen: true, OKAt: min(prev.OKAt, now.Unix())}
 
 	newestFinished, newest := newestOf(log)
 	out.Newest = newest
@@ -64,16 +71,20 @@ func AlignSelfTests(prev SelfTestState, log []SelfTestEntry, now time.Time) Self
 		return out
 	}
 	out.Head = logHead(log)
-	if len(prev.Head) == 0 {
+	n := len(log)
+	switch {
+	case len(prev.Head) > 0:
+		n = newCount(prev.Head, log)
+	case !prev.Seen:
 		return out
 	}
 
-	for i := range newCount(prev.Head, log) {
-		if log[i].Result == SelfTestPassed {
+	for i, e := range log[:n] {
+		if e.Result == SelfTestPassed {
 			out.OKAt = now.Unix()
 		}
-		if log[i].Result == SelfTestFailed && i != newestFinished {
-			out.Failures = append(out.Failures, log[i])
+		if e.Result == SelfTestFailed && i != newestFinished {
+			out.Failures = append(out.Failures, e)
 		}
 	}
 
@@ -123,11 +134,26 @@ func newCount(head []SelfTestID, log []SelfTestEntry) int {
 	}
 	// Not aligned: only entries newer than the stored newest hours are new.
 	n := 0
-	for n < len(log) && log[n].hasHours && log[n].ID.Hours > head[0].Hours {
+	for n < len(log) && log[n].hasHours && newerThan(log[n], head[0].Hours) {
 		n++
 	}
 
 	return n
+}
+
+// newerThan reports whether e ran after power-on hours h. ATA hours wrap at
+// 65536, so they are compared modulo 65536: e is newer when it is less than
+// half the range ahead of h.
+func newerThan(e SelfTestEntry, h int64) bool {
+	if !e.wraps {
+		return e.ID.Hours > h
+	}
+	d := (e.ID.Hours - h) % ataSelfTestHoursWrap
+	if d < 0 {
+		d += ataSelfTestHoursWrap
+	}
+
+	return d != 0 && d < ataSelfTestHoursWrap/2
 }
 
 // alignedAt returns the first log position where the head matches, or -1.

@@ -47,15 +47,11 @@ func (p *ping) Ping(ctx context.Context, hosts []string) (map[string]bool, error
 // Reachable is like Ping but tolerates packet loss: a host is up when at
 // least one of its probes was answered. Unlike Ping it reports probing
 // failures: if any host could not be probed because of a setup error (for
-// example missing CAP_NET_RAW) it returns an error, so callers can tell "could
-// not check" from "no answer".
+// example missing CAP_NET_RAW) it returns the joined error, so callers can tell
+// "could not check" from "no answer". The per-host result is returned even
+// then, so one host that cannot be probed never masks the others' answers.
 func (p *ping) Reachable(ctx context.Context, hosts []string) (map[string]bool, error) {
-	resp, err := p.probeAll(ctx, hosts, func(s *pingtool.Statistics) bool { return s.PacketsRecv > 0 })
-	if err != nil {
-		return nil, err
-	}
-
-	return resp, nil
+	return p.probeAll(ctx, hosts, func(s *pingtool.Statistics) bool { return s.PacketsRecv > 0 })
 }
 
 // probeAll probes every host in parallel and judges each with up. The error is

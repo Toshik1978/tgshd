@@ -4,7 +4,8 @@
 Everything not named here is unchanged: the path (`$BOT_HEALTH_CONFIG`), strict YAML (unknown
 keys are errors), per-entry validation, duration syntax, the run budget and timeouts.
 
-**Compatibility**: every 001 file stays valid and loads without edits. New keys are optional.
+**Compatibility**: every 001 file stays valid and loads without edits, except for values listed in
+"Stricter validation" below that could never work as meant. New keys are optional.
 Behaviour changes only where 002 deliberately changes a default or a judgement rule; those are
 listed in "Changed defaults" and "Changed rules" below, each with the key that restores the 001
 behaviour where one exists.
@@ -13,8 +14,8 @@ behaviour where one exists.
 
 | Section | Key | Type | Default | Validation | FR |
 |---|---|---|---|---|---|
-| every check (common) | `pause_in_quiet_windows` | bool | `false` for `disks`, `temperatures`, `kernel`; `true` for every other check | — | FR-026 |
-| every check (common) | `summary_group` | string | none (one summary line per check) | `[a-z0-9-]+` | FR-046 |
+| every check (common) | `pause_in_quiet_windows` | bool | `false` for `disks`, `temperatures`, `kernel`; `true` for every other check | — (warning: `false` on a `command` check with a fix lets the fix run during maintenance windows) | FR-026 |
+| every check (common) | `summary_group` | string | none (one summary line per check) | `[a-z0-9-]+`; no effect on `disks`, `temperatures`, `kernel` (the drives section and open problems cover them) | FR-046 |
 | `general` | `maintenance_max_hold` | duration | `6h` | > 0 | FR-027 |
 | `general` | `telegram_failing_after` | duration | `15m` | ≥ `1m` | FR-029 |
 | `disks` | `spare_floor_percent` | int | `20` | 0–100 | FR-008 |
@@ -64,6 +65,18 @@ behaviour where one exists.
 | DoH NXDOMAIN / NODATA | unreadable | down | FR-040 |
 | Freshness stamp in the future | fresh | stale beyond `future_tolerance` | FR-042 |
 | Checker-error rate limit | per check | per check, subject and kind | FR-028 |
+
+## Stricter validation
+
+Values that could never work as meant are now rejected at load, so the entry is reported and
+skipped instead of misbehaving at run time.
+
+| Key | Now rejected | Why |
+|---|---|---|
+| `modem_probe.max_silence` | at most one week plus `reply_within` | the probe goes out weekly; a shorter silence alerts every week |
+| `http[].header.name`, `freshness[].header.name` | not an RFC 7230 token | no request can carry it |
+| `http[].header.prefix`, `freshness[].header.prefix` | a control character (tab allowed) | not allowed in a header value |
+| `http[].depends_on` | the entry itself, a cycle of `http` entries, or a condition no configured check raises (an unknown `http`, `freshness` or `command` entry; a `network` key other than `connectivity`, `router`, `internet`; a `modem_probe` key other than `roundtrip`; any key of an absent section; any `disks` or `temperatures` key, whose conditions have three parts) | the check would be skipped forever once its own condition is bad, or the dependency would never apply |
 
 ## Example (002 keys only)
 

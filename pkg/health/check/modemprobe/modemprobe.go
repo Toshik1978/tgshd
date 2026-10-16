@@ -177,17 +177,25 @@ func (p *Probe) Run(ctx context.Context) health.CheckResult {
 
 	now := p.now()
 
-	timedOut, token := p.prepare(now)
+	timedOut, token, prev := p.prepare(now)
 
 	sendFailed := false
 
 	if token != "" {
 		if err := p.sender.Publish(ctx, phone, probeText(token)); err != nil {
-			sendFailed = true
-
+			// Undo the send so the slot stays due and the next run retries
+			// it, instead of waiting a week with the problem open.
 			p.mu.Lock()
-			p.state.Token = ""
+			p.state.SentAt, p.state.Token = prev.SentAt, prev.Token
 			p.mu.Unlock()
+
+			// A send cut short by the run's context (shutdown) says nothing
+			// about the modem: the run failed, it is not Bad.
+			if ctx.Err() != nil {
+				return health.CheckResult{Err: fmt.Errorf("send modem probe: %w", err)}
+			}
+
+			sendFailed = true
 		}
 	}
 
@@ -224,8 +232,9 @@ func (p *Probe) pending(now time.Time) health.Reading {
 }
 
 // prepare records the first run, detects a timed-out probe and, when a slot is
-// due, allocates the new probe's token (empty when nothing is to be sent).
-func (p *Probe) prepare(now time.Time) (bool, string) {
+// due, allocates the new probe's token (empty when nothing is to be sent). It
+// also returns the state before the new probe, to undo a failed send.
+func (p *Probe) prepare(now time.Time) (bool, string, State) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
@@ -238,15 +247,17 @@ func (p *Probe) prepare(now time.Time) (bool, string) {
 		p.state.FirstMissingAt = p.state.SentAt
 	}
 
+	prev := p.state
+
 	if p.sender == nil || !p.due(now) {
-		return timedOut, ""
+		return timedOut, "", prev
 	}
 
 	token := newToken()
 	p.state.SentAt = now
 	p.state.Token = token
 
-	return timedOut, token
+	return timedOut, token, prev
 }
 
 var errNoPhone = errors.New("phone number is not configured")

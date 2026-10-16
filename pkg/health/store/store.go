@@ -228,10 +228,20 @@ CREATE TABLE queue (
 );
 `
 
+// schemaV2 adds the queue item's kind, check and key. A 001 row's kind is
+// read from the label after its "<host>: " prefix, as the notifier renders
+// it, so a queued PROBLEM keeps the SMS fallback and the dropped handling;
+// its check and key stay empty.
 const schemaV2 = `
 ALTER TABLE queue ADD COLUMN kind TEXT NOT NULL DEFAULT 'event';
 ALTER TABLE queue ADD COLUMN check_name TEXT NOT NULL DEFAULT '';
 ALTER TABLE queue ADD COLUMN key TEXT NOT NULL DEFAULT '';
+UPDATE queue SET kind = CASE
+  WHEN instr(text, ': ') = 0 THEN 'event'
+  WHEN substr(text, instr(text, ': ') + 2, 9) = 'PROBLEM: ' THEN 'problem'
+  WHEN substr(text, instr(text, ': ') + 2, 10) = 'RESOLVED: ' THEN 'resolved'
+  ELSE 'event'
+END;
 `
 
 // schemaV3 keeps a queued message's plain text and streak start, so a

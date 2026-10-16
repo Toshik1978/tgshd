@@ -19,10 +19,12 @@ type fakeSender struct {
 	err   error
 	phone string
 	texts []string
+	calls int
 }
 
 func (f *fakeSender) Publish(_ context.Context, p, msg string) error {
 	f.phone = p
+	f.calls++
 	if f.err != nil {
 		return f.err
 	}
@@ -210,8 +212,55 @@ func TestSendFailureIsBadAtOnce(t *testing.T) {
 		t.Fatal("matched with no probe outstanding")
 	}
 
-	if _, ok := only(t, p.Run(t.Context())); ok {
-		t.Fatal("send failure retried within the same week")
+	// The failed send is retried on the next run, so a passing outage does
+	// not keep the problem open until next week's probe.
+	c.add(time.Minute)
+
+	if r, ok := only(t, p.Run(t.Context())); !ok || r.Verdict != health.Bad || s.calls != 2 {
+		t.Fatalf("want a retried send still Bad, got %+v after %d sends", r, s.calls)
+	}
+
+	s.err = nil
+	c.add(time.Minute)
+
+	if _, ok := only(t, p.Run(t.Context())); ok || len(s.texts) != 1 {
+		t.Fatalf("recovered send: %d texts sent", len(s.texts))
+	}
+
+	c.add(time.Minute)
+
+	if !p.Match(phone, s.texts[0], c.now) {
+		t.Fatal("retried probe did not match")
+	}
+
+	if r, ok := only(t, p.Run(t.Context())); !ok || r.Verdict != health.Good {
+		t.Fatalf("want Good after the retried probe came back, got %+v", r)
+	}
+}
+
+// TestSendCancelledIsNotBad: a send that fails because the run's context
+// ended (shutdown) is a failed run, not a broken modem, and is retried.
+func TestSendCancelledIsNotBad(t *testing.T) {
+	s, c := &fakeSender{}, wednesday()
+	p := newProbe(t, s, c)
+	p.Run(t.Context())
+
+	c.now = sunday(11, 5)
+	s.err = context.Canceled
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	res := p.Run(ctx)
+	if res.Err == nil || len(res.Readings) != 0 {
+		t.Fatalf("want a run error and no reading, got %+v", res)
+	}
+
+	s.err = nil
+	c.add(time.Minute)
+
+	if _, ok := only(t, p.Run(t.Context())); ok || len(s.texts) != 1 {
+		t.Fatalf("probe not retried after the cancelled send: %d texts", len(s.texts))
 	}
 }
 
@@ -539,7 +588,7 @@ func TestRestartAfterSendFailureDoesNotResolve(t *testing.T) {
 
 	c.add(time.Minute)
 
-	if r, ok := only(t, q.Run(t.Context())); ok {
+	if r, ok := only(t, q.Run(t.Context())); ok && r.Verdict != health.Bad {
 		t.Fatalf("restart resolved the open problem: %+v", r)
 	}
 

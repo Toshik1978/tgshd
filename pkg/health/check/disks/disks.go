@@ -157,6 +157,10 @@ type baselineData struct {
 	// SelfTestHead is the identities of the newest log entries seen last
 	// time, to recognise what is new on the next read.
 	SelfTestHead []SelfTestID `json:"selftest_head,omitempty"`
+	// SelfTestSeen is true once the self-test log has been read, even empty,
+	// so the entries of a log seen empty are new on the next read. Absent in
+	// a baseline stored before it was recorded.
+	SelfTestSeen bool `json:"selftest_seen,omitempty"`
 	// SelfTestNewest is the newest finished self-test, for status while the
 	// drive is not read.
 	SelfTestNewest *SelfTestNewest `json:"selftest_newest,omitempty"`
@@ -810,8 +814,10 @@ func (c *Check) judgeSelfTest(r *result, now time.Time, b *baseline, rep *Report
 		return
 	}
 
-	upd := AlignSelfTests(SelfTestState{Head: b.data.SelfTestHead, OKAt: b.data.SelfTestOKAt}, rep.SelfTestLog, now)
-	b.data.SelfTestHead, b.data.SelfTestOKAt, b.data.SelfTestNewest = upd.Head, upd.OKAt, upd.Newest
+	prev := SelfTestState{Head: b.data.SelfTestHead, Seen: b.data.SelfTestSeen, OKAt: b.data.SelfTestOKAt}
+	upd := AlignSelfTests(prev, rep.SelfTestLog, now)
+	b.data.SelfTestHead, b.data.SelfTestSeen = upd.Head, upd.Seen
+	b.data.SelfTestOKAt, b.data.SelfTestNewest = upd.OKAt, upd.Newest
 	for _, f := range upd.Failures {
 		r.event(key(serial, aspectSelfTestFailure), fmt.Sprintf(
 			"%s: self-test failed (%s) at %d h; a newer test has passed since", name, f.Description, f.ID.Hours,
@@ -836,13 +842,25 @@ func (c *Check) judgeSelfTest(r *result, now time.Time, b *baseline, rep *Report
 // other bus including SAS). A reading at or above the limit is hot. The
 // temperatures threshold is applied here, counting only observed time like the
 // engine does: until the drive has been too hot for that long the condition is
-// not judged at all (no reading).
+// not judged at all (no reading). A temperature outside the plausible range,
+// or 0 (what smartctl reports for a drive without a reading), is a reading
+// fault: it is not sampled and the condition is Unknown, as in the temps check.
 func (c *Check) judgeTemp(r *result, now time.Time, name string, rep *Report) {
 	t := rep.Temperature
 	if t == nil {
 		return
 	}
 	serial := rep.Serial
+	if !plausibleTemp(*t) {
+		if c.temps != nil {
+			r.state(serial, aspectTemp, health.Unknown, fmt.Sprintf(
+				"%s: temperature reads %d°C, outside the plausible %g…%g°C range",
+				name, *t, health.MinPlausibleCelsius, health.MaxPlausibleCelsius,
+			))
+		}
+
+		return
+	}
 	r.sample("temp.drive."+serial, float64(*t))
 	if c.temps == nil {
 		return
@@ -866,6 +884,13 @@ func (c *Check) judgeTemp(r *result, now time.Time, name string, rep *Report) {
 		r.state(serial, aspectTemp, health.Bad, fmt.Sprintf("%s: temperature %d°C at or above %d°C", name, *t, limit))
 		r.res.Readings[len(r.res.Readings)-1].Since = since
 	}
+}
+
+// plausibleTemp reports whether a drive temperature is a real reading.
+func plausibleTemp(t int) bool {
+	c := float64(t)
+
+	return t != 0 && c >= health.MinPlausibleCelsius && c <= health.MaxPlausibleCelsius
 }
 
 // overFor extends the drive's over-temperature streak to now and returns its
@@ -924,10 +949,15 @@ func (c *Check) attribute(now time.Time, unreadable []probe, seen map[string]boo
 // unreadableDrive records a known drive not read this run (asleep, or a
 // failed read) in its baseline and returns its checker error, nil when asleep.
 // A forced read was due because the drive was found asleep, so it counts as
-// asleep since this run at the latest.
+// asleep since this run at the latest. A drive asleep loses its
+// over-temperature streak: its temperature is not observed while it sleeps,
+// and it wakes cooled down or starts a new streak.
 func (c *Check) unreadableDrive(now time.Time, b *baseline, p *probe) error {
-	if b.data.AsleepSince == 0 && (p.forced || errors.Is(p.err, errAsleep)) {
-		b.data.AsleepSince = now.Unix()
+	if p.forced || errors.Is(p.err, errAsleep) {
+		if b.data.AsleepSince == 0 {
+			b.data.AsleepSince = now.Unix()
+		}
+		delete(c.hot, b.serial)
 	}
 	if errors.Is(p.err, errAsleep) {
 		return nil
@@ -1119,7 +1149,7 @@ func (c *Check) judgeMissing(r *result, seen map[string]bool, orphans int) {
 // counter reported for the first time only set the baseline.
 func judgeCounters(r *result, b *baseline, rep *Report, fresh bool) {
 	// The NVMe error log count used to be a counter; it is history only now.
-	delete(b.data.Counters, legacyNVMeErrorLog)
+	delete(b.data.Counters, formerNVMeErrorLog)
 	for _, k := range slices.Sorted(maps.Keys(rep.Counters)) {
 		v := clampInt64(rep.Counters[k])
 		old, known := b.data.Counters[k]
@@ -1168,9 +1198,9 @@ func describe(p *probe) string {
 	return fmt.Sprintf("/dev/%s: %s %s, serial %s", p.node, p.report.Bus, p.report.Model, p.report.Serial)
 }
 
-// legacyNVMeErrorLog is the baseline key of the NVMe error log count, which
+// formerNVMeErrorLog is the baseline key of the NVMe error log count, which
 // was an error counter before it became a history-only sample.
-const legacyNVMeErrorLog = "nvme.num_err_log_entries"
+const formerNVMeErrorLog = "nvme.num_err_log_entries"
 
 // counterLabel is counterName with the ATA attribute id, as shown in events.
 func counterLabel(k string) string {

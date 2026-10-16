@@ -9,6 +9,9 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode"
+
+	"go.yaml.in/yaml/v3"
 
 	"github.com/Toshik1978/tgshd/pkg/health"
 )
@@ -146,10 +149,11 @@ func validateSummary(s *Summary, p *problems) {
 	s.Weekday, _ = p.schedule(s.WeekdayName, s.Time)
 }
 
-func validateNetwork(n *Network, p *problems) {
-	// An absent threshold is one interval: a single lost round heals by
-	// itself, an outage confirmed on the next cycle is real (FR-035).
-	if n.Threshold == thresholdIsInterval {
+// validateNetwork validates the network section. thresholdSet tells that the
+// file sets a threshold: an absent one is one interval, so a single lost round
+// heals by itself and an outage confirmed on the next cycle is real (FR-035).
+func validateNetwork(n *Network, thresholdSet bool, p *problems) {
+	if !thresholdSet {
 		n.Threshold = n.Interval
 	}
 	p.common(&n.Common)
@@ -279,7 +283,12 @@ func validateModemProbe(m *ModemProbe, p *problems) {
 	p.required("phone_env", m.PhoneEnv)
 	m.Weekday, _ = p.schedule(m.WeekdayName, m.Time)
 	p.positive("reply_within", m.ReplyWithin)
-	p.positive("max_silence", m.MaxSilence)
+
+	// A probe goes out once a week and may take reply_within to come back,
+	// so a shorter silence would raise a problem every week.
+	if floor := 7*day + m.ReplyWithin.Duration(); m.MaxSilence.Duration() <= floor {
+		p.addf("max_silence %v must be longer than a week plus reply_within (%v)", m.MaxSilence.Duration(), floor)
+	}
 }
 
 func validateHTTP(h *HTTP, p *problems) {
@@ -298,9 +307,16 @@ func validateHTTP(h *HTTP, p *problems) {
 
 	if h.DependsOn != "" {
 		kind, name, ok := strings.Cut(h.DependsOn, "/")
-		if !ok || !slices.Contains(checkKinds(), kind) || !validName(name) {
+		switch {
+		case !ok || !slices.Contains(checkKinds(), kind) || !validName(name):
 			p.addf("depends_on %q must look like kind/name with kind one of %s",
 				h.DependsOn, strings.Join(checkKinds(), ", "))
+		case kind == "disks" || kind == "temperatures":
+			// Their conditions are per drive or sensor aspect, keyed with
+			// three parts (disks/<serial>/<aspect>, temps/<chip>/<label>),
+			// which no kind/name can name: the dependency would never apply.
+			p.addf("depends_on %q cannot name a %s condition: they are per drive or sensor, not kind/name",
+				h.DependsOn, kind)
 		}
 	}
 }
@@ -313,9 +329,33 @@ func validateHeader(p *problems, h *Header) {
 	p.required("header.name", h.Name)
 	p.required("header.value_env", h.ValueEnv)
 
+	if h.Name != "" && !headerToken(h.Name) {
+		p.addf("header.name %q must be an HTTP header name (RFC 7230 token)", h.Name)
+	}
+
+	// The value is not repeated: the prefix is part of the header value.
+	if strings.ContainsFunc(h.Prefix, func(r rune) bool { return r != '\t' && unicode.IsControl(r) }) {
+		p.addf("header.prefix contains a control character")
+	}
+
 	if slices.Contains(h.Placeholders, "") {
 		p.addf("header.placeholders must not contain empty entries")
 	}
+}
+
+// headerToken reports whether s is an RFC 7230 token, the only valid form of
+// an HTTP header name.
+func headerToken(s string) bool {
+	for _, r := range s {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+		case strings.ContainsRune("!#$%&'*+-.^_`|~", r):
+		default:
+			return false
+		}
+	}
+
+	return s != ""
 }
 
 func validateHTTPRouting(h *HTTP, p *problems) {
@@ -346,7 +386,7 @@ func validateURL(p *problems, key, raw string) {
 	}
 }
 
-func validateFreshness(f *Freshness, p *problems) {
+func validateFreshness(f *Freshness, node *yaml.Node, p *problems) {
 	p.common(&f.Common)
 	p.oneOf("content", string(f.Content), string(ContentEpoch), string(ContentMtime))
 	p.positive("max_age", f.MaxAge)
@@ -356,13 +396,14 @@ func validateFreshness(f *Freshness, p *problems) {
 		p.addf("freshness needs exactly one of path or url")
 	}
 
-	validateFreshnessURL(f, p)
+	validateFreshnessURL(f, hasKey(node, "timeout"), p)
 }
 
-// validateFreshnessURL checks the keys that only a URL stamp uses and fills its timeout.
-func validateFreshnessURL(f *Freshness, p *problems) {
+// validateFreshnessURL checks the keys that only a URL stamp uses. timeoutSet
+// says whether the entry sets timeout itself, even to its default.
+func validateFreshnessURL(f *Freshness, timeoutSet bool, p *problems) {
 	if f.URL == "" {
-		if f.Timeout != defaultFreshness().Timeout {
+		if timeoutSet {
 			p.addf("timeout is only valid with url")
 		}
 

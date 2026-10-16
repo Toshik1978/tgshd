@@ -102,6 +102,8 @@ func TestPresentFile(t *testing.T) {
 		{"mtime error", config.ContentMtime, fakeSource{mtimeErr: fs.ErrPermission}, health.Unknown},
 		{"epoch fresh", config.ContentEpoch, fakeSource{data: "1768043400\n"}, health.Good},
 		{"epoch stale", config.ContentEpoch, fakeSource{data: "1767900000"}, health.Bad},
+		{"epoch fraction ignored", config.ContentEpoch, fakeSource{data: "1768043400.123456\n"}, health.Good},
+		{"epoch signed", config.ContentEpoch, fakeSource{data: "+1768043400"}, health.Unknown},
 		{"epoch garbage", config.ContentEpoch, fakeSource{data: "yesterday"}, health.Unknown},
 		{"epoch empty", config.ContentEpoch, fakeSource{data: " \n"}, health.Unknown},
 		{"epoch unreadable", config.ContentEpoch, fakeSource{readErr: fs.ErrPermission}, health.Unknown},

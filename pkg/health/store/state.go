@@ -1,6 +1,7 @@
 package store
 
 import (
+	"cmp"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -15,8 +16,22 @@ import (
 	"github.com/Toshik1978/tgshd/pkg/health/notify"
 )
 
-// rateMarksKey is the reserved kv key holding the JSON-encoded rate marks.
-const rateMarksKey = "rate_marks"
+const (
+	// rateMarksKey is the reserved kv key holding the JSON-encoded rate marks.
+	rateMarksKey = "rate_marks"
+
+	// MaxPendingSamples bounds the samples held in memory while they cannot
+	// be written; the oldest are dropped first. A tick yields a few dozen
+	// samples at most, so this keeps well over a day of history in a few
+	// megabytes; history is a trend aid and losing its oldest part during a
+	// long outage is acceptable.
+	MaxPendingSamples = 100_000
+	// MaxPendingAlerts bounds the alert-log records held in memory while they
+	// cannot be written; the oldest are dropped first. Records come from state
+	// changes and rate-limited checker errors, so the bound is generous and
+	// only reached by a flapping check during a very long outage.
+	MaxPendingAlerts = 10_000
+)
 
 // ErrDegraded is returned by Checkpoint, once per outage, when state cannot be
 // written. The store keeps accepting data in memory and flushes it on the first
@@ -88,6 +103,11 @@ type checkpointer struct {
 	state    State
 	alerts   []Alert
 	samples  []SampleRow
+	// maxAlerts and maxSamples bound alerts and samples; zero means
+	// MaxPendingAlerts and MaxPendingSamples.
+	maxAlerts, maxSamples int
+	// droppedAlerts and droppedSamples count the records dropped by the bounds.
+	droppedAlerts, droppedSamples int
 }
 
 // Load reads the persisted state.
@@ -119,12 +139,11 @@ func (s *Store) Load(ctx context.Context) (State, error) {
 //
 // On a write failure nothing is committed, the data is retained in memory and
 // ErrDegraded (wrapping the cause) is returned on the first failure only. Every
-// later call retries, with the pending alerts and samples accumulated and the
-// latest snapshot replacing earlier ones; the first success flushes it all.
+// later call retries, with the pending alerts and samples accumulated (the
+// oldest dropped beyond MaxPendingAlerts and MaxPendingSamples) and the latest
+// snapshot replacing earlier ones; the first success flushes it all. A
+// cancelled ctx writes nothing but retains the data the same way.
 func (s *Store) Checkpoint(ctx context.Context, dirty State, newAlerts []Alert, newSamples []SampleRow) error {
-	if err := ctx.Err(); err != nil {
-		return fmt.Errorf("checkpoint: %w", err)
-	}
 	if err := validate(dirty, newAlerts); err != nil {
 		return err
 	}
@@ -133,8 +152,10 @@ func (s *Store) Checkpoint(ctx context.Context, dirty State, newAlerts []Alert, 
 	defer c.mu.Unlock()
 
 	c.merge(dirty)
-	c.alerts = append(c.alerts, newAlerts...)
-	c.samples = append(c.samples, newSamples...)
+	c.add(newAlerts, newSamples)
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("checkpoint: %w", err)
+	}
 
 	if err := s.write(ctx, c.state, c.alerts, c.samples); err != nil {
 		if ctx.Err() != nil {
@@ -159,6 +180,36 @@ func (s *Store) Degraded() bool {
 	defer s.ckpt.mu.Unlock()
 
 	return s.ckpt.degraded
+}
+
+// Dropped returns how many pending alerts and samples were dropped, oldest
+// first, because they could not be written before their bound was reached.
+func (s *Store) Dropped() (alerts, samples int) {
+	s.ckpt.mu.Lock()
+	defer s.ckpt.mu.Unlock()
+
+	return s.ckpt.droppedAlerts, s.ckpt.droppedSamples
+}
+
+// add appends the new records to the pending ones, keeping the newest within
+// the bounds.
+func (c *checkpointer) add(alerts []Alert, samples []SampleRow) {
+	var n int
+	c.alerts, n = KeepNewest(append(c.alerts, alerts...), cmp.Or(c.maxAlerts, MaxPendingAlerts))
+	c.droppedAlerts += n
+	c.samples, n = KeepNewest(append(c.samples, samples...), cmp.Or(c.maxSamples, MaxPendingSamples))
+	c.droppedSamples += n
+}
+
+// KeepNewest returns the last limit elements of s, moved to the front of its
+// backing array, and how many were dropped from its front.
+func KeepNewest[T any](s []T, limit int) (kept []T, dropped int) {
+	if len(s) <= limit {
+		return s, 0
+	}
+	dropped = len(s) - limit
+
+	return append(s[:0], s[dropped:]...), dropped
 }
 
 // validate rejects values the schema would refuse, so one bad record cannot

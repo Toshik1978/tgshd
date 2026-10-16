@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -270,7 +271,10 @@ func (d drive) ataJSON(m map[string]any) {
 		m["rotation_rate"] = 0
 		rows = append(
 			rows,
-			map[string]any{"id": ataWearLeveling, "value": d.ssdWear, "raw": map[string]any{"value": 1}},
+			map[string]any{
+				"id": ataWearLeveling, "name": ataWearLevelingName, "value": d.ssdWear,
+				"raw": map[string]any{"value": 1},
+			},
 		)
 	}
 	m["ata_smart_attributes"] = map[string]any{"table": rows}
@@ -626,7 +630,7 @@ func TestNVMeErrorLogSilent(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, ok := data.Counters["nvme.num_err_log_entries"]; ok {
-		t.Errorf("baseline counters = %v, want the legacy key dropped", data.Counters)
+		t.Errorf("baseline counters = %v, want the former key dropped", data.Counters)
 	}
 }
 
@@ -882,6 +886,34 @@ func TestTemperatureGapIsCapped(t *testing.T) {
 	clk.add(15 * time.Minute)
 	if r := mustFind(t, c.Run(t.Context()), key); r.Verdict != health.Bad {
 		t.Errorf("after 37.5 m = %+v, want Bad", r)
+	}
+}
+
+// TestImplausibleTemperature: a drive temperature outside the plausible range
+// (or 0, smartctl's value for a drive without a reading) is a reading fault:
+// it is not sampled and its condition is Unknown, so it neither opens nor
+// resolves a problem.
+func TestImplausibleTemperature(t *testing.T) {
+	key := "disks/" + serialSATA + "/temp"
+	for _, temp := range []int{255, 151, 0, -41} {
+		t.Run(strconv.Itoa(temp), func(t *testing.T) {
+			src := &fakeSource{}
+			d := sata(serialSATA)
+			d.temp = temp
+			src.set("sda", d)
+			res := newLoaded(src, disksCfg(), tempsCfg(0), newClock().now).Run(t.Context())
+			if r := mustFind(t, res, key); r.Verdict != health.Unknown || !strings.Contains(r.Text, "plausible") {
+				t.Errorf("reading = %+v, want Unknown naming the plausible range", r)
+			}
+			if v, ok := sample(res, "temp.drive."+serialSATA); ok {
+				t.Errorf("sampled %v, want no sample", v)
+			}
+
+			res = newLoaded(src, disksCfg(), nil, newClock().now).Run(t.Context())
+			if v, ok := sample(res, "temp.drive."+serialSATA); ok {
+				t.Errorf("sampled %v without a temperatures section, want no sample", v)
+			}
+		})
 	}
 }
 

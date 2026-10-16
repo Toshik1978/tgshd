@@ -52,6 +52,14 @@ type Reading struct {
 	Since time.Time
 }
 
+// The plausible physical range of a temperature reading in °C, shared by the
+// checks that read temperatures. A value outside it is a reading fault, not
+// heat.
+const (
+	MinPlausibleCelsius = -40.0
+	MaxPlausibleCelsius = 150.0
+)
+
 // Sample is one numeric metric value recorded for history.
 type Sample struct {
 	Metric string

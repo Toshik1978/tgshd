@@ -7,6 +7,8 @@ import (
 	"testing"
 	"time"
 
+	"go.yaml.in/yaml/v3"
+
 	"github.com/Toshik1978/tgshd/pkg/health/config"
 )
 
@@ -131,6 +133,7 @@ func TestNetworkThresholdFollowsInterval(t *testing.T) {
 		{"absent with interval", "network:\n  interval: 2m\n  internet_targets: [\"203.0.113.10\"]\n", 2 * time.Minute},
 		{"explicit zero", "network:\n  threshold: 0\n  internet_targets: [\"203.0.113.10\"]\n", 0},
 		{"explicit", "network:\n  threshold: 10m\n  internet_targets: [\"203.0.113.10\"]\n", 10 * time.Minute},
+		{"null", "network:\n  threshold:\n  internet_targets: [\"203.0.113.10\"]\n", 5 * time.Minute},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -228,6 +231,18 @@ func TestEntryErrors(t *testing.T) {
 	}{
 		{"interval below tick", "ups: {interval: 10s}", "ups", "interval"},
 		{"negative threshold", "ups: {threshold: -5m}", "ups", "threshold"},
+		{
+			"network threshold -1ns",
+			"network: {threshold: -1ns, internet_targets: [203.0.113.10]}",
+			"network",
+			"threshold",
+		},
+		{
+			"network threshold -5m",
+			"network: {threshold: -5m, internet_targets: [203.0.113.10]}",
+			"network",
+			"threshold",
+		},
 		{"bad mode", "ups: {mode: pigeon}", "ups", "mode"},
 		{"summary group upper", "ups: {summary_group: Backups}", "ups", "summary_group"},
 		{"summary group underscore", "ups: {summary_group: back_ups}", "ups", "summary_group"},
@@ -300,6 +315,13 @@ func TestEntryErrors(t *testing.T) {
 		{"general concurrency", "general: {concurrency: 0}", "general", "concurrency"},
 		{"modem missing phone", "modem_probe: {}", "modem_probe", "phone_env"},
 		{"modem max silence", "modem_probe: {phone_env: X, max_silence: 0}", "modem_probe", "max_silence"},
+		// Probes go out weekly: a shorter silence would alert every week.
+		{"modem max silence a week", "modem_probe: {phone_env: X, max_silence: 7d}", "modem_probe", "max_silence"},
+		{
+			"modem max silence within reply",
+			"modem_probe: {phone_env: X, reply_within: 2h, max_silence: 7d1h}",
+			"modem_probe", "max_silence",
+		},
 		{"http bad name", "http: [{name: Web_App, url: " + okURL + "}]", "http/Web_App", "name"},
 		{"http no name", "http: [{url: " + okURL + "}]", "http[0]", "name"},
 		{"http bad url", "http: [{name: a, url: \"ftp://x\"}]", "http/a", "url"},
@@ -320,6 +342,27 @@ func TestEntryErrors(t *testing.T) {
 		},
 		{"http timeout", "http: [{name: a, url: " + okURL + ", timeout: 0}]", "http/a", "timeout"},
 		{"http header incomplete", "http: [{name: a, url: " + okURL + ", header: {name: X}}]", "http/a", "value_env"},
+		{
+			"http header name not a token",
+			"http: [{name: a, url: " + okURL + ", header: {name: \"X Token\", value_env: T}}]",
+			"http/a", "header.name",
+		},
+		{
+			"http header prefix control",
+			"http: [{name: a, url: " + okURL + ", header: {name: X, value_env: T, prefix: \"Bearer\\n\"}}]",
+			"http/a", "header.prefix",
+		},
+		{
+			"freshness header name not a token",
+			"freshness: [{name: f, url: " + okURL + ", max_age: 1h, header: {name: \"X:Y\", value_env: T}}]",
+			"freshness/f", "header.name",
+		},
+		{
+			"freshness header prefix control",
+			"freshness: [{name: f, url: " + okURL + ", max_age: 1h, header: {name: X, value_env: T, prefix: \"a\\rb\"}}]",
+			"freshness/f",
+			"header.prefix",
+		},
 		{"http depends_on", "http: [{name: a, url: " + okURL + ", depends_on: nope}]", "http/a", "depends_on"},
 		{"http unknown key", "http: [{name: a, url: " + okURL + ", nope: 1}]", "http/a", "nope"},
 		{
@@ -391,6 +434,77 @@ http: [{name: a, url: "https://a.example.org/", timeout: 20s}]
 `)
 	if len(cfg.Command) != 1 || len(cfg.HTTP) != 1 {
 		t.Fatalf("entries at the ceiling must be kept: %+v %+v", cfg.Command, cfg.HTTP)
+	}
+}
+
+// TestDependsOnTargets: depends_on must name a condition a configured check
+// can raise, never the entry itself and never a cycle; otherwise the check
+// would be skipped forever once that condition is bad, or never.
+func TestDependsOnTargets(t *testing.T) {
+	const others = `
+network: {internet_targets: [192.0.2.1]}
+modem_probe: {phone_env: X}
+containers: {}
+disks: {}
+temperatures: {}
+freshness: [{name: dump, path: /x, max_age: 1h}]
+command: [{name: guard, run: [x]}]
+`
+	entry := func(name, dep string) string {
+		return "  - {name: " + name + ", url: \"https://a.example.org/\", depends_on: " + dep + "}\n"
+	}
+
+	tests := []struct {
+		name string
+		http string
+		// bad lists the http entries rejected, in order.
+		bad    []string
+		reason string
+	}{
+		{"another http entry", entry("a", "http/b") + entry("b", "network/connectivity"), nil, ""},
+		{"freshness and command", entry("a", "freshness/dump") + entry("b", "command/guard"), nil, ""},
+		{"network aliases", entry("a", "network/router") + entry("b", "network/internet"), nil, ""},
+		{"modem probe", entry("a", "modem_probe/roundtrip"), nil, ""},
+		{"dynamic keys of a configured section", entry("a", "containers/web"), nil, ""},
+		{"itself", entry("a", "http/a"), []string{"http/a"}, "itself"},
+		{"unknown http entry", entry("a", "http/nope"), []string{"http/a"}, "no configured check"},
+		{"unknown freshness entry", entry("a", "freshness/nope"), []string{"http/a"}, "no configured check"},
+		{"unknown network key", entry("a", "network/nope"), []string{"http/a"}, "no configured check"},
+		{"unconfigured section", entry("a", "ups/main"), []string{"http/a"}, "no configured check"},
+		{"temperatures", entry("a", "temperatures/cpu"), []string{"http/a"}, "per drive or sensor"},
+		{"disks", entry("a", "disks/sda"), []string{"http/a"}, "per drive or sensor"},
+		{"cycle", entry("a", "http/b") + entry("b", "http/a"), []string{"http/a", "http/b"}, "cycle"},
+		{
+			"target rejected",
+			entry("a", "http/b") + entry("b", "http/b"),
+			[]string{"http/b", "http/a"},
+			"",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg, errs := config.Parse([]byte(others+"http:\n"+tt.http), "health.yaml")
+
+			var got []string
+			for _, e := range errs {
+				got = append(got, e.Entry)
+				if !strings.Contains(e.Reason, "depends_on") || !strings.Contains(e.Reason, tt.reason) {
+					t.Errorf("reason = %q, want depends_on and %q", e.Reason, tt.reason)
+				}
+			}
+			if strings.Join(got, ",") != strings.Join(tt.bad, ",") {
+				t.Fatalf("rejected = %v, want %v (%+v)", got, tt.bad, errs)
+			}
+			if want := strings.Count(tt.http, "name:") - len(tt.bad); len(cfg.HTTP) != want {
+				t.Fatalf("kept %d http entries, want %d", len(cfg.HTTP), want)
+			}
+		})
+	}
+
+	// Without the network section its keys name nothing.
+	_, errs := config.Parse([]byte("http:\n"+entry("a", "network/connectivity")), "health.yaml")
+	if len(errs) != 1 || !strings.Contains(errs[0].Reason, "no configured check") {
+		t.Fatalf("errs = %+v", errs)
 	}
 }
 
@@ -487,6 +601,69 @@ func TestExampleConfigParses(t *testing.T) {
 	if cfg.Network == nil || cfg.UPS == nil || len(cfg.HTTP) != 1 || len(cfg.Command) != 1 || cfg.ModemProbe == nil {
 		t.Errorf("sections missing: %+v", cfg)
 	}
+}
+
+// TestExampleConfigDocumentsNewKeys fails when the sample leaves out a key
+// that the 002 release added: each path must be an actual (uncommented) key.
+func TestExampleConfigDocumentsNewKeys(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "..", "config", "health.example.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var doc map[string]any
+	if err := yaml.Unmarshal(data, &doc); err != nil {
+		t.Fatal(err)
+	}
+
+	// A "[]" suffix descends into the first list entry that has the next key.
+	paths := []string{
+		"network.pause_in_quiet_windows", "disks.pause_in_quiet_windows",
+		"freshness[].summary_group", "http[].summary_group",
+		"general.maintenance_max_hold", "general.telegram_failing_after",
+		"disks.spare_floor_percent", "disks.force_read_after", "disks.include_serials",
+		"disks.extra_counters", "disks.extra_counters_by_serial",
+		"temperatures.limits_by_serial", "temperatures.board_sensors",
+		"http[].follow_redirects", "http[].auth_refusal", "http[].header.placeholders",
+		"freshness[].future_tolerance", "freshness[].url", "freshness[].timeout", "freshness[].header",
+		"command[].expect_output", "command[].forbid_output", "command[].timeout_verdict",
+	}
+	for _, path := range paths {
+		if !hasPath(doc, strings.Split(path, ".")) {
+			t.Errorf("example config lacks %s", path)
+		}
+	}
+}
+
+func hasPath(node any, parts []string) bool {
+	if len(parts) == 0 {
+		return true
+	}
+
+	key, isList := strings.CutSuffix(parts[0], "[]")
+
+	m, ok := node.(map[string]any)
+	if !ok {
+		return false
+	}
+
+	child, ok := m[key]
+	if !ok {
+		return false
+	}
+
+	if !isList {
+		return hasPath(child, parts[1:])
+	}
+
+	list, _ := child.([]any)
+	for _, e := range list {
+		if hasPath(e, parts[1:]) {
+			return true
+		}
+	}
+
+	return false
 }
 
 func TestDisksNewKeys(t *testing.T) {
@@ -715,6 +892,10 @@ func TestServiceKeyErrors(t *testing.T) {
 		},
 		{"timeout without url", "freshness: [{" + freshOK + ", path: /tmp/f, timeout: 5s}]", "freshness/f", "timeout"},
 		{
+			"default timeout without url", "freshness: [{" + freshOK + ", path: /tmp/f, timeout: 15s}]",
+			"freshness/f", "timeout",
+		},
+		{
 			"timeout zero", "freshness: [{" + freshOK + ", url: \"https://b.example.org/\", timeout: 0}]",
 			"freshness/f", "timeout",
 		},
@@ -759,5 +940,17 @@ func TestServiceKeyErrors(t *testing.T) {
 				t.Errorf("errs = %+v, want one for %s containing %q", errs, tt.entry, tt.reason)
 			}
 		})
+	}
+}
+
+// TestExampleConfigIsValid: the shipped example loads without an entry error,
+// so the file users start from never documents a rejected value.
+func TestExampleConfigIsValid(t *testing.T) {
+	data, err := os.ReadFile(filepath.Join("..", "..", "..", "config", "health.example.yaml"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, errs := config.Parse(data, "health.example.yaml"); len(errs) != 0 {
+		t.Fatalf("entry errors: %+v", errs)
 	}
 }

@@ -124,16 +124,18 @@ func Parse(data []byte, file string) (*Config, []EntryError) {
 	}
 
 	cfg.Summary = section(r, top, "summary", defaultSummary(), validateSummary)
-	cfg.Network = section(r, top, "network", defaultNetwork(), validateNetwork)
+	cfg.Network = networkSection(r, top)
 	cfg.UPS = section(r, top, "ups", defaultUPS(), validateUPS)
 	cfg.Disks = section(r, top, "disks", defaultDisks(), validateDisks)
 	cfg.Temperatures = section(r, top, "temperatures", defaultTemperatures(), validateTemperatures)
 	cfg.Kernel = section(r, top, "kernel", defaultKernel(), validateKernel)
 	cfg.Containers = section(r, top, "containers", defaultContainers(), validateContainers)
 	cfg.ModemProbe = section(r, top, "modem_probe", defaultModemProbe(), validateModemProbe)
-	cfg.HTTP = list(r, top, "http", defaultHTTP, validateHTTP)
+	cfg.HTTP = list(r, top, "http", defaultHTTP, ignoreNode(validateHTTP))
 	cfg.Freshness = list(r, top, "freshness", defaultFreshness, validateFreshness)
-	cfg.Command = list(r, top, "command", defaultCommand, validateCommand)
+	cfg.Command = list(r, top, "command", defaultCommand, ignoreNode(validateCommand))
+
+	resolveDependsOn(r, cfg)
 
 	return cfg, r.errs
 }
@@ -221,6 +223,26 @@ func section[T any](r *reporter, top map[string]yaml.Node, name string, def T, v
 	return &def
 }
 
+// networkSection decodes the network section. Whether the file sets a
+// threshold is read from the node itself, so no threshold value has to stand
+// for "absent".
+func networkSection(r *reporter, top map[string]yaml.Node) *Network {
+	set := false
+	if node, ok := top["network"]; ok {
+		var probe struct {
+			Threshold *Duration `yaml:"threshold"`
+		}
+		// A node that does not decode fails the strict decode below anyway.
+		if node.Decode(&probe) == nil {
+			set = probe.Threshold != nil
+		}
+	}
+
+	return section(r, top, "network", defaultNetwork(), func(n *Network, p *problems) {
+		validateNetwork(n, set, p)
+	})
+}
+
 // named is implemented (via pointer) by list entries.
 type named interface {
 	entryName() string
@@ -234,7 +256,7 @@ func (c *Command) entryName() string   { return c.Name }
 func list[T any, PT interface {
 	*T
 	named
-}](r *reporter, top map[string]yaml.Node, name string, def func() T, validate func(*T, *problems)) []T {
+}](r *reporter, top map[string]yaml.Node, name string, def func() T, validate func(*T, *yaml.Node, *problems)) []T {
 	node, ok := top[name]
 	if !ok || node.Kind == 0 || (node.Kind == yaml.ScalarNode && node.Tag == "!!null") {
 		return nil
@@ -255,7 +277,7 @@ func list[T any, PT interface {
 
 		v := def()
 		if !decodeEntry(r, label, item, &v, func(v *T, p *problems) {
-			validate(v, p)
+			validate(v, item, p)
 			p.name(PT(v).entryName())
 		}) {
 			continue
@@ -274,6 +296,25 @@ func list[T any, PT interface {
 	}
 
 	return out
+}
+
+// ignoreNode adapts an entry validation that needs only the decoded entry.
+func ignoreNode[T any](validate func(*T, *problems)) func(*T, *yaml.Node, *problems) {
+	return func(v *T, _ *yaml.Node, p *problems) { validate(v, p) }
+}
+
+// hasKey reports whether the mapping node sets key itself (not a nested one).
+func hasKey(node *yaml.Node, key string) bool {
+	if node.Kind != yaml.MappingNode {
+		return false
+	}
+	for i := 0; i+1 < len(node.Content); i += 2 {
+		if node.Content[i].Value == key {
+			return true
+		}
+	}
+
+	return false
 }
 
 // entryLabel names a list entry "section/name", or "section[index]" when the

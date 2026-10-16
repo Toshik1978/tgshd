@@ -16,15 +16,16 @@ const (
 
 // ClassifyTransport judges the transport of a drive from the raw resolved
 // sysfs path of its block device (research R5): a path segment usb (usb2, ...)
-// is usb; nvme is nvme; ata (ata1, ...) is sata; end_device-, sas_ or port-
-// under a SCSI host segment (host6, ...) is sas; anything else (virtio, MMC,
-// FireWire, Thunderbolt bridges) is other.
+// is usb; nvme, nvme-subsystem or nvme-subsysN (native multipath) is nvme;
+// ata (ata1, ...) is sata; end_device-, sas_ or port- under a SCSI host
+// segment (host6, ...) is sas; anything else (virtio, MMC, FireWire,
+// Thunderbolt bridges) is other.
 func ClassifyTransport(path string) string {
 	segs := strings.Split(path, "/")
 	switch {
 	case slices.ContainsFunc(segs, func(s string) bool { return numbered(s, "usb") }):
 		return transportUSB
-	case slices.Contains(segs, "nvme"):
+	case slices.ContainsFunc(segs, nvmeSegment):
 		return transportNVMe
 	case slices.ContainsFunc(segs, func(s string) bool { return numbered(s, "ata") }):
 		return transportSATA
@@ -44,6 +45,13 @@ func numbered(seg, name string) bool {
 	}
 
 	return strings.Trim(rest, "0123456789") == ""
+}
+
+// nvmeSegment reports whether seg is an NVMe controller class directory
+// (nvme) or, for a namespace behind native multipath, which resolves under
+// /sys/devices/virtual, its subsystem (nvme-subsystem, nvme-subsysN).
+func nvmeSegment(seg string) bool {
+	return seg == "nvme" || seg == "nvme-subsystem" || numbered(seg, "nvme-subsys")
 }
 
 // sasSegment reports whether seg is a SAS port, end device or expander.

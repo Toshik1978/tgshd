@@ -662,6 +662,32 @@ func TestQueuedSMSCopyCarriesKindCheckAndKey(t *testing.T) {
 	}
 }
 
+func TestFlushDropsResolvedSMSProblem(t *testing.T) {
+	fx := newFixture(t, ModeTelegram, true)
+	fx.sms.fail = true
+
+	ctx := context.Background()
+	key := "network/connectivity"
+	_ = fx.n.Notify(ctx, Message{Kind: KindProblem, Check: CheckNetwork, Key: key, Text: "down"})
+	if q := fx.n.Export(); len(q) != 1 || q[0].Channel != ChannelSMS {
+		t.Fatalf("queue = %+v, want the SMS problem", q)
+	}
+
+	_ = fx.n.Notify(ctx, Message{Kind: KindResolved, Check: CheckNetwork, Key: key, Text: "up"})
+	fx.sms.fail = false
+	fx.n.Flush(ctx)
+
+	if len(fx.sms.sent) != 0 {
+		t.Fatalf("sms sent %q, want the resolved problem dropped", fx.sms.sent)
+	}
+	if q := fx.n.Export(); len(q) != 0 {
+		t.Fatalf("queue = %+v, want empty", q)
+	}
+	if len(fx.tlg.sent) != 1 || !strings.Contains(fx.tlg.sent[0], "RESOLVED") {
+		t.Fatalf("tlg sent %q, want the RESOLVED", fx.tlg.sent)
+	}
+}
+
 // clockFixture is a notifier with a Telegram and an SMS fake and a clock the
 // test moves.
 type clockFixture struct {

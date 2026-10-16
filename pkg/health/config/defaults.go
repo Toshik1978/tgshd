@@ -37,12 +37,10 @@ func defaultSummary() Summary {
 	return Summary{WeekdayName: "monday", Time: "09:00"}
 }
 
-// thresholdIsInterval marks a network threshold left out of the config; it
-// resolves to the network interval once the section is decoded (FR-035).
-const thresholdIsInterval = Duration(-1)
-
+// defaultNetwork's threshold is its interval; a threshold left out of the
+// config follows a configured interval instead (see networkSection, FR-035).
 func defaultNetwork() Network {
-	return Network{Common: common(5*time.Minute, time.Duration(thresholdIsInterval), ModeSMS)}
+	return Network{Common: common(5*time.Minute, 5*time.Minute, ModeSMS)}
 }
 
 func defaultUPS() UPS {

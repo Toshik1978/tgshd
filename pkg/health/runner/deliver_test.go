@@ -262,6 +262,94 @@ func TestLaneRefusesWhileAnAbandonedSendRuns(t *testing.T) {
 	}
 }
 
+// TestLaneSerialisesConcurrentSends: a send made while another one on the
+// lane is merely in progress (e.g. /retire from a Telegram command during a
+// tick) waits for it instead of being refused as busy; it is refused only
+// once that send is abandoned, and gives up when its own context ends.
+func TestLaneSerialisesConcurrentSends(t *testing.T) {
+	var g deliveries
+	l := &lane{d: &g}
+	started, release := make(chan struct{}), make(chan struct{})
+	firstCtx, abandon := context.WithCancel(context.Background())
+	defer abandon()
+	first := make(chan error, 1)
+	go func() {
+		first <- l.run(firstCtx, func(context.Context) error {
+			close(started)
+			<-release
+
+			return nil
+		})
+	}()
+	<-started
+
+	second := make(chan error, 1)
+	go func() { second <- l.run(context.Background(), func(context.Context) error { return nil }) }()
+	select {
+	case err := <-second:
+		t.Fatalf("second run = %v while the first is in progress, want it to wait", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(release)
+	if err := <-first; err != nil {
+		t.Fatalf("first run = %v, want nil", err)
+	}
+	if err := <-second; err != nil {
+		t.Fatalf("second run = %v, want sent after the first", err)
+	}
+
+	// A waiter is refused at once when the send it waits for is abandoned.
+	started, release = make(chan struct{}), make(chan struct{})
+	defer close(release)
+	go func() {
+		first <- l.run(firstCtx, func(context.Context) error {
+			close(started)
+			<-release
+
+			return nil
+		})
+	}()
+	<-started
+	go func() { second <- l.run(context.Background(), func(context.Context) error { return nil }) }()
+	time.Sleep(10 * time.Millisecond)
+	abandon()
+	var ab *notify.AbandonedError
+	if err := <-first; !errors.As(err, &ab) {
+		t.Fatalf("first run = %v, want an AbandonedError", err)
+	}
+	if err := <-second; !errors.Is(err, errChannelBusy) || !errors.Is(err, notify.ErrNotSent) {
+		t.Fatalf("waiting run = %v, want a busy refusal once the first is abandoned", err)
+	}
+}
+
+func TestLaneWaiterGivesUpWithItsContext(t *testing.T) {
+	var g deliveries
+	l := &lane{d: &g}
+	started, release := make(chan struct{}), make(chan struct{})
+	defer close(release)
+	go func() {
+		_ = l.run(context.Background(), func(context.Context) error {
+			close(started)
+			<-release
+
+			return nil
+		})
+	}()
+	<-started
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	called := false
+	err := l.run(ctx, func(context.Context) error {
+		called = true
+
+		return nil
+	})
+	if !errors.Is(err, context.DeadlineExceeded) || !errors.Is(err, notify.ErrNotSent) || called {
+		t.Fatalf("run = %v (sender called %v), want a refusal once its context ended", err, called)
+	}
+}
+
 // slowSender delivers every send, but the first one only once released: a
 // Telegram call that succeeds after the tick budget.
 type slowSender struct {
@@ -599,5 +687,28 @@ func TestSendContextEndsAfterTheSendStop(t *testing.T) {
 			t.Fatal("the send context ended while the send stop was still open")
 		}
 		end()
+	}
+}
+
+// TestLaneLateAbandonSparesANewerSend: abandoning a send that has already
+// returned must not mark the send that took the lane after it.
+func TestLaneLateAbandonSparesANewerSend(t *testing.T) {
+	l := &lane{}
+
+	first, err := l.acquire(context.Background(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	l.release()
+	if _, err := l.acquire(context.Background(), nil); err != nil {
+		t.Fatal(err)
+	}
+
+	l.abandon(first)
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.abandoned {
+		t.Fatal("a late abandon of the first send marked the second one")
 	}
 }

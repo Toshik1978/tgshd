@@ -50,6 +50,7 @@ fields from a newer build are ignored; missing fields read as zero values.
 | `counters` | map[string]int64 | Keys `ata.<id>` for the built-in set {5, 179, 181, 182, 183, 187, 188, 195, 197, 198, 199} plus operator additions the drive reports, and `nvme.media_errors`. `nvme.num_err_log_entries` is dropped on the next write (R1) |
 | `selftest_ok_at` | int64 | When a passed self-test was last **newly observed** (001 field, now authoritative for the age, R3) |
 | `selftest_head` | []SelfTestID | Identities of the newest ≤ 5 log entries seen last time (R3) |
+| `selftest_seen` | bool | The log has been read, even empty: every entry of a log seen empty is new on the next read. Absent (false) in older baselines, whose non-empty head tells the same (R3) |
 | `selftest_newest` | {result, description} | Newest finished entry, for status when the drive is not read |
 | `selftest_format` | string | `ok` or `unsupported` (FR-012) |
 | `node` | string | Device node last read from (001) |
@@ -174,6 +175,7 @@ converting one into the other.
 | `seq` | uint64 | 001 |
 | `seen` | bool | 001 |
 | `usec` | uint64 | kmsg time since boot of the record at `seq`; matches the journal's `_SOURCE_MONOTONIC_TIMESTAMP` (R7) |
+| `message` | string, omitempty | text of the record at `seq`; tells the journal records logged at `usec` that were processed from those that were not |
 
 Transition at start: stored `boot_id` ≠ current ⇒ read the journal tail of the stored boot after
 `usec`, bounded by `health.Bound` at `health.MaxCheckTimeout` (20 s) and 200 000 records ⇒ report
@@ -231,7 +233,7 @@ Item `{Key, Text, Since, DroppedAt}`; kv `notify.undelivered` = `{Items []Item, 
 - The next message delivered to Telegram carries the prefix `Undelivered earlier:`, then as many
   item lines as fit the message limit, then, when `Folded > 0`, the counted line
   `… and N more undelivered PROBLEMs`, which is always shown (its space is reserved first).
-- After that delivery succeeds, the items it showed are removed and `Folded` is reset; items
+- After that delivery succeeds, the items it showed are removed and `Folded` is reduced by the folds shown; items
   whose lines did not fit stay for the next delivered message.
 
 ## Runner (`pkg/health/runner`)
@@ -277,6 +279,12 @@ match ⇒ Bad; `expect_output` no match ⇒ Bad; else Good.
 ALTER TABLE queue ADD COLUMN kind TEXT NOT NULL DEFAULT 'event';
 ALTER TABLE queue ADD COLUMN check_name TEXT NOT NULL DEFAULT '';
 ALTER TABLE queue ADD COLUMN key TEXT NOT NULL DEFAULT '';
+UPDATE queue SET kind = CASE  -- a 001 row's label after its "<host>: " prefix
+  WHEN instr(text, ': ') = 0 THEN 'event'
+  WHEN substr(text, instr(text, ': ') + 2, 9) = 'PROBLEM: ' THEN 'problem'
+  WHEN substr(text, instr(text, ': ') + 2, 10) = 'RESOLVED: ' THEN 'resolved'
+  ELSE 'event'
+END;
 -- migration 3
 ALTER TABLE queue ADD COLUMN plain TEXT NOT NULL DEFAULT '';
 ALTER TABLE queue ADD COLUMN since INTEGER;
@@ -290,7 +298,7 @@ text.
 `store.validate` rejects a queue `kind` outside `problem`, `resolved`, `event`. All other new
 state lives in `baselines.data` and `kv` (see above). New kv keys: `notify.channels`,
 `notify.sms_problems`, `notify.undelivered`, `health.maintenance`, `freshness.<name>.stamp`,
-`freshness.<name>.read_ok`; the kernel kv value gains `cursor.usec` and `episodes.*.unreported`.
+`freshness.<name>.read_ok`; the kernel kv value gains `cursor.usec`, `cursor.message` and `episodes.*.unreported`.
 
 New samples: `drive.<serial>.nvme_err_log` (history only). `drive.<serial>.selftest_age_h` now
 carries calendar hours.

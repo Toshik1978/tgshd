@@ -18,7 +18,8 @@ const Name = "network"
 // host cannot reach the internet, whatever the cause.
 const KeyConnectivity = Name + "/connectivity"
 
-// The 001 condition keys, cleared silently by every run (R21).
+// The 001 condition keys, cleared silently by every run (R21). The runner's
+// dependsOnKey maps the same literals to KeyConnectivity; keep them in sync.
 const (
 	formerKeyRouter   = Name + "/router"
 	formerKeyInternet = Name + "/internet"
@@ -33,7 +34,9 @@ type GatewaySource interface {
 	DefaultGateway() (netip.Addr, error)
 }
 
-// Pinger probes every host and reports per-host reachability (any reply means up).
+// Pinger probes every host and reports per-host reachability (any reply means
+// up). The map is valid even with a non-nil error, which reports the hosts
+// that could not be probed.
 type Pinger interface {
 	Reachable(ctx context.Context, hosts []string) (map[string]bool, error)
 }
@@ -53,8 +56,8 @@ func New(gateway GatewaySource, pinger Pinger, targets []string) *Check {
 // Run judges connectivity as one condition: Bad when there is no default
 // route, when the gateway does not answer, or (gateway up) when no internet
 // target answers. A changing cause stays one Bad streak. Failing to read the
-// route table or to ping makes the run unreadable (Err). Every run lists the
-// 001 keys in Forget.
+// route table makes the run unreadable (Err), and so does a probing error
+// unless some probed host answered. Every run lists the 001 keys in Forget.
 func (c *Check) Run(ctx context.Context) health.CheckResult {
 	res := c.run(ctx)
 	res.Forget = []string{formerKeyRouter, formerKeyInternet}
@@ -76,23 +79,25 @@ func (c *Check) run(ctx context.Context) health.CheckResult {
 	gwHost := gw.String()
 
 	up, err := c.pinger.Reachable(ctx, []string{gwHost})
-	if err != nil {
-		return health.CheckResult{Err: fmt.Errorf("ping gateway: %w", err)}
-	}
 	if !up[gwHost] {
+		if err != nil {
+			return health.CheckResult{Err: fmt.Errorf("ping gateway: %w", err)}
+		}
+
 		return bad("Router " + gwHost + " is not answering")
 	}
 
+	// Any answering target means up, even if another could not be probed.
 	up, err = c.pinger.Reachable(ctx, c.targets)
-	if err != nil {
-		return health.CheckResult{Err: fmt.Errorf("ping internet targets: %w", err)}
-	}
 	for _, t := range c.targets {
 		if up[t] {
 			return health.CheckResult{Readings: []health.Reading{
 				{Key: KeyConnectivity, Verdict: health.Good, Text: "Network is reachable"},
 			}}
 		}
+	}
+	if err != nil {
+		return health.CheckResult{Err: fmt.Errorf("ping internet targets: %w", err)}
 	}
 
 	return bad("Internet is unreachable (router " + gwHost + " answers)")

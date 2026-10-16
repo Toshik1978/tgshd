@@ -1086,6 +1086,29 @@ func TestSensorsStatus(t *testing.T) {
 	}
 }
 
+// TestSensorsStoppedGPUsAfterRestart: GPUs restored from the store that the
+// driver no longer reports show their metric and limit, in a stable order.
+func TestSensorsStoppedGPUsAfterRestart(t *testing.T) {
+	now := t0()
+	c := temps.New(nil, &fakeGPU{err: temps.ErrNoGPUs}, cfg(), fakeOpen(nil),
+		temps.WithClock(func() time.Time { return now }))
+	if err := c.Restore(`{"gpu":{"temps/gpu/0":"gpu 0","temps/gpu/1":"gpu 1","temps/gpu/2":"gpu 2"}}`); err != nil {
+		t.Fatal(err)
+	}
+	c.Run(context.Background())
+
+	want := []temps.SensorStatus{
+		{Metric: "temp.gpu.0", Label: "gpu 0", Limit: 80, Since: now},
+		{Metric: "temp.gpu.1", Label: "gpu 1", Limit: 80, Since: now},
+		{Metric: "temp.gpu.2", Label: "gpu 2", Limit: 80, Since: now},
+	}
+	for range 10 {
+		if got := c.Sensors(); !slices.Equal(got, want) {
+			t.Fatalf("Sensors = %+v\nwant %+v", got, want)
+		}
+	}
+}
+
 // blockingHwmon blocks Sensors until release is closed; entered is closed
 // when a read has begun.
 type blockingHwmon struct {

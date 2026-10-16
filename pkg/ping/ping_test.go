@@ -60,8 +60,12 @@ func TestSetupFailure(t *testing.T) {
 		probe:  fakeProbe(map[string]*pingtool.Statistics{"ok": stat(3, 3)}, map[string]error{"bad": boom}),
 	}
 
-	if _, err := p.Reachable(t.Context(), []string{"ok", "bad"}); !errors.Is(err, boom) {
+	up, err := p.Reachable(t.Context(), []string{"ok", "bad"})
+	if !errors.Is(err, boom) {
 		t.Errorf("Reachable err = %v, want wrapped %v", err, boom)
+	}
+	if !up["ok"] || up["bad"] {
+		t.Errorf("Reachable = %v; want the partial result with ok up, bad down", up)
 	}
 
 	got, err := p.Ping(t.Context(), []string{"ok", "bad"})

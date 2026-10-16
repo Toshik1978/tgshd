@@ -40,7 +40,7 @@ func MaintenanceHeld(path string) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("open maintenance lock: %w", err)
 	}
-	defer func() { _ = f.Close() }()
+	defer func() { _ = unlockAndClose(f) }()
 
 	err = syscall.Flock(int(f.Fd()), syscall.LOCK_SH|syscall.LOCK_NB)
 	if errors.Is(err, syscall.EWOULDBLOCK) {
@@ -49,8 +49,17 @@ func MaintenanceHeld(path string) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("probe maintenance lock: %w", err)
 	}
-	// Closing the file releases the lock.
+
 	return false, nil
+}
+
+// unlockAndClose drops f's flock, then closes f. Closing alone is not
+// enough: a child forked meanwhile (any exec in the process) shares the open
+// file until it execs, and the lock lasts while any copy is open.
+func unlockAndClose(f *os.File) error {
+	unlockErr := syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+
+	return errors.Join(unlockErr, f.Close())
 }
 
 // Instance is an exclusive lock held for the life of the daemon.
@@ -86,7 +95,7 @@ func (i *Instance) Release() error {
 	if i.file == nil {
 		return nil
 	}
-	err := i.file.Close()
+	err := unlockAndClose(i.file)
 	i.file = nil
 	if err != nil {
 		return fmt.Errorf("release instance lock: %w", err)
@@ -195,7 +204,7 @@ func update(path string, fn func(Heartbeat) Heartbeat) error {
 	if err != nil {
 		return fmt.Errorf("open heartbeat lock: %w", err)
 	}
-	defer func() { _ = lock.Close() }()
+	defer func() { _ = unlockAndClose(lock) }()
 	if err = syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
 		return fmt.Errorf("lock heartbeat: %w", err)
 	}

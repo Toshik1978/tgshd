@@ -234,9 +234,9 @@ func (c *Check) timestamp(ctx context.Context) (time.Time, error) {
 	if err != nil {
 		return time.Time{}, fmt.Errorf("read %s: %w", c.cfg.Path, err)
 	}
-	sec, err := strconv.ParseInt(strings.TrimSpace(string(data)), 10, 64)
-	if err != nil {
-		return time.Time{}, fmt.Errorf("parse epoch in %s: %w", c.cfg.Path, err)
+	sec, ok := parseUnix(data)
+	if !ok {
+		return time.Time{}, fmt.Errorf("parse epoch in %s: not a Unix time", c.cfg.Path)
 	}
 
 	return time.Unix(sec, 0), nil

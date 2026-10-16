@@ -286,3 +286,61 @@ func TestStatusSelfTestPassObserved(t *testing.T) {
 		t.Error("PassObserved after a new pass, want true")
 	}
 }
+
+// TestSelfTestPassAfterEmptyLog: a drive first seen with an empty self-test
+// log has nothing to adopt, so its first pass is newly observed, also after a
+// restart in between.
+func TestSelfTestPassAfterEmptyLog(t *testing.T) {
+	src := &fakeSource{}
+	d := sata(serialSATA)
+	d.noTest = true
+	src.set("sda", d)
+	clk := newClock()
+	cfg := disksCfg()
+	c := newLoaded(src, cfg, nil, clk.now)
+	c.Run(t.Context())
+
+	restarted := New(src, cfg, nil, clk.now)
+	restarted.LoadBaselines(c.Baselines())
+
+	clk.add(time.Hour)
+	d.noTest = false
+	d.log = []testRun{{hours: d.hours - 1}}
+	src.set("sda", d)
+	restarted.Run(t.Context())
+	got := statusOf(t, restarted, serialSATA)
+	if !got.SelfTestPassObserved || got.SelfTestPassAge != 0 {
+		t.Errorf("PassObserved = %v, age = %v; want the first pass after an empty log observed now",
+			got.SelfTestPassObserved, got.SelfTestPassAge)
+	}
+}
+
+// TestNewestAgeATAWrap: an ATA self-test's 16-bit hours are compared with the
+// drive's current hours modulo 65536.
+func TestNewestAgeATAWrap(t *testing.T) {
+	tests := []struct {
+		name  string
+		hours int64
+		now   int64
+		ata   bool
+		want  *time.Duration
+	}{
+		{"ata no wrap", 4190, 4200, true, new(10 * time.Hour)},
+		{"ata wrapped once", 100, 65536 + 110, true, new(10 * time.Hour)},
+		{"ata wrapped, test before the wrap", 65530, 65536 + 4, true, new(10 * time.Hour)},
+		{"ata current hours below the test", 5000, 4000, true, nil},
+		{"nvme does not wrap", 100, 65536 + 110, false, new(65546 * time.Hour)},
+		{"nvme current hours below the test", 5000, 4000, false, nil},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := newestAge(tt.hours, &tt.now, tt.ata)
+			switch {
+			case (got == nil) != (tt.want == nil):
+				t.Errorf("age = %v, want %v", got, tt.want)
+			case got != nil && *got != *tt.want:
+				t.Errorf("age = %v, want %v", *got, *tt.want)
+			}
+		})
+	}
+}

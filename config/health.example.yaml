@@ -10,8 +10,14 @@
 # Per-check common keys: interval, threshold, mode (tlg | sms | tlg-or-sms,
 # default tlg), needs_internet (default false), summary_group (default none:
 # one weekly-summary line per check; checks naming the same group, [a-z0-9-]+,
-# share one line) and pause_in_quiet_windows (default false for disks,
-# temperatures and kernel; true for every other check).
+# share one line; no effect on disks, temperatures and kernel, which the
+# summary's services block leaves out) and pause_in_quiet_windows (default
+# false for disks, temperatures and kernel, which keep running through quiet
+# windows; true for every other check). modem_probe takes neither
+# summary_group nor pause_in_quiet_windows. Set pause_in_quiet_windows: true
+# on disks, temperatures or kernel to pause them too. WARNING: a command check with a fix keeps
+# running its probe and its fix through a quiet window when you set it to
+# false, so leave it true unless the fix is safe at any hour.
 
 general:
   state_dir: /var/lib/tgshd                 # state database and instance lock
@@ -19,8 +25,8 @@ general:
   maintenance_lock: /run/maintenance.lock   # optional; absent => no maintenance windows
   boot_grace: 10m
   concurrency: 4
-  maintenance_max_hold: 6h                  # longest a maintenance window is honoured
-  telegram_failing_after: 15m               # Telegram failures this long switch alerts to email/SMS
+  maintenance_max_hold: 6h                  # a lock held longer raises a checker error; the window stays
+  telegram_failing_after: 15m               # Telegram failing this long sends one email notice (SMS fallback starts at once)
 
 # Weekly report; omit the section to disable it.
 summary:
@@ -33,6 +39,7 @@ network:
   threshold: 5m                             # default: one interval; 0 alerts on the first bad cycle
   internet_targets: [ "203.0.113.10", "198.51.100.20" ]   # any one answering => internet up
   mode: sms                                 # PROBLEM by SMS; RESOLVED by tlg-or-sms (fixed)
+  pause_in_quiet_windows: true              # default true here
 
 # Uses the BOT_NUT_* connection settings.
 ups:
@@ -42,19 +49,23 @@ ups:
 disks:
   interval: 15m
   wear_percent: 80                          # NVMe percentage used / SSD wear above => PROBLEM
-  selftest_max_age: 40d                     # calendar days since a passed self-test was observed; 8d is the closest to 001
+  selftest_max_age: 40d                     # calendar time since a passed self-test was last seen
+  pause_in_quiet_windows: false             # default false: keeps running through quiet windows
   spare_floor_percent: 20                   # spare capacity floor, percent
-  force_read_after: 24h
+  force_read_after: 24h                     # longest a sleeping drive goes unread before it is woken
   include_serials: []                       # USB or other-transport drives to watch
   extra_counters: []                        # extra ATA attribute ids (1-255)
-  extra_counters_by_serial: {}
-  exclude_serials: []
+  extra_counters_by_serial: {}              # serial -> attribute ids, e.g. { TEST0000000001: [230] }
+  exclude_serials: []                       # e.g. [ "TEST0000000002" ]
 
+# WARNING: on a VM without CPU hwmon sensors this check raises temps/cpu/none
+# on every cycle. Disable it there by removing the whole section.
 temperatures:
   interval: 15m
   threshold: 0                              # the first reading at or above a limit opens a problem
+  pause_in_quiet_windows: false             # default false: keeps running through quiet windows
   limits:                                   # degrees Celsius, PROBLEM at or above
-    cpu: 90                                 # CPU package sensor
+    cpu: 90                                 # one package sensor per CPU
     drive_nvme: 60                          # judged by the disks check from SMART
     drive_sata: 60                          # SATA and SAS, judged by the disks check
     gpu: 85
@@ -66,6 +77,7 @@ temperatures:
 
 kernel:
   interval: 15m                             # EDAC counters; kmsg is read continuously
+  pause_in_quiet_windows: false             # default false: keeps running through quiet windows
 
 containers:
   interval: 5m
@@ -83,15 +95,18 @@ http:
     # doh: https://dns.example.org/dns-query  # optional, mutually exclusive with connect_to
     follow_redirects: false                 # default false: a redirect is judged by its own status
     auth_refusal: down                      # down (default) | checker_error: what a 401/403 means
-    header: { name: Authorization, value_env: APP_TOKEN, prefix: "Bearer ", placeholders: [ "sample-key" ] }   # optional; placeholders: values that mean the secret was never set
-    depends_on: http/other-app              # optional: skip while that condition is bad
+    # header is optional; placeholders are markers, and a value containing one
+    # (case-insensitive) is a placeholder, reported as a checker error
+    header: { name: Authorization, value_env: APP_TOKEN, prefix: "Bearer ", placeholders: [ "sample-key" ] }
+    summary_group: web                      # optional: merged with other checks of this group
+    depends_on: command/port-guard          # optional: skip while that condition is bad (a configured check, not itself, not disks or temperatures)
     needs_internet: false
     container: app                          # optional: also require this container healthy
 
 freshness:
   - name: db-dump
     path: /var/lib/backup-status/db
-    content: epoch                          # epoch (file holds a Unix time) | mtime
+    content: epoch                          # epoch (Unix seconds, a fraction is ignored) | mtime
     max_age: 26h
     future_tolerance: 1h                    # a stamp further in the future than this is stale
     summary_group: backups                  # optional: merged with other checks of this group
@@ -107,9 +122,11 @@ command:
     interval: 5m
     timeout: 20s                            # at most 20s; the probe and its fix each get it
     timeout_verdict: broken                 # broken (default) | unreadable: what a timed-out probe means
-    # expect_output: "^ok"                  # optional regexp (Go RE2) the output must match
-    # forbid_output: "(?i)degraded|error"   # optional regexp the output must not match
+    expect_output: "^ok"                    # optional regexp (Go RE2) the output must match
+    forbid_output: "(?i)degraded|error"     # optional regexp the output must not match
     threshold: 0
+    # pause_in_quiet_windows: true is the default; do not set it to false on a
+    # command check with a fix unless the fix is safe during a quiet window.
     fix:                                    # optional
       after: 2                              # consecutive failures
       restart_container: worker             # or: run: [ "/usr/local/bin/fix" ]
@@ -123,4 +140,4 @@ modem_probe:
   weekday: sunday
   time: "11:02"
   reply_within: 30m
-  max_silence: 8d
+  max_silence: 8d                           # longer than a week plus reply_within

@@ -55,6 +55,40 @@ func TestStandbyDriveIsSkipped(t *testing.T) {
 	}
 }
 
+// TestStandbyDropsHotStreak: a drive found asleep loses its over-temperature
+// streak, so after waking hot it starts a new one from the wake-up run
+// rather than resuming the old one with its old start.
+func TestStandbyDropsHotStreak(t *testing.T) {
+	src := &fakeSource{}
+	d := sata(serialSATA)
+	d.temp = 60
+	src.set("sda", d)
+	clk := newClock()
+	c := fixtureCheck(t, src, clk, tempsCfg(30*time.Minute)) // hot since the first run
+	key := "disks/" + serialSATA + "/temp"
+
+	src.runs["sda"] = output{status: StandbyStatus}
+	for range 4 {
+		c.Run(t.Context())
+		clk.add(15 * time.Minute)
+	}
+
+	src.set("sda", d)
+	woke := clk.now()
+	if r, ok := find(c.Run(t.Context()), key); ok {
+		t.Fatalf("waking hot = %+v, want no reading until the threshold passes again", r)
+	}
+	clk.add(15 * time.Minute)
+	if r, ok := find(c.Run(t.Context()), key); ok {
+		t.Fatalf("15 m after waking = %+v, want no reading", r)
+	}
+	clk.add(15 * time.Minute)
+	r := mustFind(t, c.Run(t.Context()), key)
+	if r.Verdict != health.Bad || !r.Since.Equal(woke) {
+		t.Errorf("30 m after waking = %+v, want Bad since the wake-up run %v", r, woke)
+	}
+}
+
 // TestStandbyUnknownNodeSuspendsMissingSilently: a node in standby that no
 // known drive was last read from may be a known drive that moved, so missing
 // is not judged that run, and nothing is reported.

@@ -93,7 +93,14 @@ type SelfTestEntry struct {
 	Result      SelfTestResult
 
 	hasHours bool // the log gave the entry's power-on hours
+	// wraps marks hours that are 16 bits and wrap at ataSelfTestHoursWrap
+	// (the ATA self-test log).
+	wraps bool
 }
+
+// ataSelfTestHoursWrap is where the 16-bit lifetime hours of an ATA
+// self-test log entry wrap.
+const ataSelfTestHoursWrap = 1 << 16
 
 // CounterNVMeMediaErrors is the Report.Counters key of the NVMe media error
 // counter. ATA counters are keyed with ATACounter.
@@ -118,10 +125,13 @@ const (
 	// ATA attribute 241: total LBAs written.
 	ataTotalLBAsWritten = 241
 	// ATA attribute 177: wear levelling count; its normalised value counts
-	// down from 100 on a SATA SSD.
-	ataWearLeveling = 177
-	maxATAID        = 255
-	percentFull     = 100
+	// down from 100 on a SATA SSD. Only a row smartctl names
+	// Wear_Leveling_Count is wear: other controllers use the id for something
+	// else (SandForce's Wear_Range_Delta, whose normalised value is often 0).
+	ataWearLeveling     = 177
+	ataWearLevelingName = "Wear_Leveling_Count"
+	maxATAID            = 255
+	percentFull         = 100
 )
 
 // ErrUnreadable means smartctl could not read the drive (command line error or
@@ -210,8 +220,9 @@ type smartJSON struct {
 	} `json:"smart_status"`
 	ATAAttributes struct {
 		Table []struct {
-			ID    int  `json:"id"`
-			Value *int `json:"value"`
+			ID    int    `json:"id"`
+			Name  string `json:"name"`
+			Value *int   `json:"value"`
 			Raw   *struct {
 				Value *uint64 `json:"value"`
 			} `json:"raw"`
@@ -335,13 +346,14 @@ func (s *smartJSON) generic() (temperature *int, hours *int64) {
 }
 
 // applyATA collects the tracked counters, the data written and the SATA SSD
-// wear. An attribute row without a raw value is "not reported". Attribute 188
-// (command timeout) may pack several 16-bit counters into raw.value on some
-// drives; it is used as-is for rise detection, without masking.
+// wear (attribute 177 named Wear_Leveling_Count). An attribute row without a
+// raw value is "not reported". Attribute 188 (command timeout) may pack
+// several 16-bit counters into raw.value on some drives; it is used as-is for
+// rise detection, without masking.
 func applyATA(r *Report, raw *smartJSON, counters map[int]bool) {
 	solidState := r.Bus == BusATA && raw.RotationRate != nil && *raw.RotationRate == 0
 	for _, a := range raw.ATAAttributes.Table {
-		if solidState && a.ID == ataWearLeveling {
+		if solidState && wearLeveling(a.ID, a.Name) {
 			r.PercentageUsed = wearUsed(a.Value)
 		}
 		if a.Raw == nil || a.Raw.Value == nil {
@@ -354,6 +366,11 @@ func applyATA(r *Report, raw *smartJSON, counters map[int]bool) {
 			r.DataWrittenBytes = writtenBytes(*a.Raw.Value, raw.LogicalBlock)
 		}
 	}
+}
+
+// wearLeveling reports whether an attribute row is the wear levelling count.
+func wearLeveling(id int, name string) bool {
+	return id == ataWearLeveling && name == ataWearLevelingName
 }
 
 func writtenBytes(lbas uint64, blockSize *uint64) *uint64 {
@@ -459,6 +476,7 @@ func ataSelfTestEntries(raw *smartJSON) (entries []SelfTestEntry, ok bool) {
 			ID:          SelfTestID{Type: e.Type.Value, Code: code},
 			Description: e.Status.String,
 			Result:      classifyATA(code),
+			wraps:       true,
 		}
 		if e.LifetimeHours != nil {
 			entry.ID.Hours, entry.hasHours = *e.LifetimeHours, true

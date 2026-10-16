@@ -32,9 +32,14 @@ type fakeSender struct {
 	mu   sync.Mutex
 	sent []string
 	fail bool
+	// onSend runs at the start of every Send, e.g. to cancel the tick.
+	onSend func()
 }
 
 func (f *fakeSender) Send(_ context.Context, text string) error {
+	if f.onSend != nil {
+		f.onSend()
+	}
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
@@ -114,7 +119,7 @@ func (f *fakeStore) Load(context.Context) (store.State, error) {
 	return f.state, f.loadErr
 }
 
-func (f *fakeStore) Checkpoint(_ context.Context, dirty store.State, alerts []store.Alert,
+func (f *fakeStore) Checkpoint(ctx context.Context, dirty store.State, alerts []store.Alert,
 	samples []store.SampleRow,
 ) error {
 	f.mu.Lock()
@@ -123,6 +128,9 @@ func (f *fakeStore) Checkpoint(_ context.Context, dirty store.State, alerts []st
 	f.checkpoints++
 	f.pendingAlerts = append(f.pendingAlerts, alerts...)
 	f.pendingSamples = append(f.pendingSamples, samples...)
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if f.fail {
 		if f.degraded {
 			return nil
@@ -713,6 +721,27 @@ func TestFailedLoadKeepsStoredState(t *testing.T) {
 	}
 }
 
+func TestRecordsWaitingForLoadAreCapped(t *testing.T) {
+	samples := make([]health.Sample, store.MaxPendingSamples/2+1)
+	for i := range samples {
+		samples[i] = health.Sample{Metric: "m", Value: float64(i)}
+	}
+	st := &fakeStore{loadErr: errors.New("database locked")}
+	ups := newFakeCheck(nil, "ups", health.CheckResult{Samples: samples})
+	f := newFixture(t, st, checkOf(ups))
+
+	f.tick(t)
+	f.next(t)
+	f.next(t)
+
+	if n := len(f.r.pendingSamples); n != store.MaxPendingSamples {
+		t.Fatalf("pending samples = %d, want capped at %d", n, store.MaxPendingSamples)
+	}
+	if last := f.r.pendingSamples[len(f.r.pendingSamples)-1]; !last.At.Equal(f.now) {
+		t.Fatalf("newest pending sample at %v, want the last tick %v", last.At, f.now)
+	}
+}
+
 func TestFailedLoadSendsNothingAndNextTickRaisesIt(t *testing.T) {
 	st := &fakeStore{loadErr: errors.New("database locked")}
 	f := newFixture(t, st)
@@ -958,6 +987,30 @@ func TestShutdownDropsTickResults(t *testing.T) {
 	}
 }
 
+func TestShutdownAfterTheRunsStillSavesTheTick(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	c := newFakeCheck(nil, "ups", health.CheckResult{
+		Readings: []health.Reading{{Key: "ups/main", Verdict: health.Bad, Text: "on battery"}},
+		Samples:  []health.Sample{{Metric: "ups.charge", Value: 50}},
+	})
+	f := newFixture(t, &fakeStore{}, checkOf(c))
+	f.tlg.onSend = cancel // shutdown arrives while the tick delivers
+
+	if err := f.r.Do(ctx); err != nil {
+		t.Fatalf("Do = %v, want the saved tick to succeed", err)
+	}
+	if got := f.st.alertKinds(); !slices.Equal(got, []store.AlertKind{store.KindProblem}) {
+		t.Fatalf("alert log = %v, want the sent PROBLEM", got)
+	}
+	if len(f.st.samples) != 1 {
+		t.Fatalf("samples = %+v, want the tick's sample", f.st.samples)
+	}
+	if conds := f.st.state.Conditions; len(conds) != 1 || !conds[0].Open {
+		t.Fatalf("checkpointed conditions = %+v, want one open", conds)
+	}
+}
+
 func TestHeartbeatAndProbeErrorsAreCheckerErrors(t *testing.T) {
 	c := newFakeCheck(nil, "ups", reading("ups/main", health.Good, ""))
 	f := newFixture(t, &fakeStore{}, checkOf(c))
@@ -1041,8 +1094,22 @@ func TestForgetClearsSilently(t *testing.T) {
 	if got := st.alertKinds(); !slices.Equal(got, want) {
 		t.Fatalf("alert log = %v, want %v", got, want)
 	}
-	if a := st.alerts[1]; a.Key != "temps/s1" || a.Check != "temps" || a.Text != "sensor gone" {
+	if a := st.alerts[1]; a.Key != "temps/s1" || a.Check != "temps" || a.Text != "no longer judged" {
 		t.Fatalf("cleared record = %+v", a)
+	}
+}
+
+// TestForgetRecordFitsAFormerNetworkKey: the cleared record of a forgotten
+// 001 network key does not claim a sensor is gone.
+func TestForgetRecordFitsAFormerNetworkKey(t *testing.T) {
+	st := &fakeStore{}
+	st.state.Conditions = []health.Condition{{Key: "network/router", Check: "network", Open: true}}
+	c := newFakeCheck(nil, "network", health.CheckResult{Forget: []string{"network/router"}})
+	f := newFixture(t, st, checkOf(c))
+	f.tick(t)
+
+	if len(st.alerts) != 1 || st.alerts[0].Kind != store.KindCleared || st.alerts[0].Text != "no longer judged" {
+		t.Fatalf("alert log = %+v, want one cleared record reading \"no longer judged\"", st.alerts)
 	}
 }
 
@@ -1798,5 +1865,64 @@ func TestNetworkThresholdDefault(t *testing.T) {
 	f.tick(t)
 	if got := countContaining(f.sms.texts(), "PROBLEM: Router 192.0.2.1 is not answering"); got != 1 {
 		t.Fatalf("sms = %q, want one PROBLEM", f.sms.texts())
+	}
+}
+
+// TestNetworkUnknownAtBootWhilePaused: at boot the network check pauses in the
+// boot quiet window, so it has never been read; a check that needs the
+// internet and does not pause waits for the first readable network run
+// (FR-036).
+func TestNetworkUnknownAtBootWhilePaused(t *testing.T) {
+	netw := newFakeCheck(nil, "network", reading(KeyNetwork, health.Good, "Network is reachable"))
+	web := newFakeCheck(nil, "web", reading("http/web", health.Good, ""))
+	webCheck := checkOf(web)
+	webCheck.NeedsInternet = true
+	f := newFixture(t, &fakeStore{}, pausing(netw), webCheck)
+	f.up.up = time.Minute // inside the boot grace: a quiet tick
+
+	f.tick(t)
+	if netw.count() != 0 || web.count() != 0 {
+		t.Fatalf("runs: network %d, web %d; want neither before the network was read", netw.count(), web.count())
+	}
+
+	f.up.up = time.Hour // the boot grace is over
+	f.next(t)
+	if netw.count() != 1 || web.count() != 1 {
+		t.Fatalf("runs: network %d, web %d; want both once the network is read", netw.count(), web.count())
+	}
+}
+
+// TestNetworkStateKeptWhilePaused: while the network check is paused by a
+// quiet window, its last run decides whether checks that need the internet
+// run: unreadable keeps them waiting, readable lets them run (FR-036).
+func TestNetworkStateKeptWhilePaused(t *testing.T) {
+	cases := []struct {
+		name string
+		last health.CheckResult
+		want int
+	}{
+		{"unreadable", health.CheckResult{Err: errors.New("open /proc/net/route: permission denied")}, 0},
+		{"reachable", reading(KeyNetwork, health.Good, "Network is reachable"), 2},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			netw := newFakeCheck(nil, "network", tc.last)
+			web := newFakeCheck(nil, "web", reading("http/web", health.Good, ""))
+			webCheck := checkOf(web)
+			webCheck.NeedsInternet = true
+			f := newFixture(t, &fakeStore{}, pausing(netw), webCheck)
+
+			f.tick(t)
+			f.maint.held = true
+			f.now = f.now.Add(webCheck.Interval)
+			f.tick(t)
+
+			if netw.count() != 1 {
+				t.Fatalf("network ran %d times, want 1 (paused in the window)", netw.count())
+			}
+			if web.count() != tc.want {
+				t.Fatalf("web ran %d times, want %d", web.count(), tc.want)
+			}
+		})
 	}
 }

@@ -246,3 +246,60 @@ func TestAlignSelfTestsNewestHours(t *testing.T) {
 		t.Errorf("Newest = %+v, want failed at 900 h", got.Newest)
 	}
 }
+
+// TestAlignSelfTestsSeenEmptyLog: an empty log marks the log seen, so the
+// entries that appear after it are new; a stored state that never saw the log
+// still adopts it.
+func TestAlignSelfTestsSeenEmptyLog(t *testing.T) {
+	now := time.Unix(1_000_000, 0)
+
+	got := AlignSelfTests(SelfTestState{}, nil, now)
+	if !got.Seen || len(got.Head) != 0 || got.OKAt != 0 {
+		t.Fatalf("empty first log = %+v, want seen with an empty head", got)
+	}
+
+	log := []SelfTestEntry{stEntry(1100, SelfTestPassed), stEntry(1000, SelfTestFailed), stEntry(900, SelfTestPassed)}
+	got = AlignSelfTests(SelfTestState{Seen: true}, log, now)
+	if got.OKAt != now.Unix() {
+		t.Errorf("OKAt = %d, want the pass after a seen empty log observed at %d", got.OKAt, now.Unix())
+	}
+	if len(got.Failures) != 1 || got.Failures[0].ID.Hours != 1000 {
+		t.Errorf("failures = %+v, want the failure at 1000 h", got.Failures)
+	}
+	if !got.Seen || !slices.Equal(got.Head, stHead(log)) {
+		t.Errorf("seen = %v, head = %v, want seen with the log as head", got.Seen, got.Head)
+	}
+
+	got = AlignSelfTests(SelfTestState{}, log, now)
+	if got.OKAt != 0 || len(got.Failures) != 0 || !got.Seen {
+		t.Errorf("never seen log = %+v, want it adopted and marked seen", got)
+	}
+}
+
+// TestAlignSelfTestsATAHoursWrap: ATA self-test log hours are 16 bits and
+// wrap at 65536, so an unaligned head compares them modulo 65536.
+func TestAlignSelfTestsATAHoursWrap(t *testing.T) {
+	now := time.Unix(1_000_000, 0)
+	ata := func(hours int64, res SelfTestResult) SelfTestEntry {
+		e := stEntry(hours, res)
+		e.wraps = true
+		return e
+	}
+	prev := SelfTestState{Head: []SelfTestID{{Hours: 65500, Type: 9, Code: 0}}, OKAt: 500}
+
+	got := AlignSelfTests(prev, []SelfTestEntry{ata(30, SelfTestPassed), ata(65400, SelfTestPassed)}, now)
+	if got.OKAt != now.Unix() {
+		t.Errorf("OKAt = %d, want the pass after the wrap observed at %d", got.OKAt, now.Unix())
+	}
+
+	got = AlignSelfTests(prev, []SelfTestEntry{ata(65400, SelfTestPassed)}, now)
+	if got.OKAt != 500 {
+		t.Errorf("OKAt = %d, want an older entry not to count as new", got.OKAt)
+	}
+
+	// NVMe hours do not wrap: a smaller value is older.
+	got = AlignSelfTests(prev, []SelfTestEntry{stEntry(30, SelfTestPassed)}, now)
+	if got.OKAt != 500 {
+		t.Errorf("NVMe OKAt = %d, want 500", got.OKAt)
+	}
+}

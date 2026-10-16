@@ -2,6 +2,7 @@ package runner
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
@@ -152,6 +153,37 @@ func TestPersistersWaitForASuccessfulLoad(t *testing.T) {
 	}
 	if p.value != "stored" || st.state.KV["kernel.state"] != "stored" {
 		t.Fatalf("value = %q, stored %q", p.value, st.state.KV["kernel.state"])
+	}
+}
+
+// TestNewerSchemaRunsFromMemory: a state database written by a newer build
+// can never be loaded, so the runner runs from memory as without a store: the
+// persisters get an empty state (the gated checks run) and nothing is ever
+// written over the unseen stored file.
+func TestNewerSchemaRunsFromMemory(t *testing.T) {
+	st := &fakeStore{
+		state:   store.State{KV: map[string]string{"kernel.state": "stored"}},
+		loadErr: fmt.Errorf("open the state database: %w", store.ErrSchemaTooNew),
+	}
+	p := &fakePersister{key: "kernel.state"}
+	f, order, _ := persistFixture(t, st, p)
+
+	f.tick(t)
+	f.next(t)
+	f.next(t)
+
+	want := []string{"restore kernel.state", "kernel", "kernel", "kernel"}
+	if got := order.get(); !slices.Equal(got, want) {
+		t.Fatalf("calls = %v, want %v", got, want)
+	}
+	if len(p.restored) != 1 || p.restored[0].KV != nil {
+		t.Fatalf("restored = %+v, want one empty state", p.restored)
+	}
+	if st.checkpoints != 0 {
+		t.Fatalf("checkpointed %d times over a newer database, want 0", st.checkpoints)
+	}
+	if got := countContaining(f.tlg.texts(), "running from memory"); got != 1 {
+		t.Fatalf("telegram = %q, want the load failure raised once", f.tlg.texts())
 	}
 }
 
@@ -341,6 +373,104 @@ func TestRestartKeepsQueuedProblemsSMSSent(t *testing.T) {
 	if got := f2.sms.texts(); !slices.Equal(got, []string{host + ": RESOLVED: on mains"}) {
 		t.Fatalf("sms = %q, want the RESOLVED by SMS", got)
 	}
+}
+
+// TestConditionEndedWithoutResolvedLeavesTheSMSSentSet: a condition whose
+// PROBLEM went by SMS through the fallback and that ends without a RESOLVED
+// (/clear, a forget, a Good reading after a reopen) leaves the SMS-sent set,
+// so the PROBLEM of its next streak goes by SMS too, and its old queued
+// PROBLEM is not sent by SMS again.
+func TestConditionEndedWithoutResolvedLeavesTheSMSSentSet(t *testing.T) {
+	bad := reading("ups/main", health.Bad, "on battery")
+	tests := map[string]func(f *fixture, ups *fakeCheck){
+		"clear": func(f *fixture, _ *fakeCheck) {
+			if !f.r.Clear("ups/main") {
+				t.Fatal("Clear returned false")
+			}
+		},
+		"forget": func(f *fixture, ups *fakeCheck) {
+			ups.set(health.CheckResult{Forget: []string{"ups/main"}})
+			f.next(t)
+		},
+		"good after reopen": func(f *fixture, ups *fakeCheck) {
+			if !f.r.engine.Reopen("ups/main") {
+				t.Fatal("Reopen returned false")
+			}
+			ups.set(reading("ups/main", health.Good, "on mains"))
+			f.next(t)
+		},
+	}
+	for name, end := range tests {
+		t.Run(name, func(t *testing.T) {
+			ups := newFakeCheck(nil, "ups", bad)
+			f := newFixture(t, &fakeStore{}, checkOf(ups))
+			f.tlg.setFail(true)
+			f.tick(t)
+
+			end(f, ups)
+			if keys := smsSentKeys(t, f); slices.Contains(keys, "ups/main") {
+				t.Fatalf("SMS-sent set = %q after the condition ended, want ups/main gone", keys)
+			}
+
+			ups.set(bad)
+			f.next(t)
+			if got := countContaining(f.sms.texts(), "PROBLEM: on battery"); got != 2 {
+				t.Fatalf("sms = %q, want the PROBLEM of each streak once", f.sms.texts())
+			}
+		})
+	}
+}
+
+// TestRetireLeavesTheSMSSentSet: retiring a drive takes its condition keys
+// out of the SMS-sent set; another drive's key stays.
+func TestRetireLeavesTheSMSSentSet(t *testing.T) {
+	c := newFakeCheck(nil, "disks", health.CheckResult{Readings: []health.Reading{
+		{Key: "disks/TEST0000000001/health", Verdict: health.Bad, Text: "drive failed"},
+		{Key: "disks/TEST0000000002/health", Verdict: health.Bad, Text: "other drive failed"},
+	}})
+	f := newFixture(t, &fakeStore{}, checkOf(c))
+	f.r.opts.Drives = newBook()
+	f.tlg.setFail(true)
+	f.tick(t)
+
+	if _, err := f.r.Retire(context.Background(), "TEST0000000001"); err != nil {
+		t.Fatalf("Retire: %v", err)
+	}
+	if keys := smsSentKeys(t, f); !slices.Equal(keys, []string{"disks/TEST0000000002/health"}) {
+		t.Fatalf("SMS-sent set = %q, want only the other drive's key", keys)
+	}
+}
+
+// TestStoredStaleSMSSentKeyIsPruned: a stored SMS-sent key whose condition
+// is not tracked (saved by an earlier build that kept it) is dropped, and
+// the next checkpoint stores the set without it.
+func TestStoredStaleSMSSentKeyIsPruned(t *testing.T) {
+	st := &fakeStore{state: store.State{KV: map[string]string{notify.KVSMSProblems: `["ups/gone"]`}}}
+	f := newFixture(t, st, checkOf(newFakeCheck(nil, "kernel", health.CheckResult{})))
+	f.tick(t)
+
+	if keys := smsSentKeys(t, f); len(keys) != 0 {
+		t.Fatalf("SMS-sent set = %q, want the stale key pruned", keys)
+	}
+	if got := st.state.KV[notify.KVSMSProblems]; got != "[]" {
+		t.Fatalf("stored SMS-sent set = %q, want []", got)
+	}
+}
+
+// smsSentKeys returns the notifier's SMS-sent set.
+func smsSentKeys(t *testing.T, f *fixture) []string {
+	t.Helper()
+
+	v, err := f.r.notifier.ExportSMSProblems()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var keys []string
+	if err := json.Unmarshal([]byte(v), &keys); err != nil {
+		t.Fatal(err)
+	}
+
+	return keys
 }
 
 // TestRestartKeepsTheUndeliveredList: listed PROBLEMs and the Folded count

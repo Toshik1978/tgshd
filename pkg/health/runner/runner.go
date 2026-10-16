@@ -177,9 +177,9 @@ type Runner struct {
 	// the maintenance-lock observation.
 	own     []Persister
 	network int // index of the network check, -1 when absent
-	// networkUnknown tells that the last network run was unreadable (an
-	// error or no judged reading): checks that need the internet are not run
-	// (FR-036). Only touched by Do.
+	// networkUnknown tells that the network check has not run yet or its
+	// last run was unreadable (an error or no judged reading): checks that
+	// need the internet are not run (FR-036). Only touched by Do.
 	networkUnknown bool
 	// sends bounds every delivery by the running tick's deadline.
 	sends deliveries
@@ -197,12 +197,18 @@ type Runner struct {
 	// only touched by Do.
 	pendingAlerts  []store.Alert
 	pendingSamples []store.SampleRow
+	// pendingDropped tells that pending records were dropped since they were
+	// last handed to the store; only touched by Do.
+	pendingDropped bool
 	// saveReported tells that a state-write failure went out to the operator
 	// and its recovery notice is due; only touched by Do.
 	saveReported bool
 
 	loadMu sync.Mutex
 	loaded bool
+	// memoryOnly tells that the store holds a newer build's database: the
+	// runner runs as without a store. Set by Load; Do reads it after its Load.
+	memoryOnly bool
 	// loadErr is the last failed Load, not yet raised by Do.
 	loadErr error
 	// restoreErrs are the persister failures of the successful Load, not yet
@@ -258,6 +264,9 @@ func New(opts Options) *Runner {
 	for i := range opts.Checks {
 		if opts.Checks[i].Name == notify.CheckNetwork {
 			r.network = i
+			// Not read yet: at boot the network check may pause in the
+			// boot quiet window before its first run.
+			r.networkUnknown = true
 
 			break
 		}
@@ -382,6 +391,10 @@ func (r *Runner) Do(ctx context.Context) error {
 	}
 	r.raise(c)
 	r.noticeTelegramFailing()
+	// After this tick's RESOLVEDs went out, a key whose condition ended
+	// without one (good again after a reopen), or a stored key of such a
+	// condition, leaves the SMS-sent set before it is saved.
+	r.notifier.ForgetEnded(func(key string) bool { return !r.bad(key) })
 	err := r.checkpoint(ctx, c, loaded)
 
 	r.mu.Lock()
@@ -397,7 +410,9 @@ func (r *Runner) Do(ctx context.Context) error {
 // as slow as the store read: a failure is recorded, raised by the next Do as a
 // (rate-limited) checker error, and retried next tick. State loaded late is
 // merged into what memory built meanwhile: memory wins per condition key,
-// stored queue items go first, and the later rate mark wins.
+// stored queue items go first, and the later rate mark wins. A database of a
+// newer schema (store.ErrSchemaTooNew) never loads: Load then gives up on the
+// store and runs from memory, as without one, raising that once.
 func (r *Runner) Load(ctx context.Context) error {
 	r.loadMu.Lock()
 	defer r.loadMu.Unlock()
@@ -413,6 +428,17 @@ func (r *Runner) Load(ctx context.Context) error {
 	}
 
 	st, err := r.opts.Store.Load(ctx)
+	if errors.Is(err, store.ErrSchemaTooNew) {
+		// A newer build's database never loads: run from memory as without a
+		// store, so the gated checks run, and never write over it.
+		r.loadErr = fmt.Errorf("%w; running from memory", err)
+		r.memoryOnly = true
+		r.loaded = true
+		r.restore(r.own, store.State{})
+		r.restore(r.opts.Persisters, store.State{})
+
+		return nil
+	}
 	if err != nil {
 		r.loadErr = err
 
@@ -479,6 +505,7 @@ func (r *Runner) Clear(key string) bool {
 	if !ok || !r.engine.Clear(key) {
 		return false
 	}
+	r.notifier.ForgetEnded(func(k string) bool { return k == key })
 
 	r.mu.Lock()
 	defer r.mu.Unlock()
@@ -666,7 +693,9 @@ func (r *Runner) eligible(now time.Time, noInternet, quiet bool) []int {
 
 // dependsOnKey resolves a depends_on condition key. The 001 network keys
 // (network/router, network/internet) name the one network/connectivity
-// condition that replaced them, so a 001 config keeps working.
+// condition that replaced them, so a 001 config keeps working. The literals
+// mirror network.formerKeyRouter and network.formerKeyInternet; keep them in
+// sync.
 func dependsOnKey(key string) string {
 	switch key {
 	case "network/router", "network/internet":
@@ -780,7 +809,9 @@ func (r *Runner) failErr(c *cycle, check string, err error) {
 }
 
 // forget silently clears the check's own conditions named by keys and queues
-// their cleared records; another check's condition is left alone.
+// their cleared records; another check's condition is left alone. The record
+// reads "no longer judged", which fits a sensor that is gone or no longer
+// judged and a 001 network key alike.
 func (r *Runner) forget(c *cycle, check string, keys []string) {
 	for _, key := range keys {
 		cond, ok := r.engine.Condition(key)
@@ -794,8 +825,9 @@ func (r *Runner) forget(c *cycle, check string, keys []string) {
 			continue
 		}
 		if r.engine.Clear(key) {
+			r.notifier.ForgetEnded(func(k string) bool { return k == key })
 			c.cleared = append(c.cleared, store.Alert{
-				At: c.now, Kind: store.KindCleared, Check: check, Key: key, Text: "sensor gone",
+				At: c.now, Kind: store.KindCleared, Check: check, Key: key, Text: "no longer judged",
 			})
 		}
 	}
@@ -827,11 +859,13 @@ func (r *Runner) raise(c *cycle) {
 // unseen stored state) and the records stay pending. A write failure is
 // reported (the store returns it once per outage) and the runner carries on
 // from memory; the first write that succeeds afterwards sends the recovery
-// notice (saveRecovered). Only a cancelled context is returned.
+// notice (saveRecovered). The tick's results have been dispatched, so a
+// shutdown arriving now must not lose them: the write outlives the
+// cancellation of ctx by up to interruptedSaveTimeout, and only a write cut
+// off by that is returned.
 func (r *Runner) checkpoint(ctx context.Context, c *cycle, loaded bool) error {
-	r.pendingAlerts = append(r.pendingAlerts, r.records(c)...)
-	r.pendingSamples = append(r.pendingSamples, c.samples...)
-	if r.opts.Store == nil {
+	r.addPending(r.records(c), c.samples)
+	if !r.persistent() {
 		r.pendingAlerts, r.pendingSamples = nil, nil
 
 		return nil
@@ -839,22 +873,23 @@ func (r *Runner) checkpoint(ctx context.Context, c *cycle, loaded bool) error {
 	if !loaded {
 		return nil
 	}
-	alerts, samples := r.pendingAlerts, r.pendingSamples
-	r.pendingAlerts, r.pendingSamples = nil, nil
+	alerts, samples := r.takePending()
 
 	st := store.State{
 		Conditions: r.engine.Conditions(), RateMarks: r.marks.Export(), Queue: r.notifier.Export(),
 		KV: r.scheduleKV(),
 	}
 	r.persist(&st)
-	err := r.opts.Store.Checkpoint(ctx, st, alerts, samples)
+	saveCtx, cancel := saveContext(ctx)
+	defer cancel()
+	err := r.opts.Store.Checkpoint(saveCtx, st, alerts, samples)
 	switch {
 	case err == nil:
 		// A store still degraded returns nil for every failure after the first.
 		if !r.opts.Store.Degraded() {
 			r.saveRecovered()
 		}
-	case ctx.Err() != nil:
+	case saveCtx.Err() != nil:
 		return fmt.Errorf("checkpoint health state: %w", err)
 	default:
 		if r.checker.Report(keySave, "cannot save state: "+err.Error()) {
@@ -863,6 +898,49 @@ func (r *Runner) checkpoint(ctx context.Context, c *cycle, loaded bool) error {
 	}
 
 	return nil
+}
+
+// persistent reports whether the runner writes its state to a store.
+func (r *Runner) persistent() bool {
+	return r.opts.Store != nil && !r.memoryOnly
+}
+
+// saveContext returns the context of a checkpoint: it is not cancelled with
+// ctx, but once ctx is done it ends after interruptedSaveTimeout, so a
+// shutdown neither cuts the write off nor waits on a hung store for long.
+func saveContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	saveCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
+	stop := context.AfterFunc(ctx, func() { time.AfterFunc(interruptedSaveTimeout, cancel) })
+
+	return saveCtx, func() {
+		stop()
+		cancel()
+	}
+}
+
+// addPending appends the records waiting for the store, keeping the newest
+// within store.MaxPendingAlerts and store.MaxPendingSamples: they grow while
+// state cannot be loaded. The first drop of a run of drops is logged.
+func (r *Runner) addPending(alerts []store.Alert, samples []store.SampleRow) {
+	var da, ds int
+	r.pendingAlerts, da = store.KeepNewest(append(r.pendingAlerts, alerts...), store.MaxPendingAlerts)
+	r.pendingSamples, ds = store.KeepNewest(append(r.pendingSamples, samples...), store.MaxPendingSamples)
+	if da+ds == 0 {
+		return
+	}
+	if !r.pendingDropped {
+		r.opts.Logger.Warn("dropped the oldest health records waiting for the state store",
+			zap.Int("alerts", da), zap.Int("samples", ds))
+	}
+	r.pendingDropped = true
+}
+
+// takePending hands the pending records over to the store.
+func (r *Runner) takePending() ([]store.Alert, []store.SampleRow) {
+	alerts, samples := r.pendingAlerts, r.pendingSamples
+	r.pendingAlerts, r.pendingSamples, r.pendingDropped = nil, nil, false
+
+	return alerts, samples
 }
 
 // saveRecovered sends the one recovery notice of a reported state-write

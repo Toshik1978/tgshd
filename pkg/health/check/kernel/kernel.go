@@ -121,8 +121,10 @@ func classTable() []class {
 				`I/O error`,
 				`^(critical (medium|target|nexus)|timeout) error, dev `,
 			),
-			// exclude covers every storage-io pattern for loop, sr, fd and zram devices.
-			exclude: regexp.MustCompile(`dev (loop|sr|fd|zram)\d`),
+			// exclude covers every storage-io pattern for loop, sr, fd and zram
+			// devices, as the block layer (dev loop0) and filesystems ((device
+			// loop0), XFS (loop0)) name them.
+			exclude: regexp.MustCompile(`(\bdev |\bdevice |\()(loop|sr|fd|zram)\d`),
 		},
 	}
 }

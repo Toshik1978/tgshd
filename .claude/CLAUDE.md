@@ -86,7 +86,7 @@ group, gated behind an env-var check in `main()`.
 | `pkg/health/report` | Telegram reply and weekly-summary text (`/status`, `/history`, `/temp`, `/disks`, summary) |
 | `pkg/health/store` | SQLite state and history store that survives restarts |
 | `pkg/health/check/*` | One pure package per check type (`network`, `ups`, `disks`, `temps`, `kernel`, `containers`, `httpcheck`, `freshness`, `command`, `modemprobe`); I/O behind small source interfaces |
-| `pkg/host/*` | Thin host adapters behind the check sources: `smartctl`, `nvidia`, `hwmon`, `edac`, `kmsg`, `sysfs`, `docker`, `execprobe`, `lockfile` (heartbeat and state lock) |
+| `pkg/host/*` | Thin host adapters behind the check sources: `smartctl`, `nvidia`, `hwmon`, `edac`, `kmsg`, `sysfs`, `docker`, `execprobe`, `journal` (`journalctl`, previous-boot kernel tail), `httpstamp` (freshness stamp over HTTP), `lockfile` (heartbeat and state lock) |
 | `pkg/mail` | Plain-text email through an SMTP relay |
 | `pkg/doh` | Minimal RFC 8484 DNS-over-HTTPS resolver (used by the `http` check) |
 

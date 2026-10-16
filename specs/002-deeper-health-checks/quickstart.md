@@ -62,7 +62,7 @@ go test ./pkg/health/notify/ -run 'TestTelegramFailingEmailOnce|TestSMSFallbackP
 go test ./pkg/health/runner/ -run 'TestHardwareRunsInMaintenance|TestStuckMaintenanceLock|TestSnapshotPaused|TestDistinctCheckerErrors|TestStoreRecoveryNotice|TestBootGraceHardware|TestDroppedProblemReopens|TestDroppedProblemNewStreakListed|TestDroppedResolvedListed' -v
 go test ./pkg/health/report/ -run 'TestQuietNoteListsPaused' -v
 go test ./pkg/health/ -run 'TestReopen' -v
-go test ./pkg/health/store/ -run 'TestMigrateV1ToV2|TestQueueKindRoundTrip' -v
+go test ./pkg/health/store/ -run 'TestMigrateV1ToCurrent|TestQueueKindRoundTrip' -v
 ```
 
 | Scenario | Expected |

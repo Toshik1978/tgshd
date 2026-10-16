@@ -3,6 +3,7 @@
 package temps
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -30,8 +31,8 @@ const (
 // The plausible physical range of a temperature reading. A value outside it is
 // a reading fault, not heat.
 const (
-	minPlausible = -40.0
-	maxPlausible = 150.0
+	minPlausible = health.MinPlausibleCelsius
+	maxPlausible = health.MaxPlausibleCelsius
 )
 
 // unsetCrit is a common "no limit" marker in temp<n>_crit; like a value
@@ -223,9 +224,9 @@ func (c *Check) Run(ctx context.Context) health.CheckResult {
 	return res
 }
 
-// Sensors returns the sensors the last reads showed, sorted by metric, with
-// their limits and, for those without a usable reading, since when. It is empty
-// until the first successful read.
+// Sensors returns the sensors the last reads showed, sorted by metric then
+// label, with their limits and, for those without a usable reading, since
+// when. It is empty until the first successful read.
 func (c *Check) Sensors() []SensorStatus {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -237,7 +238,9 @@ func (c *Check) Sensors() []SensorStatus {
 			out = append(out, st)
 		}
 	}
-	slices.SortFunc(out, func(a, b SensorStatus) int { return strings.Compare(a.Metric, b.Metric) })
+	slices.SortFunc(out, func(a, b SensorStatus) int {
+		return cmp.Or(strings.Compare(a.Metric, b.Metric), strings.Compare(a.Label, b.Label))
+	})
 
 	return out
 }
@@ -647,7 +650,8 @@ func (c *Check) stoppedGPUs() []observed {
 	out := make([]observed, 0, len(prev))
 	for _, key := range slices.Sorted(maps.Keys(prev)) {
 		out = append(out, observed{
-			key: key, name: prev[key], unreadable: prev[key] + " is not reported: the driver reports no devices",
+			key: key, name: prev[key], metric: "temp.gpu." + strings.TrimPrefix(key, "temps/gpu/"),
+			limit: float64(c.limits.GPU), unreadable: prev[key] + " is not reported: the driver reports no devices",
 		})
 	}
 
@@ -670,7 +674,7 @@ func (c *Check) apply(
 	cur := make(map[string]string, len(obs))
 	infos := make(map[string]SensorStatus, len(obs))
 	for _, o := range obs {
-		infos[o.key] = c.statusOf(src, o)
+		infos[o.key] = statusOf(o)
 		readable := o.unreadable == "" && o.celsius >= minPlausible && o.celsius <= maxPlausible
 		if readable {
 			res.Samples = append(res.Samples, health.Sample{Metric: o.metric, Value: o.celsius})
@@ -696,12 +700,8 @@ func (c *Check) apply(
 	c.info[src] = infos
 }
 
-// statusOf is the /temp status of one observation. A sensor observed without a
-// metric (a GPU the driver stopped reporting) keeps what was shown of it before.
-func (c *Check) statusOf(src source, o observed) SensorStatus {
-	if prev, ok := c.info[src][o.key]; ok && o.metric == "" {
-		return prev
-	}
+// statusOf is the /temp status of one observation.
+func statusOf(o observed) SensorStatus {
 	label := strings.Replace(strings.TrimPrefix(o.key, "temps/"), "/", " ", 1)
 
 	return SensorStatus{Metric: o.metric, Label: label, Limit: o.limit}

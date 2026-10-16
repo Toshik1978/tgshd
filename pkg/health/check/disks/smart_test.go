@@ -343,25 +343,31 @@ func TestDecodeSATAWear(t *testing.T) {
 
 func TestDecodeSATAWearConditions(t *testing.T) {
 	const tmpl = `{"device":{"name":"/dev/sda","protocol":%q},"serial_number":"TEST0000000001",%s
-		"ata_smart_attributes":{"table":[{"id":177,"value":%d,"raw":{"value":1}}]}}`
+		"ata_smart_attributes":{"table":[{"id":177,"name":%q,"value":%d,"raw":{"value":1}}]}}`
+	const wl = "Wear_Leveling_Count"
 	tests := []struct {
 		name     string
 		protocol string
 		rotation string
+		attr     string
 		value    int
 		want     *int
 	}{
-		{"rotating disk", "ATA", `"rotation_rate":7200,`, 80, nil},
-		{"rotation unreported", "ATA", ``, 80, nil},
-		{"value above 100", "ATA", `"rotation_rate":0,`, 253, nil},
-		{"negative value", "ATA", `"rotation_rate":0,`, -1, nil},
-		{"full health", "ATA", `"rotation_rate":0,`, 100, new(0)},
-		{"exhausted", "ATA", `"rotation_rate":0,`, 0, new(100)},
-		{"other bus", "NVMe", `"rotation_rate":0,`, 80, nil},
+		{"rotating disk", "ATA", `"rotation_rate":7200,`, wl, 80, nil},
+		{"rotation unreported", "ATA", ``, wl, 80, nil},
+		{"value above 100", "ATA", `"rotation_rate":0,`, wl, 253, nil},
+		{"negative value", "ATA", `"rotation_rate":0,`, wl, -1, nil},
+		{"full health", "ATA", `"rotation_rate":0,`, wl, 100, new(0)},
+		{"exhausted", "ATA", `"rotation_rate":0,`, wl, 0, new(100)},
+		{"other bus", "NVMe", `"rotation_rate":0,`, wl, 80, nil},
+		// SandForce controllers report 177 as Wear_Range_Delta, whose
+		// normalised value is often 0: it is not wear.
+		{"wear range delta", "ATA", `"rotation_rate":0,`, "Wear_Range_Delta", 0, nil},
+		{"name unreported", "ATA", `"rotation_rate":0,`, "", 50, nil},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			in := fmt.Sprintf(tmpl, tc.protocol, tc.rotation, tc.value)
+			in := fmt.Sprintf(tmpl, tc.protocol, tc.rotation, tc.attr, tc.value)
 			r, err := DecodeSMART([]byte(in), 0, BuiltinCounters())
 			if err != nil {
 				t.Fatalf("DecodeSMART: %v", err)

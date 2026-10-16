@@ -246,3 +246,41 @@ func TestNoInternetTargets(t *testing.T) {
 		t.Fatalf("got %+v", res)
 	}
 }
+
+// partialPinger returns the per-host result together with a probing error,
+// like ping.Reachable when one host could not be probed.
+type partialPinger struct {
+	up  map[string]bool
+	err error
+}
+
+func (f *partialPinger) Reachable(_ context.Context, hosts []string) (map[string]bool, error) {
+	out := make(map[string]bool, len(hosts))
+	for _, h := range hosts {
+		out[h] = f.up[h]
+	}
+
+	return out, f.err
+}
+
+func TestPartialProbeError(t *testing.T) {
+	gw := fakeGateway{addr: netip.MustParseAddr("192.0.2.1")}
+	targets := []string{"2001:db8::1", "203.0.113.10"}
+	probeErr := errors.New("ping 2001:db8::1: address family not supported")
+
+	t.Run("another target answers", func(t *testing.T) {
+		p := &partialPinger{up: map[string]bool{"192.0.2.1": true, "203.0.113.10": true}, err: probeErr}
+		res := network.New(gw, p, targets).Run(t.Context())
+		if res.Err != nil || len(res.Readings) != 1 || res.Readings[0].Verdict != health.Good {
+			t.Fatalf("want Good despite the probing error, got %+v", res)
+		}
+	})
+
+	t.Run("no target answers", func(t *testing.T) {
+		p := &partialPinger{up: map[string]bool{"192.0.2.1": true}, err: probeErr}
+		res := network.New(gw, p, targets).Run(t.Context())
+		if !errors.Is(res.Err, probeErr) || len(res.Readings) != 0 {
+			t.Fatalf("want the probing error and no readings, got %+v", res)
+		}
+	})
+}

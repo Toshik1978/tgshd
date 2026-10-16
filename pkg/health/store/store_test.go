@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -386,6 +387,52 @@ func TestMigrateV1ToCurrent(t *testing.T) {
 	if len(st.Queue) != 1 || st.Queue[0].ID != 3 || st.Queue[0].Kind != "event" ||
 		st.Queue[0].Check != "" || st.Queue[0].Key != "" || st.Queue[0].Plain != "" || !st.Queue[0].Since.IsZero() {
 		t.Errorf("queue = %+v, want the 001 row read back as event", st.Queue)
+	}
+}
+
+// TestMigrateV1DerivesQueueKind: migration 2 reads a 001 row's kind from
+// the label after its host prefix ("<host>: PROBLEM: ", "<host>: RESOLVED: "),
+// so a queued PROBLEM keeps the SMS fallback and the dropped handling; any
+// other row is an event.
+func TestMigrateV1DerivesQueueKind(t *testing.T) {
+	dir := t.TempDir()
+	ctx := context.Background()
+	raw, err := sql.Open(driverName, "file:"+filepath.Join(dir, FileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{
+		schemaV1,
+		`INSERT INTO queue (id, created_at, channel, text) VALUES
+		(1, 100, 'tlg', 'h.example.org: PROBLEM: on battery (since 10:00)'),
+		(2, 100, 'sms', 'h.example.org: RESOLVED: on mains'),
+		(3, 100, 'tlg', 'h.example.org: weekly summary'),
+		(4, 100, 'tlg', 'h.example.org: note PROBLEM: not a label'),
+		(5, 100, 'tlg', 'PROBLEM: no host prefix')`,
+		"PRAGMA user_version = 1",
+	} {
+		if _, err = raw.ExecContext(ctx, q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = raw.Close()
+
+	s, err := Open(ctx, dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+	st, err := s.Load(ctx)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	want := []string{"problem", "resolved", "event", "event", "event"}
+	got := make([]string, 0, len(st.Queue))
+	for i := range st.Queue {
+		got = append(got, st.Queue[i].Kind)
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("kinds = %q, want %q", got, want)
 	}
 }
 

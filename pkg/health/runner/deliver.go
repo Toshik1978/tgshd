@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/Toshik1978/tgshd/pkg/health/notify"
@@ -57,17 +56,26 @@ func (d *deliveries) stop(mail bool) <-chan struct{} {
 	return d.sendStop
 }
 
-// lane is one delivery channel (Telegram, SMS or email). A send waits no
-// longer than its context and the running tick allow. A sender that ignores
-// its context (the Telegram publisher does) is left running: the caller gets
-// a notify.AbandonedError carrying the send's eventual result, so the
-// notifier keeps the message queued without re-sending it and drops it on a
-// late success. While such a send is in progress the lane refuses new sends,
-// so at most one hangs per channel.
+// lane is one delivery channel (Telegram, SMS or email). Its sends go one at
+// a time: a send made while another is in progress (e.g. a command's push
+// during a tick) waits for it. A send waits no longer than its context and
+// the running tick allow. A sender that ignores its context (the Telegram
+// publisher does) is left running: the caller gets a notify.AbandonedError
+// carrying the send's eventual result, so the notifier keeps the message
+// queued without re-sending it and drops it on a late success. While such an
+// abandoned send is in progress the lane refuses new sends, waiting ones
+// included, so at most one hangs per channel.
 type lane struct {
 	d    *deliveries
 	mail bool
-	busy atomic.Bool
+
+	mu sync.Mutex
+	// inFlight tells that a send is in progress, abandoned that it was
+	// abandoned; changed is closed (and replaced) when either changes. seq
+	// numbers the sends, so a late abandon never marks a newer one.
+	inFlight, abandoned bool
+	seq                 uint64
+	changed             chan struct{}
 }
 
 // run calls send unless the tick's deadline has passed or the lane is busy;
@@ -76,11 +84,12 @@ func (l *lane) run(ctx context.Context, send func(context.Context) error) error 
 	stop := l.d.stop(l.mail)
 	select {
 	case <-stop:
-		return fmt.Errorf("%w: %w: %w", errDeliveryDeadline, notify.ErrPastDeadline, notify.ErrNotSent)
+		return pastDeadline()
 	default:
 	}
-	if !l.busy.CompareAndSwap(false, true) {
-		return fmt.Errorf("%w: %w", errChannelBusy, notify.ErrNotSent)
+	seq, err := l.acquire(ctx, stop)
+	if err != nil {
+		return err
 	}
 
 	sendCtx, cancel := context.WithCancel(ctx)
@@ -88,7 +97,7 @@ func (l *lane) run(ctx context.Context, send func(context.Context) error) error 
 	go func() {
 		err := send(sendCtx)
 		cancel()
-		l.busy.Store(false)
+		l.release()
 
 		done <- err
 	}()
@@ -98,11 +107,90 @@ func (l *lane) run(ctx context.Context, send func(context.Context) error) error 
 		return err
 	case <-stop:
 		cancel()
+		l.abandon(seq)
 
 		return &notify.AbandonedError{Cause: errDeliveryDeadline, Result: done}
 	case <-ctx.Done():
+		l.abandon(seq)
+
 		return &notify.AbandonedError{Cause: context.Cause(ctx), Result: done}
 	}
+}
+
+// acquire waits until no send is in progress and takes the lane, returning
+// the send's number. It refuses while a send is abandoned, and when stop
+// closes or ctx ends first.
+func (l *lane) acquire(ctx context.Context, stop <-chan struct{}) (uint64, error) {
+	for {
+		l.mu.Lock()
+		switch {
+		case l.abandoned:
+			l.mu.Unlock()
+
+			return 0, fmt.Errorf("%w: %w", errChannelBusy, notify.ErrNotSent)
+		case !l.inFlight:
+			l.inFlight = true
+			l.seq++
+			seq := l.seq
+			l.mu.Unlock()
+
+			return seq, nil
+		}
+		if l.changed == nil {
+			l.changed = make(chan struct{})
+		}
+		changed := l.changed
+		l.mu.Unlock()
+
+		select {
+		case <-changed:
+		case <-stop:
+			return 0, pastDeadline()
+		case <-ctx.Done():
+			// The tick's send context ends from the stop: report the deadline.
+			select {
+			case <-stop:
+				return 0, pastDeadline()
+			default:
+			}
+
+			return 0, fmt.Errorf("%w: %w", context.Cause(ctx), notify.ErrNotSent)
+		}
+	}
+}
+
+// release frees the lane once a send has returned.
+func (l *lane) release() {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	l.inFlight, l.abandoned = false, false
+	l.signal()
+}
+
+// abandon marks send seq as abandoned; it does nothing when that send has
+// returned meanwhile, even if a newer one has taken the lane.
+func (l *lane) abandon(seq uint64) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if l.inFlight && l.seq == seq {
+		l.abandoned = true
+		l.signal()
+	}
+}
+
+// signal wakes the waiting sends; the caller holds l.mu.
+func (l *lane) signal() {
+	if l.changed != nil {
+		close(l.changed)
+		l.changed = nil
+	}
+}
+
+// pastDeadline is the refusal of a send past the tick's deadline.
+func pastDeadline() error {
+	return fmt.Errorf("%w: %w: %w", errDeliveryDeadline, notify.ErrPastDeadline, notify.ErrNotSent)
 }
 
 // boundSends starts the tick's delivery deadlines, from now: Telegram and SMS
@@ -122,7 +210,11 @@ func (r *Runner) boundSends(ctx context.Context) (context.Context, func()) {
 	// The send context ends from the send stop itself, not from a timer of
 	// its own: two timers for the same instant fire in either order, and a
 	// send context ending first would let a send on a free lane (the SMS
-	// fallback after a Telegram hang) start past the deadline.
+	// fallback after a Telegram hang) start past the deadline. The parent
+	// ctx (the worker's) carries no deadline, so the one reported is the send
+	// stop's. Once the stop closes, sendCtx.Err() is context.Canceled, not
+	// DeadlineExceeded; the cause, context.Cause(sendCtx), keeps
+	// DeadlineExceeded.
 	sendCtx, cancel := context.WithCancelCause(ctx)
 	stopAfter := context.AfterFunc(sendDeadline, func() { cancel(context.DeadlineExceeded) })
 	deadline, _ := sendDeadline.Deadline()

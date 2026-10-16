@@ -294,6 +294,65 @@ func TestCancelledContextIsNotDegraded(t *testing.T) {
 	}
 }
 
+func TestCancelledCheckpointRetainsItsRecords(t *testing.T) {
+	s := openTemp(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := s.Checkpoint(ctx, sampleState(),
+		[]Alert{{At: ts(1), Kind: KindProblem, Check: "c", Key: "k", Text: "a"}},
+		[]SampleRow{{At: ts(1), Metric: "m", Value: 1}})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("err = %v, want context.Canceled", err)
+	}
+
+	if err = s.Checkpoint(context.Background(), State{}, nil, nil); err != nil {
+		t.Fatalf("next checkpoint: %v", err)
+	}
+	if n := count(t, s, "alerts"); n != 1 {
+		t.Errorf("alerts = %d, want the cancelled call's 1", n)
+	}
+	if n := count(t, s, "samples"); n != 1 {
+		t.Errorf("samples = %d, want the cancelled call's 1", n)
+	}
+	got, err := s.Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got.Baselines) != 1 || got.KV["kernel.cursor"] != "abc" {
+		t.Errorf("upserts of the cancelled call lost: %+v", got)
+	}
+}
+
+func TestPendingRecordsAreCappedWhileDegraded(t *testing.T) {
+	s := openTemp(t)
+	s.ckpt.maxAlerts, s.ckpt.maxSamples = 3, 2
+	ctx := context.Background()
+	breakWrites(t, s)
+	for i := range int64(5) {
+		_ = s.Checkpoint(ctx, State{},
+			[]Alert{{At: ts(i), Kind: KindEvent, Check: "c", Key: "k", Text: "t"}},
+			[]SampleRow{{At: ts(i), Metric: "m", Value: float64(i)}})
+	}
+	if alerts, samples := s.Dropped(); alerts != 2 || samples != 3 {
+		t.Errorf("Dropped() = %d, %d, want 2, 3", alerts, samples)
+	}
+
+	fixWrites(t, s)
+	if err := s.Checkpoint(ctx, State{}, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	var oldest float64
+	if err := s.db.QueryRowContext(ctx, `SELECT MIN(value) FROM samples`).Scan(&oldest); err != nil {
+		t.Fatal(err)
+	}
+	if n := count(t, s, "samples"); n != 2 || oldest != 3 {
+		t.Errorf("samples = %d from %v, want the newest 2 from 3", n, oldest)
+	}
+	if n := count(t, s, "alerts"); n != 3 {
+		t.Errorf("alerts = %d, want the newest 3", n)
+	}
+}
+
 func TestPendingSnapshotIsCloned(t *testing.T) {
 	s := openTemp(t)
 	ctx := context.Background()

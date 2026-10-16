@@ -78,6 +78,9 @@ func (c *Check) noteLive(rep *Report) {
 		temperature: copyInt(rep.Temperature), wear: copyInt(rep.PercentageUsed),
 		spare: copyInt(rep.AvailableSpare), spareThreshold: copyInt(rep.SpareThreshold),
 	}
+	if lv.temperature != nil && !plausibleTemp(*lv.temperature) {
+		lv.temperature = nil
+	}
 	if rep.PowerOnHours != nil {
 		h := *rep.PowerOnHours
 		lv.powerOnHours = &h
@@ -125,7 +128,7 @@ func (c *Check) Status() []DriveStatus {
 		if n := b.data.SelfTestNewest; n != nil {
 			cp := *n
 			s.SelfTestNewest = &cp
-			s.SelfTestNewestAge = newestAge(n.Hours, live.powerOnHours)
+			s.SelfTestNewestAge = newestAge(n.Hours, live.powerOnHours, Bus(b.bus) == BusATA)
 		}
 		out = append(out, s)
 	}
@@ -134,12 +137,24 @@ func (c *Check) Status() []DriveStatus {
 }
 
 // newestAge is the power-on time between a test at hours and the drive's
-// current hours; nil when either is unknown or the result is negative.
-func newestAge(hours int64, now *int64) *time.Duration {
-	if hours <= 0 || now == nil || *now < hours {
+// current hours; nil when either is unknown or the result is negative. The
+// hours of an ATA test (ata) are 16 bits and wrap at 65536, so once the
+// drive is past that they are compared modulo 65536.
+func newestAge(hours int64, now *int64, ata bool) *time.Duration {
+	if hours <= 0 || now == nil {
 		return nil
 	}
-	age := time.Duration(*now-hours) * time.Hour
+	d := *now - hours
+	if ata && *now >= ataSelfTestHoursWrap {
+		d %= ataSelfTestHoursWrap
+		if d < 0 {
+			d += ataSelfTestHoursWrap
+		}
+	}
+	if d < 0 {
+		return nil
+	}
+	age := time.Duration(d) * time.Hour
 
 	return &age
 }

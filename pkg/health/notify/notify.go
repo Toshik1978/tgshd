@@ -211,6 +211,24 @@ func (n *Notifier) ListUndelivered(item QueuedMessage) {
 	n.undelivered.Add(undeliveredFrom(item, n.opts.Host, n.opts.Location, n.opts.Now()))
 }
 
+// ForgetEnded takes out of the SMS-sent set every key for which ended
+// reports true: its condition ended without a RESOLVED (cleared, retired,
+// forgotten, or good again after a reopen). Its PROBLEMs queued so far are
+// marked resolved, so the fallback never sends one of them by SMS again,
+// while the PROBLEM of a later streak goes by SMS as usual. ended is called
+// with the notifier's lock held.
+func (n *Notifier) ForgetEnded(ended func(key string) bool) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	for key := range n.smsProblems.keys {
+		if ended(key) {
+			n.smsProblems.Remove(key)
+			n.resolvedBefore[key] = n.nextID
+		}
+	}
+}
+
 // Notify delivers a message. Failed deliveries are queued, so the returned
 // error is reserved for future use and is currently always nil.
 func (n *Notifier) Notify(ctx context.Context, msg Message) error {
@@ -250,7 +268,8 @@ func (n *Notifier) Notify(ctx context.Context, msg Message) error {
 // Flush retries queued messages in order, per channel. It stops a channel at
 // its first failure, or at a message whose abandoned send is still in
 // progress, so ordering is kept and nothing is sent twice; it does nothing
-// for Telegram while offline.
+// for Telegram while offline. A PROBLEM queued for SMS whose condition has
+// resolved since is dropped unsent.
 func (n *Notifier) Flush(ctx context.Context) {
 	n.mu.Lock()
 	pending := append([]QueuedMessage(nil), n.queue...)
@@ -274,6 +293,12 @@ func (n *Notifier) Flush(ctx context.Context) {
 
 		if n.inFlight(item.ID) {
 			blocked[item.Channel] = true
+
+			continue
+		}
+
+		if n.staleSMSProblem(item) {
+			n.remove(item.ID)
 
 			continue
 		}
@@ -738,6 +763,22 @@ func (n *Notifier) fallbackDueLocked() []QueuedMessage {
 func (n *Notifier) fallbackDueItemLocked(item *QueuedMessage, last int64) bool {
 	return item.Channel == ChannelTelegram && item.Kind == string(KindProblem) && item.ID == last &&
 		item.ID >= n.resolvedBefore[item.Key] && !n.smsProblems.Has(item.Key)
+}
+
+// staleSMSProblem reports whether item is a PROBLEM queued for SMS whose
+// condition has resolved since: sending it now would report a problem that is
+// over, with no RESOLVED by SMS to follow unless the RESOLVED took that route.
+func (n *Notifier) staleSMSProblem(item *QueuedMessage) bool {
+	if item.Channel != ChannelSMS || item.Kind != string(KindProblem) {
+		return false
+	}
+
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	mark, resolved := n.resolvedBefore[item.Key]
+
+	return resolved && item.ID < mark
 }
 
 // enqueue queues a message.

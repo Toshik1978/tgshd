@@ -118,8 +118,11 @@ dependencies already approved for 001, or an external tool that is optional at r
     by the existing State condition `disks/<serial>/selftest` (Bad while the newest finished test
     failed), so the same failure is never sent twice. When the head cannot be aligned (log
     cleared or wrapped past 5 entries) only entries newer than the stored newest power-on hours
-    count as new. A drive seen for the first time takes its whole log as the head: history is not
+    count as new; ATA log hours are 16 bits and wrap at 65536, so they are compared modulo
+    65536 (as is the power-on age of the newest test shown in `/disks`). A drive seen for the first time takes its whole log as the head: history is not
     re-reported (001's inventory rule), but a failed newest test still opens the State condition.
+    A log read empty is marked seen (`selftest_seen`), so every entry that appears in it later
+    is new: a new drive's first test counts as observed.
   - **Calendar age**: the baseline field `selftest_ok_at` (already persisted by 001, Unix
     seconds) becomes authoritative: it is set to `now` whenever a `passed` entry is newly observed
     by the head rule above. The age is `now - max(selftest_ok_at, first_seen_at)`; with no passed
@@ -186,7 +189,7 @@ dependencies already approved for 001, or an external tool that is optional at r
   judge it. The 001 filters (`loop`, `ram`, `zram`, `dm-`, `md`, `sr`, `removable=1`, `size=0`)
   stay in the adapter. A cmd adapter maps it onto `disks.Node{Name, Path}`. The pure
   `disks.ClassifyTransport(path)` (in `pkg/health/check/disks`) derives the transport: a path
-  segment `usb` ⇒ `usb`; `nvme` ⇒ `nvme`; `ata` ⇒ `sata`; `end_device-`, `sas_` or `port-` under
+  segment `usb` ⇒ `usb`; `nvme`, `nvme-subsystem` or `nvme-subsysN` (native multipath) ⇒ `nvme`; `ata` ⇒ `sata`; `end_device-`, `sas_` or `port-` under
   a SCSI host ⇒ `sas`; anything else (virtio, MMC, FireWire, Thunderbolt bridges) ⇒ `other`.
   - The check reads `nvme`, `sata` and `sas` nodes. `usb` and `other` nodes are read only when
     `disks.include_serials` is non-empty, and a drive read from them is tracked only when its
@@ -272,7 +275,7 @@ dependencies already approved for 001, or an external tool that is optional at r
   | `kernel/nvme` | as 001, any level |
   | `kernel/ata` | `^ata\d+(\.\d+)?: SError: `; `^ata\d+(\.\d+)?: (hard \|soft )?resetting link`; `^ata\d+: (COMRESET failed\|link is slow to respond\|limiting SATA link speed)`; 001's `exception\|failed command\|hard resetting` — at any level (001 required warning or worse) |
   | `kernel/thermal-throttle` | as 001 |
-  | `kernel/storage-io` (last) | `I/O error` anywhere, excluding records about `loop`, `sr`, `fd` and `zram` devices (`dev (loop\|sr\|fd\|zram)\d`) |
+  | `kernel/storage-io` (last) | `I/O error` anywhere, excluding records about `loop`, `sr`, `fd` and `zram` devices as the block layer and filesystems name them (`dev loop0`, `(device loop0)`, `XFS (loop0)`: `(\bdev \|\bdevice \|\()(loop\|sr\|fd\|zram)\d`) |
   `SATA link down` and `SATA link up` are deliberately not matched (empty ports at boot).
 - **Rationale**: GHES records carry `[Hardware Error]` after a `{n}` prefix, so the 001 anchor
   `^mce: \[Hardware Error\]` misses them; the filesystem layers (ext4, XFS, Btrfs) report "I/O
@@ -383,7 +386,7 @@ dependencies already approved for 001, or an external tool that is optional at r
   `temps.apply` and `disks.judgeTemp`. New `temperatures.limits_by_serial` (serial ⇒ °C) is
   consulted first by `disks.judgeTemp`. With threshold 0 the disks check's own streak
   (`overFor`) returns 0 ⇒ the first hot reading is Bad, so its code path stays and keeps working
-  for a non-zero threshold.
+  for a non-zero threshold. A drive found asleep loses that streak: it wakes into a new one.
 - **Rationale**: spec FR-014; 60 °C is the top of the operating range most drive datasheets give.
 - **Alternatives considered**: per-model limits (model strings are real host data in fixtures and
   config; the serial is already the drive's identity everywhere).
@@ -545,7 +548,8 @@ dependencies already approved for 001, or an external tool that is optional at r
 
 - **Decision**: `pkg/doh` exports `ErrNXDomain` (RCode `NameError`) next to `ErrNoAddresses`
   (success with no A or AAAA). `Lookup` returns a definitive answer only when both queries were
-  answered: NXDOMAIN from either ⇒ `ErrNXDomain`; both empty ⇒ `ErrNoAddresses`. Any transport
+  answered: NXDOMAIN from either ⇒ `ErrNXDomain`, except that addresses from either record type win over an
+  NXDOMAIN from the other; both empty ⇒ `ErrNoAddresses`. Any transport
   error, non-200 status, SERVFAIL or REFUSED ⇒ an ordinary error. `httpcheck` defines its own
   sentinels `ErrNameNotFound` and `ErrNoAddress`; a cmd `dohResolver` adapter wraps `*doh.Resolver`
   and maps `doh.ErrNXDomain` / `doh.ErrNoAddresses` onto them (pure packages never import
