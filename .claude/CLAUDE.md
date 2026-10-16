@@ -94,7 +94,8 @@ group, gated behind an env-var check in `main()`.
 
 ## Conventions
 
-These are non-negotiable for changes in this repo.
+These are non-negotiable for changes in this repo. They are the working summary of the
+project constitution, `.specify/memory/constitution.md`, which wins on any conflict.
 
 1. **Idiomatic Go.** Standard library first; wrap errors with `%w`; keep packages
    focused; follow existing patterns in the file you are editing.
@@ -124,3 +125,13 @@ device HTTP client (`pkg/zte`), the gammu Postgres repository
 (`pkg/sms/gammu`), and the fx root (`cmd`). Their tests still run in CI
 (`go test ./...`) — e.g. the gammu message-part builder is unit-tested — they
 just don't count toward the coverage gate.
+
+---
+
+## Spec Kit workflow
+
+New features are planned with Spec Kit and executed with superpowers:
+`/speckit-specify` → `/speckit-clarify` → `/speckit-plan` → `/speckit-tasks` →
+`/speckit-analyze`, then `/speckit-superpowers-execute` (imports `tasks.md` into beads and runs
+it test-first). Do not use `/speckit-implement`. Feature artifacts live in `specs/NNN-name/`;
+amend the constitution only with `/speckit-constitution`.
