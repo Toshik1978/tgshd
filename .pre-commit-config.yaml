@@ -3,7 +3,7 @@
 # types here is what makes one command enough.
 #
 # No commit-msg hook: this repository uses plain imperative subjects, not
-# conventional-commit prefixes (see CLAUDE.md).
+# conventional-commit prefixes (see .claude/CLAUDE.md).
 default_install_hook_types: [pre-commit, pre-push]
 
 repos:

@@ -14,6 +14,8 @@ test_status.log
 
 # Configuration
 .antigravitycli
-.claude
+.claude/*
+!.claude/CLAUDE.md
+!.claude/skills/
 .idea
 .vscode

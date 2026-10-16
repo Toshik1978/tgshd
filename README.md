@@ -106,7 +106,7 @@ task lint           # golangci-lint (the CI gate)
 task test:coverage  # tests with the race detector + coverage profile
 ```
 
-See [CLAUDE.md](CLAUDE.md) for the architecture overview, the optional-feature
+See [CLAUDE.md](.claude/CLAUDE.md) for the architecture overview, the optional-feature
 wiring pattern, and contribution conventions.
 
 ## License

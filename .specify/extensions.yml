@@ -1,0 +1,15 @@
+installed:
+- superpowers
+settings:
+  auto_execute_hooks: true
+hooks:
+  after_tasks:
+  - extension: superpowers
+    command: speckit.superpowers.execute
+    enabled: true
+    optional: true
+    priority: 10
+    prompt: Execute with superpowers?
+    description: Import tasks.md into beads and execute it with superpowers (TDD,
+      review, finish)
+    condition: null

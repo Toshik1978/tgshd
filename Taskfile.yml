@@ -2,11 +2,13 @@ version: "3"
 
 vars:
   BINARY: bin/tgshd
-  # Coverage gate scope: the cleanly unit-testable logic packages. The I/O
-  # adapters (ping, power, speedtest, telegram transport, zte device client),
-  # the gammu Postgres repository, and the fx root (cmd/main.go) run only
-  # against real hardware/services and are exercised in integration, not here.
-  COVERPKG: ./pkg/command/...,./pkg/sms,./pkg/script,./cmd/app
+  # Coverage gate scope: the cleanly unit-testable logic packages, including the
+  # pure host-health engine (pkg/health/...). The I/O adapters (ping, power,
+  # speedtest, telegram transport, zte device client, the host adapters under
+  # pkg/host, pkg/mail, pkg/doh), the gammu Postgres repository, and the fx root
+  # (cmd/main.go) run only against real hardware/services and are exercised in
+  # integration, not here.
+  COVERPKG: ./pkg/command/...,./pkg/sms,./pkg/script,./cmd/app,./pkg/health/...
   BUILDSTAMP:
     sh: date +%Y/%m/%d_%H:%M:%S
   COMMIT:

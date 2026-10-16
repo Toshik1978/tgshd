@@ -1,0 +1,32 @@
+schema_version: "1.0"
+
+extension:
+  id: "superpowers"
+  name: "Superpowers"
+  version: "0.13.0"
+  description: "Hand a feature's tasks.md to superpowers: import into beads, then TDD, subagent-driven or native execution, review and finish"
+  author: "Anton Krivenko"
+  license: "MIT"
+
+requires:
+  speckit_version: ">=1.0.0"
+  commands:
+    - "speckit.tasks"
+
+provides:
+  commands:
+    - name: "speckit.superpowers.execute"
+      file: "commands/execute.md"
+      description: "Import this feature's tasks.md into beads and execute it with the superpowers workflow"
+
+hooks:
+  after_tasks:
+    command: "speckit.superpowers.execute"
+    optional: true
+    prompt: "Execute with superpowers?"
+    description: "Import tasks.md into beads and execute it with superpowers (TDD, review, finish)"
+
+tags:
+  - "superpowers"
+  - "tdd"
+  - "execution"

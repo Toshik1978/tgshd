@@ -1,0 +1,19 @@
+{
+  "schema_version": "1.0",
+  "extensions": {
+    "superpowers": {
+      "version": "0.13.0",
+      "source": "local",
+      "manifest_hash": "sha256:855172cb91526285fe16bbf62560e2771f1af3b98fed99c5f3ce0f17c9843f18",
+      "enabled": true,
+      "priority": 10,
+      "registered_commands": {
+        "claude": [
+          "speckit.superpowers.execute"
+        ]
+      },
+      "registered_skills": [],
+      "installed_at": "2026-10-16T09:46:35.570781+00:00"
+    }
+  }
+}
