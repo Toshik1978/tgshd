@@ -115,9 +115,14 @@ func TestQuietTickCheckpoints(t *testing.T) {
 // takes a little longer to return; every other drive is in standby.
 type hangingDrives struct{}
 
-func (hangingDrives) Drives() ([]string, error) { return []string{"sda", "sdb"}, nil }
+func (hangingDrives) Drives() ([]disks.Node, error) {
+	return []disks.Node{
+		{Name: "sda", Path: "/sys/devices/example/sda"},
+		{Name: "sdb", Path: "/sys/devices/example/sdb"},
+	}, nil
+}
 
-func (hangingDrives) Run(ctx context.Context, node string) ([]byte, int, error) {
+func (hangingDrives) Run(ctx context.Context, node string, _ bool) ([]byte, int, error) {
 	if node != "sdb" {
 		return nil, disks.StandbyStatus, nil
 	}

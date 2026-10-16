@@ -59,13 +59,18 @@ func (p *fakePersister) Save(*store.State) error {
 const nvmeHot = `{"device":{"name":"/dev/nvme0","protocol":"NVMe"},"model_name":"Example NVMe SSD",
 "serial_number":"TEST0000000001","smart_status":{"passed":true},"temperature":{"current":80},
 "power_on_time":{"hours":100},"nvme_smart_health_information_log":{"critical_warning":0,"temperature":80,
-"available_spare":100,"available_spare_threshold":10,"percentage_used":1,"media_errors":0,"num_err_log_entries":0}}`
+"available_spare":100,"available_spare_threshold":10,"percentage_used":1,"media_errors":0,"num_err_log_entries":0},
+"nvme_self_test_log":{"table":[]}}`
 
 type fakeSmart struct{}
 
-func (fakeSmart) Drives() ([]string, error) { return []string{"nvme0n1"}, nil }
+func (fakeSmart) Drives() ([]disks.Node, error) {
+	return []disks.Node{{Name: "nvme0n1", Path: "/sys/devices/example/nvme0n1"}}, nil
+}
 
-func (fakeSmart) Run(context.Context, string) ([]byte, int, error) { return []byte(nvmeHot), 0, nil }
+func (fakeSmart) Run(context.Context, string, bool) ([]byte, int, error) {
+	return []byte(nvmeHot), 0, nil
+}
 
 func hasKey(readings []health.Reading, key string, v health.Verdict) bool {
 	return slices.ContainsFunc(readings, func(r health.Reading) bool { return r.Key == key && r.Verdict == v })
@@ -544,5 +549,50 @@ func TestKernelChecksOneShotHasNoBackgroundReader(t *testing.T) {
 	hs := &healthSetup{Config: &hcfg.Config{Kernel: &hcfg.Kernel{}}, OneShot: true}
 	if set := kernelChecks(hs); len(set.Checks) != 1 || len(set.Background) != 0 {
 		t.Fatalf("one-shot kernel set: %+v", set)
+	}
+}
+
+// fakeSmartRunner is a hand-written smartctlRunner.
+type fakeSmartRunner struct {
+	nodes []smartctl.Node
+	err   error
+	node  string
+	wake  bool
+}
+
+func (f *fakeSmartRunner) Drives() ([]smartctl.Node, error) { return f.nodes, f.err }
+
+func (f *fakeSmartRunner) Run(_ context.Context, node string, wake bool) ([]byte, int, error) {
+	f.node, f.wake = node, wake
+
+	return []byte("{}"), 4, nil
+}
+
+func TestSmartctlSourceMapsNodes(t *testing.T) {
+	t.Parallel()
+
+	runner := &fakeSmartRunner{nodes: []smartctl.Node{
+		{Name: "sda", Path: "/sys/devices/example/sda"}, {Name: "nvme0n1", Path: "/sys/devices/example/nvme0n1"},
+	}}
+	src := smartctlSource{runner: runner}
+	got, err := src.Drives()
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []disks.Node{
+		{Name: "sda", Path: "/sys/devices/example/sda"}, {Name: "nvme0n1", Path: "/sys/devices/example/nvme0n1"},
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("Drives() = %+v, want %+v", got, want)
+	}
+
+	out, status, err := src.Run(t.Context(), "sda", true)
+	if err != nil || status != 4 || string(out) != "{}" || runner.node != "sda" || !runner.wake {
+		t.Fatalf("Run = %q, %d, %v; runner saw %q wake=%v", out, status, err, runner.node, runner.wake)
+	}
+
+	runner.err = errors.New("boom")
+	if _, err = src.Drives(); !errors.Is(err, runner.err) {
+		t.Fatalf("Drives() error = %v, want the runner's", err)
 	}
 }

@@ -1,0 +1,42 @@
+{
+  "json_format_version": [
+    1,
+    0
+  ],
+  "smartctl": {
+    "version": [
+      7,
+      4
+    ],
+    "exit_status": 0
+  },
+  "device": {
+    "name": "/dev/sdb",
+    "type": "scsi",
+    "protocol": "SCSI"
+  },
+  "model_name": "Example SAS SSD",
+  "serial_number": "TEST0000000003",
+  "smart_status": {
+    "passed": true
+  },
+  "power_on_time": {
+    "hours": 4200
+  },
+  "temperature": {
+    "current": 31
+  },
+  "scsi_self_test_0": {
+    "code": {
+      "value": 1,
+      "string": "Background short"
+    },
+    "result": {
+      "value": 0,
+      "string": "Completed"
+    },
+    "power_on_time": {
+      "hours": 4190
+    }
+  }
+}

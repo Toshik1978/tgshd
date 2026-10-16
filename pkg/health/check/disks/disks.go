@@ -8,6 +8,7 @@ import (
 	"maps"
 	"math"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -24,12 +25,20 @@ const (
 	aspectSpare    = "spare"
 	aspectWear     = "wear"
 	aspectSelfTest = "selftest"
-	aspectMissing  = "missing"
-	aspectTemp     = "temp"
+	// aspectSelfTestFailure keys the event of a new failed self-test that is
+	// not the newest finished one.
+	aspectSelfTestFailure = "selftest-failure"
+	aspectMissing         = "missing"
+	aspectTemp            = "temp"
 )
 
 const (
 	checkName = "disks"
+	// kindNoVerdict is the checker-error kind of a read without a health verdict.
+	kindNoVerdict = "no-verdict"
+	// kindNoTemperature is the checker-error kind of a read without a
+	// temperature.
+	kindNoTemperature = "no-temperature"
 	// inventoryKey is the event key of the first-run message listing all drives.
 	inventoryKey = checkName + "/drives"
 
@@ -37,9 +46,7 @@ const (
 	// streak, as a multiple of the check interval (research R1).
 	gapCapFactor = 1.5
 
-	// ataLifetimeWrap is where the 16-bit lifetime hours of the ATA self-test
-	// log wrap around.
-	ataLifetimeWrap = 1 << 16
+	day = 24 * time.Hour
 )
 
 // StandbyStatus is the exit status Source.Run reports for a drive in a
@@ -71,14 +78,22 @@ var errAsleep = errors.New("drive in standby")
 // run and overwrite the stored baselines.
 var ErrBaselinesNotLoaded = errors.New("drive baselines not loaded")
 
+// Node is a drive's device node and its raw resolved sysfs path.
+type Node struct {
+	Name string
+	Path string
+}
+
 // Source discovers drives and runs smartctl against one of them. It is
 // implemented by pkg/host/smartctl.
 type Source interface {
-	// Drives returns the device node names (for example "sda", "nvme0n1") of
-	// the physical drives.
-	Drives() ([]string, error)
-	// Run returns smartctl's JSON output for node and its exit status.
-	Run(ctx context.Context, node string) (stdout []byte, exitStatus int, err error)
+	// Drives returns the device nodes (names such as "sda", "nvme0n1") of the
+	// physical drives.
+	Drives() ([]Node, error)
+	// Run returns smartctl's JSON output for the node name and its exit
+	// status. wake reads a drive in standby (spinning it up) instead of
+	// reporting StandbyStatus.
+	Run(ctx context.Context, node string, wake bool) (stdout []byte, exitStatus int, err error)
 }
 
 // Check is the drive health check. It owns the per-drive baselines; the runner
@@ -122,13 +137,20 @@ type baseline struct {
 type baselineData struct {
 	// Counters are the error counters as last seen, keyed like Report.Counters.
 	Counters map[string]int64 `json:"counters,omitempty"`
-	// SelfTestLastSeenHours is the power-on hours of the newest finished
-	// self-test judged. Informational: kept for the data model and reports,
-	// not used in judgement (the age comes from the current SMART data).
-	SelfTestLastSeenHours int64 `json:"selftest_last_seen_hours,omitempty"`
-	// SelfTestOKAt is when a passed self-test was first seen (Unix seconds).
-	// Informational, like SelfTestLastSeenHours.
+	// SelfTestOKAt is when a passed self-test was last newly observed (Unix
+	// seconds); with the drive's first sighting it gives the calendar age of
+	// the last pass.
 	SelfTestOKAt int64 `json:"selftest_ok_at,omitempty"`
+	// SelfTestHead is the identities of the newest log entries seen last
+	// time, to recognise what is new on the next read.
+	SelfTestHead []SelfTestID `json:"selftest_head,omitempty"`
+	// SelfTestNewest is the newest finished self-test, for status while the
+	// drive is not read.
+	SelfTestNewest *SelfTestNewest `json:"selftest_newest,omitempty"`
+	// SelfTestFormat is ok or unsupported (SelfTestFormat of the last read).
+	SelfTestFormat SelfTestFormat `json:"selftest_format,omitempty"`
+	// Health is the last read's SMART verdict: ok, failing or unknown.
+	Health string `json:"health,omitempty"`
 	// Node is the device node the drive was last read from; it attributes an
 	// unreadable node to its drive.
 	Node string `json:"node,omitempty"`
@@ -153,6 +175,8 @@ type probe struct {
 // result accumulates the readings and samples of one run.
 type result struct {
 	res health.CheckResult
+	// errs are the checker errors raised while judging, joined into res.Err.
+	errs []error
 }
 
 // New returns a disks check. temps is the temperatures section: nil means
@@ -281,7 +305,8 @@ func (c *Check) probe(ctx context.Context) ([]probe, error) {
 	out := make([]probe, len(nodes))
 	sem := make(chan struct{}, maxParallelReads)
 	var wg sync.WaitGroup
-	for i, node := range nodes {
+	for i, n := range nodes {
+		node := n.Name
 		wg.Go(func() {
 			select {
 			case sem <- struct{}{}:
@@ -300,16 +325,64 @@ func (c *Check) probe(ctx context.Context) ([]probe, error) {
 }
 
 func (c *Check) read(ctx context.Context, node string) probe {
-	stdout, status, err := c.src.Run(ctx, node)
+	stdout, status, err := c.src.Run(ctx, node, false)
 	if err != nil {
 		return probe{node: node, err: fmt.Errorf("%w: run smartctl: %w", ErrUnreadable, err)}
 	}
 	if status == StandbyStatus {
 		return probe{node: node, err: errAsleep}
 	}
-	report, err := DecodeSMART(stdout, status)
+	// The serial is only known once the output is decoded, so decode with
+	// every id any drive may track, then keep this drive's own set.
+	report, err := DecodeSMART(stdout, status, c.allCounters())
+	if err == nil {
+		set := c.counterSet(report.Serial)
+		for k := range report.Counters {
+			if id, ok := ataCounterID(k); ok && !set[id] {
+				delete(report.Counters, k)
+			}
+		}
+	}
 
 	return probe{node: node, report: report, err: err}
+}
+
+// counterSet returns the ATA attribute ids tracked for the drive with the
+// serial: the built-in set, disks.extra_counters and the drive's own
+// disks.extra_counters_by_serial.
+func (c *Check) counterSet(serial string) map[int]bool {
+	set := BuiltinCounters()
+	for _, id := range c.cfg.ExtraCounters {
+		set[id] = true
+	}
+	for _, id := range c.cfg.ExtraCountersBySerial[serial] {
+		set[id] = true
+	}
+
+	return set
+}
+
+// allCounters is the union of the counter sets of every drive.
+func (c *Check) allCounters() map[int]bool {
+	set := c.counterSet("")
+	for _, ids := range c.cfg.ExtraCountersBySerial {
+		for _, id := range ids {
+			set[id] = true
+		}
+	}
+
+	return set
+}
+
+// ataCounterID is the inverse of ATACounter.
+func ataCounterID(k string) (int, bool) {
+	s, ok := strings.CutPrefix(k, "ata.")
+	if !ok {
+		return 0, false
+	}
+	id, err := strconv.Atoi(s)
+
+	return id, err == nil
 }
 
 // judge turns one run's probes into readings and samples and updates the
@@ -344,7 +417,7 @@ func (c *Check) judge(now time.Time, probes []probe) health.CheckResult {
 
 	errs, orphans := c.attribute(now, unreadable, seen)
 	c.judgeMissing(&r, seen, orphans)
-	r.res.Err = errors.Join(errs...)
+	r.res.Err = errors.Join(slices.Concat(r.errs, errs)...)
 
 	if len(inventory) > 0 {
 		text := fmt.Sprintf("Drives found (%d):\n%s", len(inventory), strings.Join(inventory, "\n"))
@@ -381,16 +454,62 @@ func (c *Check) track(now time.Time, p *probe) (*baseline, bool) {
 func (c *Check) judgeDrive(r *result, now time.Time, b *baseline, rep *Report, fresh bool) {
 	serial, name := rep.Serial, label(b)
 
-	r.judged(serial, aspectHealth, rep.HealthFailed, name+": SMART overall health FAILED")
+	c.judgeVerdict(r, b, rep)
 	c.judgeNVMe(r, name, rep)
-	c.judgeSelfTest(r, now, b, rep)
+	// A section the read lacked judges nothing: the conditions it feeds keep
+	// their state, and counters are not seen as gone (FR-005).
+	gaps := reportGaps(r, b, rep)
+	if !gaps[GapSelfTestLog] {
+		c.judgeSelfTest(r, now, b, rep)
+	}
 	c.judgeTemp(r, now, name, rep)
-	judgeCounters(r, b, rep, fresh)
+	if !gaps[GapAttributes] && !gaps[GapNVMeHealthLog] {
+		judgeCounters(r, b, rep, fresh)
+	}
 	r.judged(serial, aspectMissing, false, "")
 
+	if rep.NVMeErrorLogEntries != nil {
+		r.sample("drive."+serial+".nvme_err_log", float64(*rep.NVMeErrorLogEntries))
+	}
 	if rep.DataWrittenBytes != nil {
 		r.sample("drive."+serial+".written_bytes", float64(*rep.DataWrittenBytes))
 	}
+}
+
+// reportGaps raises a checker error for every section the read lacked,
+// keyed disks/<serial>/<section> (no-temperature for the temperature), and
+// returns them as a set.
+func reportGaps(r *result, b *baseline, rep *Report) map[Gap]bool {
+	set := make(map[Gap]bool, len(rep.Gaps))
+	for _, g := range rep.Gaps {
+		set[g] = true
+		kind := string(g)
+		if g == GapTemperature {
+			kind = kindNoTemperature
+		}
+		r.errs = append(r.errs, health.CheckError{
+			Subject: rep.Serial, Kind: kind,
+			Err: fmt.Errorf("%s: smartctl output has no %s", label(b), g),
+		})
+	}
+
+	return set
+}
+
+// judgeVerdict judges the SMART overall health. A read without a verdict gets
+// no reading at all, so an open problem stays open and nothing resolves, and a
+// "no-verdict" checker error instead (FR-004).
+func (c *Check) judgeVerdict(r *result, b *baseline, rep *Report) {
+	b.data.Health = rep.Health.String()
+	if rep.Health == HealthUnknown {
+		r.errs = append(r.errs, health.CheckError{
+			Subject: rep.Serial, Kind: kindNoVerdict,
+			Err: fmt.Errorf("%s: smartctl reported no SMART health verdict", label(b)),
+		})
+
+		return
+	}
+	r.judged(rep.Serial, aspectHealth, rep.Health == HealthFailing, label(b)+": SMART overall health FAILED")
 }
 
 // judgeNVMe judges the NVMe health log fields the drive reports.
@@ -399,11 +518,8 @@ func (c *Check) judgeNVMe(r *result, name string, rep *Report) {
 	if w := rep.CriticalWarning; w != nil {
 		r.judged(serial, aspectWarning, *w != 0, fmt.Sprintf("%s: NVMe critical warning 0x%02x", name, *w))
 	}
-	if spare, th := rep.AvailableSpare, rep.SpareThreshold; spare != nil && th != nil {
-		r.judged(serial, aspectSpare, *spare <= *th,
-			fmt.Sprintf("%s: available spare %d%% at or below its threshold %d%%", name, *spare, *th))
-	}
 	if spare := rep.AvailableSpare; spare != nil {
+		c.judgeSpare(r, name, serial, *spare, rep.SpareThreshold)
 		r.sample("drive."+serial+".spare", float64(*spare))
 	}
 	if used := rep.PercentageUsed; used != nil {
@@ -413,40 +529,57 @@ func (c *Check) judgeNVMe(r *result, name string, rep *Report) {
 	}
 }
 
-// judgeSelfTest raises a problem when the newest finished self-test failed or
-// is older than selftest_max_age in power-on hours, or when there is none and
-// the drive was first seen longer than selftest_max_age ago. Otherwise, when
-// there is no self-test yet or its age cannot be computed, it is not judged.
-// The newest finished self-test's age in power-on hours is sampled as
-// drive.<serial>.selftest_age_h whenever it can be computed.
+// judgeSpare judges the available spare against the drive's own threshold and
+// the configured floor, whichever is reached first. The text names the drive's
+// threshold when the spare is at or below it, otherwise the floor; a drive
+// without a threshold is judged against the floor alone (FR-008).
+func (c *Check) judgeSpare(r *result, name, serial string, spare int, th *int) {
+	floor := c.cfg.SpareFloorPercent
+	switch {
+	case th != nil && spare <= *th:
+		r.state(serial, aspectSpare, health.Bad,
+			fmt.Sprintf("%s: available spare %d%% at or below its threshold %d%%", name, spare, *th))
+	case spare < floor:
+		r.state(serial, aspectSpare, health.Bad,
+			fmt.Sprintf("%s: available spare %d%% below the %d%% floor", name, spare, floor))
+	default:
+		r.state(serial, aspectSpare, health.Good, "")
+	}
+}
+
+// judgeSelfTest judges the self-test log against the baseline. A log that
+// cannot be decoded (unsupported) is not judged: no reading, no error. Otherwise
+// the condition is Bad when the newest finished self-test failed or the last
+// observed pass is older than selftest_max_age by the calendar (a drive first
+// seen less than that ago has not yet had the chance to pass). Each new failed
+// entry that is not the newest finished one is reported once as an event, and
+// the calendar age is sampled as drive.<serial>.selftest_age_h.
 func (c *Check) judgeSelfTest(r *result, now time.Time, b *baseline, rep *Report) {
 	serial, name := rep.Serial, label(b)
-	maxAge := c.cfg.SelftestMaxAge.Duration()
-	st := rep.SelfTest
-	if st == nil {
-		if known := now.Sub(b.firstSeen); known > maxAge {
-			r.state(serial, aspectSelfTest, health.Bad, fmt.Sprintf(
-				"%s: no finished self-test in the log, first seen %d h ago", name, int64(known/time.Hour),
-			))
-		}
+	b.data.SelfTestFormat = rep.SelfTestFormat
+	if rep.SelfTestFormat == SelfTestFormatUnsupported {
+		return
+	}
 
+	upd := AlignSelfTests(SelfTestState{Head: b.data.SelfTestHead, OKAt: b.data.SelfTestOKAt}, rep.SelfTestLog, now)
+	b.data.SelfTestHead, b.data.SelfTestOKAt, b.data.SelfTestNewest = upd.Head, upd.OKAt, upd.Newest
+	for _, f := range upd.Failures {
+		r.event(key(serial, aspectSelfTestFailure), fmt.Sprintf(
+			"%s: self-test failed (%s) at %d h; a newer test has passed since", name, f.Description, f.ID.Hours,
+		))
+	}
+
+	age := SelfTestAge(upd.OKAt, b.firstSeen, now)
+	r.sample("drive."+serial+".selftest_age_h", age.Hours())
+	if n := upd.Newest; n != nil && n.Result == "failed" {
+		text := fmt.Sprintf("%s: newest self-test failed (%s)", name, n.Description)
+		r.state(serial, aspectSelfTest, health.Bad, text)
 		return
 	}
-	b.noteSelfTest(now, st)
-	age, ok := selfTestAge(rep)
-	if ok {
-		r.sample("drive."+serial+".selftest_age_h", float64(age))
-	}
-	if st.Failed {
-		r.judged(serial, aspectSelfTest, true, fmt.Sprintf("%s: newest self-test failed (%s)", name, st.Description))
-		return
-	}
-	if !ok {
-		return
-	}
-	limit := int64(maxAge / time.Hour)
-	r.judged(serial, aspectSelfTest, age > limit,
-		fmt.Sprintf("%s: newest finished self-test ran %d h ago, limit %d h", name, age, limit))
+	maxAge := c.cfg.SelftestMaxAge.Duration()
+	r.judged(serial, aspectSelfTest, age > maxAge, fmt.Sprintf(
+		"%s: last passed self-test %d d ago, limit %d d", name, int64(age/day), int64(maxAge/day),
+	))
 }
 
 // judgeTemp samples the drive temperature and judges it against the limit of
@@ -641,6 +774,8 @@ func (c *Check) judgeMissing(r *result, seen map[string]bool, orphans int) {
 // baseline and moves the baseline to the current values. A fresh drive and a
 // counter reported for the first time only set the baseline.
 func judgeCounters(r *result, b *baseline, rep *Report, fresh bool) {
+	// The NVMe error log count used to be a counter; it is history only now.
+	delete(b.data.Counters, legacyNVMeErrorLog)
 	for _, k := range slices.Sorted(maps.Keys(rep.Counters)) {
 		v := clampInt64(rep.Counters[k])
 		old, known := b.data.Counters[k]
@@ -648,20 +783,8 @@ func judgeCounters(r *result, b *baseline, rep *Report, fresh bool) {
 		if fresh || !known || v <= old {
 			continue
 		}
-		r.event(key(rep.Serial, k), fmt.Sprintf("%s: %s rose %d→%d", label(b), counterName(k), old, v))
+		r.event(key(rep.Serial, k), fmt.Sprintf("%s: %s rose %d→%d", label(b), counterLabel(k), old, v))
 	}
-}
-
-// noteSelfTest records the newest finished self-test in the baseline.
-func (b *baseline) noteSelfTest(now time.Time, st *SelfTest) {
-	if st.PowerOnHours == nil {
-		return
-	}
-	hours := *st.PowerOnHours
-	if !st.Failed && (hours != b.data.SelfTestLastSeenHours || b.data.SelfTestOKAt == 0) {
-		b.data.SelfTestOKAt = now.Unix()
-	}
-	b.data.SelfTestLastSeenHours = hours
 }
 
 func (r *result) state(serial, aspect string, v health.Verdict, text string) {
@@ -689,21 +812,6 @@ func (r *result) sample(metric string, v float64) {
 	r.res.Samples = append(r.res.Samples, health.Sample{Metric: metric, Value: v})
 }
 
-// selfTestAge returns the power-on hours elapsed since the newest finished
-// self-test. The ATA log keeps 16-bit lifetime hours, so a drive past 65535
-// hours is compared modulo 65536.
-func selfTestAge(rep *Report) (int64, bool) {
-	if rep.PowerOnHours == nil || rep.SelfTest.PowerOnHours == nil {
-		return 0, false
-	}
-	now, at := *rep.PowerOnHours, *rep.SelfTest.PowerOnHours
-	if rep.Bus == BusATA && now >= ataLifetimeWrap && at < ataLifetimeWrap {
-		return ((now-at)%ataLifetimeWrap + ataLifetimeWrap) % ataLifetimeWrap, true
-	}
-
-	return max(now-at, 0), true
-}
-
 func key(serial, aspect string) string {
 	return checkName + "/" + serial + "/" + aspect
 }
@@ -716,28 +824,49 @@ func describe(p *probe) string {
 	return fmt.Sprintf("/dev/%s: %s %s, serial %s", p.node, p.report.Bus, p.report.Model, p.report.Serial)
 }
 
-// counterName is the human name of a Report.Counters key.
-func counterName(k string) string {
-	switch k {
-	case ATACounter(5):
-		return "reallocated sectors (ATA 5)"
-	case ATACounter(187):
-		return "reported uncorrectable errors (ATA 187)"
-	case ATACounter(188):
-		return "command timeouts (ATA 188)"
-	case ATACounter(197):
-		return "pending sectors (ATA 197)"
-	case ATACounter(198):
-		return "offline uncorrectable sectors (ATA 198)"
-	case ATACounter(199):
-		return "UDMA CRC errors (ATA 199)"
-	case CounterNVMeMediaErrors:
-		return "media errors (NVMe)"
-	case CounterNVMeErrorLog:
-		return "error log entries (NVMe)"
+// legacyNVMeErrorLog is the baseline key of the NVMe error log count, which
+// was an error counter before it became a history-only sample.
+const legacyNVMeErrorLog = "nvme.num_err_log_entries"
+
+// counterLabel is counterName with the ATA attribute id, as shown in events.
+func counterLabel(k string) string {
+	if id, ok := ataCounterID(k); ok {
+		return fmt.Sprintf("%s (ATA %d)", counterName(k), id)
 	}
 
-	return k
+	return counterName(k)
+}
+
+// counterName is the human name of a Report.Counters key.
+func counterName(k string) string {
+	if k == CounterNVMeMediaErrors {
+		return "media errors (NVMe)"
+	}
+	id, ok := ataCounterID(k)
+	if !ok {
+		return k
+	}
+	if n := knownATAName(id); n != "" {
+		return n
+	}
+
+	return "attribute " + strconv.Itoa(id)
+}
+
+func knownATAName(id int) string {
+	return map[int]string{
+		5:   "reallocated sectors",
+		179: "used reserved blocks",
+		181: "program fail",
+		182: "erase fail",
+		183: "runtime bad blocks",
+		187: "reported uncorrectable errors",
+		188: "command timeouts",
+		195: "hardware ECC",
+		197: "pending sectors",
+		198: "offline uncorrectable sectors",
+		199: "UDMA CRC errors",
+	}[id]
 }
 
 func clampInt64(v uint64) int64 {

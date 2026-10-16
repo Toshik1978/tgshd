@@ -1,0 +1,66 @@
+{
+  "json_format_version": [
+    1,
+    0
+  ],
+  "smartctl": {
+    "version": [
+      7,
+      4
+    ],
+    "exit_status": 0
+  },
+  "device": {
+    "name": "/dev/sda",
+    "type": "sat",
+    "protocol": "ATA"
+  },
+  "model_name": "Example SATA SSD",
+  "serial_number": "TEST0000000001",
+  "firmware_version": "EX01",
+  "logical_block_size": 512,
+  "smart_status": {
+    "passed": true
+  },
+  "ata_smart_attributes": {
+    "revision": 1
+  },
+  "power_on_time": {
+    "hours": 4200
+  },
+  "temperature": {
+    "current": 34
+  },
+  "ata_smart_self_test_log": {
+    "standard": {
+      "revision": 1,
+      "table": [
+        {
+          "type": {
+            "value": 1,
+            "string": "Short offline"
+          },
+          "status": {
+            "value": 0,
+            "string": "Completed without error",
+            "passed": true
+          },
+          "lifetime_hours": 4190
+        },
+        {
+          "type": {
+            "value": 2,
+            "string": "Extended offline"
+          },
+          "status": {
+            "value": 0,
+            "string": "Completed without error",
+            "passed": true
+          },
+          "lifetime_hours": 4000
+        }
+      ],
+      "count": 2
+    }
+  }
+}

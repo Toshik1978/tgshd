@@ -37,7 +37,12 @@ ups:
 disks:
   interval: 15m
   wear_percent: 80                          # NVMe percentage used / SSD wear above => PROBLEM
-  selftest_max_age: 8d
+  selftest_max_age: 40d                     # calendar days since a passed self-test was observed; 8d is the closest to 001
+  spare_floor_percent: 20                   # spare capacity floor, percent
+  force_read_after: 24h
+  include_serials: []                       # USB or other-transport drives to watch
+  extra_counters: []                        # extra ATA attribute ids (1-255)
+  extra_counters_by_serial: {}
   exclude_serials: []
 
 temperatures:

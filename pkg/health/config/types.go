@@ -62,6 +62,12 @@ type Disks struct {
 	WearPercent    int      `yaml:"wear_percent"`
 	SelftestMaxAge Duration `yaml:"selftest_max_age"`
 	ExcludeSerials []string `yaml:"exclude_serials"`
+
+	SpareFloorPercent     int              `yaml:"spare_floor_percent"`
+	ForceReadAfter        Duration         `yaml:"force_read_after"`
+	IncludeSerials        []string         `yaml:"include_serials"`
+	ExtraCounters         []int            `yaml:"extra_counters"`
+	ExtraCountersBySerial map[string][]int `yaml:"extra_counters_by_serial"`
 }
 
 // Limits are the temperature limits in degrees Celsius; a PROBLEM is raised above.

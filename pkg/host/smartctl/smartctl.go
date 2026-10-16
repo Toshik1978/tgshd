@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -34,6 +35,9 @@ const (
 	// `-n standby,3` so the drive is not spun up and the case gets a status of
 	// its own (smartctl's default, 2, also means the open failed).
 	StandbyStatus = 3
+	// ForcedTimeout bounds a run that wakes the drive (wake=true): a
+	// spinning-up disk needs far longer than DefaultTimeout.
+	ForcedTimeout = 20 * time.Second
 )
 
 // ErrInvalidNode is returned when a device node name is not a plain block device name.
@@ -44,16 +48,25 @@ func skipPrefixes() []string {
 	return []string{"loop", "ram", "zram", "dm-", "md", "sr"}
 }
 
+// Node is a physical drive: its device node name and the raw resolved sysfs
+// path of /sys/block/<Name>. The path is not judged here.
+type Node struct {
+	Name string
+	Path string
+}
+
 // Runner lists physical drives and runs smartctl for them.
 type Runner struct {
 	sysBlock string
 	binary   string
 	timeout  time.Duration
+	// evalSymlinks resolves a sysfs entry; filepath.EvalSymlinks unless a test replaces it.
+	evalSymlinks func(string) (string, error)
 }
 
 // New creates a Runner over the given sysfs block directory and smartctl binary.
 func New(sysBlock, binary string, timeout time.Duration) *Runner {
-	return &Runner{sysBlock: sysBlock, binary: binary, timeout: timeout}
+	return &Runner{sysBlock: sysBlock, binary: binary, timeout: timeout, evalSymlinks: filepath.EvalSymlinks}
 }
 
 // NewDefault creates a Runner over the real /sys/block and the smartctl found in PATH.
@@ -61,33 +74,46 @@ func NewDefault() *Runner {
 	return New(defaultSysBlock, defaultBinary, DefaultTimeout)
 }
 
-// Drives returns the sorted node names (for example "sda", "nvme0n1") of physical,
-// non-removable drives that have media.
-func (r *Runner) Drives() ([]string, error) {
+// Drives returns the nodes, sorted by name (for example "sda", "nvme0n1"), of
+// physical, non-removable drives that have media. Each carries the raw
+// filepath.EvalSymlinks result of its sysfs block entry.
+func (r *Runner) Drives() ([]Node, error) {
 	entries, err := os.ReadDir(r.sysBlock)
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", r.sysBlock, err)
 	}
-	var nodes []string
+	var nodes []Node
 	for _, e := range entries {
-		if r.isPhysicalDrive(e.Name()) {
-			nodes = append(nodes, e.Name())
+		if !r.isPhysicalDrive(e.Name()) {
+			continue
 		}
+		path, err := r.evalSymlinks(filepath.Join(r.sysBlock, e.Name()))
+		if errors.Is(err, fs.ErrNotExist) {
+			// The drive vanished since it was listed (hot unplug).
+			continue
+		}
+		if err != nil {
+			return nil, fmt.Errorf("resolve %s: %w", e.Name(), err)
+		}
+		nodes = append(nodes, Node{Name: e.Name(), Path: path})
 	}
-	slices.Sort(nodes)
+	slices.SortFunc(nodes, func(a, b Node) int { return strings.Compare(a.Name, b.Name) })
 
 	return nodes, nil
 }
 
 // Run executes `smartctl --json=c -n standby,3 -a /dev/<node>` and returns its stdout and
-// exit status. smartctl's exit status is a bitmask, so a non-zero status is not an error;
+// exit status. With wake the standby check is off (`-n never`: the drive is
+// spun up and read) and the run is bounded by ForcedTimeout instead of the
+// Runner's own timeout. smartctl's exit status is a bitmask, so a non-zero status is not an error;
 // only a failure to execute the binary or a timeout is. A drive in standby is not spun up:
 // the run exits with StandbyStatus.
-func (r *Runner) Run(ctx context.Context, node string) ([]byte, int, error) {
+func (r *Runner) Run(ctx context.Context, node string, wake bool) ([]byte, int, error) {
 	if node == "" || strings.HasPrefix(node, "-") || strings.ContainsAny(node, `/\`) || node == "." || node == ".." {
 		return nil, 0, fmt.Errorf("%w: %q", ErrInvalidNode, node)
 	}
-	ctx, cancel := context.WithTimeout(ctx, r.timeout)
+	timeout, power := r.modes(wake)
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	var stdout bytes.Buffer
@@ -95,7 +121,7 @@ func (r *Runner) Run(ctx context.Context, node string) ([]byte, int, error) {
 		ctx,
 		r.binary,
 		"--json=c",
-		"-n", "standby,"+strconv.Itoa(StandbyStatus),
+		"-n", power,
 		"-a",
 		"/dev/"+node,
 	)
@@ -118,6 +144,15 @@ func (r *Runner) Run(ctx context.Context, node string) ([]byte, int, error) {
 	}
 
 	return nil, 0, fmt.Errorf("run %s for %s: %w", r.binary, node, err)
+}
+
+// modes returns the run's timeout and its -n argument.
+func (r *Runner) modes(wake bool) (time.Duration, string) {
+	if wake {
+		return ForcedTimeout, "never"
+	}
+
+	return r.timeout, "standby," + strconv.Itoa(StandbyStatus)
 }
 
 func (r *Runner) isPhysicalDrive(name string) bool {

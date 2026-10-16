@@ -98,7 +98,7 @@ func TestDefaultsAndAbsence(t *testing.T) {
 	if cfg.UPS == nil || cfg.UPS.Interval.Duration() != 5*time.Minute || cfg.UPS.Threshold.Duration() != 5*time.Minute {
 		t.Errorf("ups = %+v", cfg.UPS)
 	}
-	if cfg.Disks == nil || cfg.Disks.WearPercent != 80 || cfg.Disks.SelftestMaxAge.Duration() != 8*day {
+	if cfg.Disks == nil || cfg.Disks.WearPercent != 80 || cfg.Disks.SelftestMaxAge.Duration() != 40*day {
 		t.Errorf("disks = %+v", cfg.Disks)
 	}
 	if l := cfg.Temperatures.Limits; l.CPU != 85 || l.DriveNVMe != 70 || l.DriveSATA != 55 || l.GPU != 85 ||
@@ -201,6 +201,20 @@ func TestEntryErrors(t *testing.T) {
 		{"wrong type", "disks: {wear_percent: lots}", "disks", "cannot unmarshal"},
 		{"wear range", "disks: {wear_percent: 150}", "disks", "wear_percent"},
 		{"max age zero", "disks: {selftest_max_age: 0}", "disks", "selftest_max_age"},
+		{"spare floor low", "disks: {spare_floor_percent: -1}", "disks", "spare_floor_percent"},
+		{"spare floor high", "disks: {spare_floor_percent: 101}", "disks", "spare_floor_percent"},
+		{"force read short", "disks: {force_read_after: 59m}", "disks", "force_read_after"},
+		{"include empty", "disks: {include_serials: [\"\"]}", "disks", "include_serials"},
+		{"counter zero", "disks: {extra_counters: [0]}", "disks", "extra_counters"},
+		{"counter high", "disks: {extra_counters: [256]}", "disks", "extra_counters"},
+		{
+			"serial counter high",
+			"disks: {extra_counters_by_serial: {TEST0000000001: [256]}}",
+			"disks",
+			"TEST0000000001",
+		},
+		{"serial counter zero", "disks: {extra_counters_by_serial: {TEST0000000001: [0]}}", "disks", "TEST0000000001"},
+		{"serial key empty", "disks: {extra_counters_by_serial: {\"\": [230]}}", "disks", "extra_counters_by_serial"},
 		{"negative limit", "temperatures: {limits: {cpu: -1}}", "temperatures", "cpu"},
 		{"network no targets", "network: {}", "network", "internet_targets"},
 		{"bad summary weekday", "summary: {weekday: funday}", "summary", "weekday"},
@@ -394,5 +408,27 @@ func TestExampleConfigParses(t *testing.T) {
 
 	if cfg.Network == nil || cfg.UPS == nil || len(cfg.HTTP) != 1 || len(cfg.Command) != 1 || cfg.ModemProbe == nil {
 		t.Errorf("sections missing: %+v", cfg)
+	}
+}
+
+func TestDisksNewKeys(t *testing.T) {
+	d := mustParse(t, "disks: {}\n").Disks
+	if d.SpareFloorPercent != 20 || d.ForceReadAfter.Duration() != 24*time.Hour ||
+		len(d.IncludeSerials) != 0 || len(d.ExtraCounters) != 0 || len(d.ExtraCountersBySerial) != 0 {
+		t.Errorf("defaults = %+v", d)
+	}
+
+	d = mustParse(t, `disks:
+  spare_floor_percent: 0
+  force_read_after: 1h
+  include_serials: [TEST0000000009]
+  extra_counters: [5, 252, 255, 1]
+  extra_counters_by_serial:
+    TEST0000000001: [230]
+`).Disks
+	if d.SpareFloorPercent != 0 || d.ForceReadAfter.Duration() != time.Hour ||
+		d.IncludeSerials[0] != "TEST0000000009" || len(d.ExtraCounters) != 4 ||
+		d.ExtraCountersBySerial["TEST0000000001"][0] != 230 {
+		t.Errorf("parsed = %+v", d)
 	}
 }

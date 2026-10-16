@@ -66,7 +66,39 @@ func disksChecks(hs *healthSetup) checkSet {
 		return checkSet{}
 	}
 
-	return buildDisksCheck(hs.Config.Disks, hs.Config.Temperatures, smartctl.NewDefault(), time.Now)
+	src := smartctlSource{runner: smartctl.NewDefault()}
+
+	return buildDisksCheck(hs.Config.Disks, hs.Config.Temperatures, src, time.Now)
+}
+
+// smartctlRunner is the part of *smartctl.Runner smartctlSource uses.
+type smartctlRunner interface {
+	Drives() ([]smartctl.Node, error)
+	Run(ctx context.Context, node string, wake bool) ([]byte, int, error)
+}
+
+// smartctlSource adapts pkg/host/smartctl to disks.Source.
+type smartctlSource struct {
+	runner smartctlRunner
+}
+
+// Drives implements disks.Source.
+func (s smartctlSource) Drives() ([]disks.Node, error) {
+	nodes, err := s.runner.Drives()
+	if err != nil {
+		return nil, err //nolint:wrapcheck // the adapter adds no context
+	}
+	out := make([]disks.Node, len(nodes))
+	for i, n := range nodes {
+		out[i] = disks.Node{Name: n.Name, Path: n.Path}
+	}
+
+	return out, nil
+}
+
+// Run implements disks.Source.
+func (s smartctlSource) Run(ctx context.Context, node string, wake bool) ([]byte, int, error) {
+	return s.runner.Run(ctx, node, wake) //nolint:wrapcheck // the adapter adds no context
 }
 
 // buildDisksCheck builds the disks check. Its baselines are persisted through

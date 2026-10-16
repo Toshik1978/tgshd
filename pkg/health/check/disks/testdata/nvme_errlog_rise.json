@@ -1,0 +1,32 @@
+{
+  "json_format_version": [1, 0],
+  "smartctl": {"version": [7, 4], "exit_status": 0},
+  "device": {"name": "/dev/nvme0", "type": "nvme", "protocol": "NVMe"},
+  "model_name": "Example SSD",
+  "serial_number": "TEST0000000002",
+  "firmware_version": "EX01",
+  "smart_status": {"passed": true, "nvme": {"value": 0}},
+  "nvme_smart_health_information_log": {
+    "critical_warning": 0,
+    "temperature": 38,
+    "available_spare": 100,
+    "available_spare_threshold": 10,
+    "percentage_used": 1,
+    "data_units_read": 1000000,
+    "data_units_written": 2000000,
+    "power_cycles": 25,
+    "power_on_hours": 1500,
+    "unsafe_shutdowns": 3,
+    "media_errors": 0,
+    "num_err_log_entries": 12
+  },
+  "power_on_time": {"hours": 1500},
+  "temperature": {"current": 38},
+  "nvme_self_test_log": {
+    "current_self_test_operation": {"value": 0, "string": "No self-test in progress"},
+    "table": [
+      {"self_test_code": {"value": 1, "string": "Short"}, "self_test_result": {"value": 0, "string": "Completed without error"}, "power_on_hours": 1490},
+      {"self_test_code": {"value": 2, "string": "Extended"}, "self_test_result": {"value": 0, "string": "Completed without error"}, "power_on_hours": 1300}
+    ]
+  }
+}

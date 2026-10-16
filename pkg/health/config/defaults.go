@@ -35,9 +35,11 @@ func defaultUPS() UPS {
 
 func defaultDisks() Disks {
 	return Disks{
-		Common:         common(15*time.Minute, 0, ModeTLG),
-		WearPercent:    80,
-		SelftestMaxAge: Duration(8 * day),
+		Common:            common(15*time.Minute, 0, ModeTLG),
+		WearPercent:       80,
+		SelftestMaxAge:    Duration(40 * day),
+		SpareFloorPercent: 20,
+		ForceReadAfter:    Duration(24 * time.Hour),
 	}
 }
 

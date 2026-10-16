@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"maps"
 	"net/url"
 	"slices"
 	"strings"
@@ -158,6 +159,37 @@ func validateDisks(d *Disks, p *problems) {
 	}
 
 	p.positive("selftest_max_age", d.SelftestMaxAge)
+
+	if d.SpareFloorPercent < 0 || d.SpareFloorPercent > 100 {
+		p.addf("spare_floor_percent %d must be within 0-100", d.SpareFloorPercent)
+	}
+
+	if d.ForceReadAfter.Duration() < time.Hour {
+		p.addf("force_read_after %v must be at least 1h", d.ForceReadAfter.Duration())
+	}
+
+	if slices.Contains(d.IncludeSerials, "") {
+		p.addf("include_serials must not contain empty entries")
+	}
+
+	validateCounterIDs(p, "extra_counters", d.ExtraCounters)
+
+	for _, serial := range slices.Sorted(maps.Keys(d.ExtraCountersBySerial)) {
+		if serial == "" {
+			p.addf("extra_counters_by_serial must not have an empty serial key")
+		}
+
+		validateCounterIDs(p, "extra_counters_by_serial "+serial, d.ExtraCountersBySerial[serial])
+	}
+}
+
+// validateCounterIDs requires every entry to be an ATA attribute id within 1-255.
+func validateCounterIDs(p *problems, key string, ids []int) {
+	for _, id := range ids {
+		if id < 1 || id > 255 {
+			p.addf("%s id %d must be within 1-255", key, id)
+		}
+	}
 }
 
 func validateTemperatures(t *Temperatures, p *problems) {
