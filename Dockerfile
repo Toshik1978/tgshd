@@ -20,7 +20,7 @@ COPY pkg/ ./pkg/
 # injected automatically per --platform entry).
 ARG TARGETOS TARGETARCH
 RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
-    go build -ldflags="-w -s" -o /app/bin/tgshd cmd/main.go
+    go build -ldflags="-w -s" -o /app/bin/tgshd ./cmd
 
 # Grant CAP_NET_RAW as a file capability so the daemon can open raw ICMP sockets
 # (privileged ping) while running as an unprivileged user. This is a plain xattr

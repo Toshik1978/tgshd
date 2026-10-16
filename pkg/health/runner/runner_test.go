@@ -699,6 +699,35 @@ func TestFailedLoadKeepsStoredState(t *testing.T) {
 	}
 }
 
+func TestFailedLoadSendsNothingAndNextTickRaisesIt(t *testing.T) {
+	st := &fakeStore{loadErr: errors.New("database locked")}
+	f := newFixture(t, st)
+
+	// A Load at start must return at once: it never sends synchronously.
+	if err := f.r.Load(context.Background()); err == nil {
+		t.Fatal("Load() = nil, want the store error")
+	}
+	if got := f.tlg.texts(); len(got) != 0 {
+		t.Fatalf("Load sent %q, want nothing until the next tick", got)
+	}
+
+	// The store recovers before the first tick: the start failure is still raised.
+	st.mu.Lock()
+	st.loadErr = nil
+	st.mu.Unlock()
+	f.tick(t)
+
+	want := []string{host + ": CHECKER ERROR: health: cannot load state: database locked"}
+	if got := f.tlg.texts(); !slices.Equal(got, want) {
+		t.Fatalf("telegram = %q, want %q", got, want)
+	}
+
+	f.next(t)
+	if got := f.tlg.texts(); len(got) != 1 {
+		t.Fatalf("telegram = %q, want the failure raised once", got)
+	}
+}
+
 func TestMessageQueuedDuringLoadSurvives(t *testing.T) {
 	st := &fakeStore{state: store.State{
 		Queue: []notify.QueuedMessage{{ID: 7, CreatedAt: t0(), Channel: "tlg", Text: "stored message"}},

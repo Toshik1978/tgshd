@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"fmt"
 	"log"
+	"net/http"
 	"os"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 
 	"github.com/Toshik1978/tgshd/cmd/app"
 	"github.com/Toshik1978/tgshd/pkg/command"
+	"github.com/Toshik1978/tgshd/pkg/mail"
 	"github.com/Toshik1978/tgshd/pkg/ping"
 	"github.com/Toshik1978/tgshd/pkg/power"
 	"github.com/Toshik1978/tgshd/pkg/script"
@@ -37,7 +39,25 @@ var (
 	Commit     = "undefined"
 )
 
+// telegramTimeout bounds one Telegram Bot API request (telebot's default).
+const telegramTimeout = time.Minute
+
 func main() {
+	// A subcommand (contracts/cli.md) runs instead of the daemon.
+	cio := cliIO{
+		getenv: os.Getenv, stdout: os.Stdout, stderr: os.Stderr, now: time.Now,
+		checkProviders: healthCheckProviders(),
+	}
+	if code, ok := runSubcommand(os.Args[1:], cio); ok {
+		os.Exit(code)
+	}
+
+	fx.New(appOptions(os.Getenv)...).Run()
+}
+
+// appOptions assembles the fx options; optional features are gated on the
+// environment read through getenv.
+func appOptions(getenv func(string) string) []fx.Option {
 	options := []fx.Option{
 		configuration(),
 		commandHandlers(),
@@ -49,13 +69,17 @@ func main() {
 			return &fxevent.ZapLogger{Logger: logger}
 		}),
 	}
-	if os.Getenv("BOT_ZTE_HOST") != "" {
+	if getenv("BOT_ZTE_HOST") != "" {
 		options = append(options, zteProviders(), zteWorkers())
 	}
-	if os.Getenv("BOT_GAMMU_DSN") != "" {
+	if getenv("BOT_GAMMU_DSN") != "" {
 		options = append(options, gammuProviders())
 	}
-	fx.New(options...).Run()
+	if getenv("BOT_HEALTH_CONFIG") != "" {
+		options = append(options, healthProviders())
+	}
+
+	return options
 }
 
 // configuration provides basic configuration for fx.
@@ -194,6 +218,10 @@ type config struct {
 	ZTEHost       string   `env:"BOT_ZTE_HOST"`
 	ZTEPassword   string   `env:"BOT_ZTE_PASS"`
 	GammuDSN      string   `env:"BOT_GAMMU_DSN"`
+	HealthConfig  string   `env:"BOT_HEALTH_CONFIG"`
+	HostName      string   `env:"BOT_HOST_NAME"`
+	SMSPhone      string   `env:"BOT_SMS_PHONE"`
+	SMTP          mail.Config
 }
 
 // newConfig initializes configuration.
@@ -215,6 +243,9 @@ func newTelegramBot(cfg *config) (*telebot.Bot, error) {
 	pref := telebot.Settings{
 		Token:  cfg.TelegramToken,
 		Poller: &telebot.LongPoller{Timeout: 5 * time.Second},
+		// telebot takes no context, so this bounds every Bot API call,
+		// including health messages sent with a deadline-less context.
+		Client: &http.Client{Timeout: telegramTimeout},
 	}
 
 	bot, err := telebot.NewBot(pref)

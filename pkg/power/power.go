@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync/atomic"
 	"time"
 
 	nut "github.com/robbiet480/go.nut"
@@ -21,6 +22,11 @@ type power struct {
 	name     string
 	user     string
 	password string
+
+	// reader overrides the blocking status read in tests.
+	reader func() (Status, error)
+	// inflight is set while a go.nut read goroutine is running.
+	inflight atomic.Bool
 }
 
 // New instantiate power control object.
@@ -46,24 +52,53 @@ func (p *power) Voltage(ctx context.Context) (float64, error) {
 	ctx, cancel := context.WithTimeout(ctx, voltageTimeout)
 	defer cancel()
 
-	type result struct {
-		voltage float64
-		err     error
+	voltage, err := bounded(ctx, p, p.readVoltage)
+	if err != nil {
+		return 0, fmt.Errorf("failed to read ups voltage: %w", err)
 	}
-	// Buffered so the goroutine never blocks on send even after we return on
-	// ctx.Done(). go.nut has no cancellation support, so the read runs to
-	// completion in the background and its result is discarded on timeout.
+
+	return voltage, nil
+}
+
+// bounded runs a blocking go.nut read so that it honors ctx. go.nut has no
+// cancellation or deadline support, so a read against a silent server keeps
+// its goroutine and socket until the OS gives up. To keep that bounded to one
+// leaked read, a new read is refused with ErrTimeout while a previous one is
+// still in flight.
+func bounded[T any]( //nolint:ireturn // generic helper shared by Voltage and Status.
+	ctx context.Context,
+	p *power,
+	read func() (T, error),
+) (
+	T, error,
+) {
+	var zero T
+	if !p.inflight.CompareAndSwap(false, true) {
+		return zero, fmt.Errorf("%w: previous read still in flight", ErrTimeout)
+	}
+
+	type result struct {
+		value T
+		err   error
+	}
+	// Buffered so the goroutine never blocks on send after we return on ctx.Done().
 	ch := make(chan result, 1)
 	go func() {
-		voltage, err := p.readVoltage()
-		ch <- result{voltage: voltage, err: err}
+		defer p.inflight.Store(false)
+
+		value, err := read()
+		ch <- result{value: value, err: err}
 	}()
 
 	select {
 	case <-ctx.Done():
-		return 0, fmt.Errorf("failed to read ups voltage: %w", ctx.Err())
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return zero, fmt.Errorf("%w: %w", ErrTimeout, ctx.Err())
+		}
+
+		return zero, fmt.Errorf("ups read cancelled: %w", ctx.Err())
 	case r := <-ch:
-		return r.voltage, r.err
+		return r.value, r.err
 	}
 }
 

@@ -5,6 +5,7 @@ package runner
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -141,6 +142,8 @@ type Runner struct {
 
 	loadMu sync.Mutex
 	loaded bool
+	// loadErr is the last failed Load, not yet raised by Do.
+	loadErr error
 	// loadedKV is the stored kv of the successful Load.
 	loadedKV map[string]string
 
@@ -233,6 +236,7 @@ func (r *Runner) Do(ctx context.Context) error {
 	// A failure is reported as a checker error; the tick runs from memory and
 	// does not checkpoint, so stored state is never overwritten unseen.
 	loaded := r.Load(ctx) == nil
+	r.raiseLoadFailure()
 
 	reason := r.quietReason(c)
 	r.mu.Lock()
@@ -268,10 +272,11 @@ func (r *Runner) Do(ctx context.Context) error {
 
 // Load restores the engine, rate marks and retry queue from the store. Once it
 // has succeeded it does nothing; Do calls it at the top of every tick, so
-// calling it at start is optional. A failure is reported as a (rate-limited)
-// checker error and retried next tick. State loaded late is merged into what
-// memory built meanwhile: memory wins per condition key, stored queue items
-// go first, and the later rate mark wins.
+// calling it at start is optional. Load never sends anything, so it is only
+// as slow as the store read: a failure is recorded, raised by the next Do as a
+// (rate-limited) checker error, and retried next tick. State loaded late is
+// merged into what memory built meanwhile: memory wins per condition key,
+// stored queue items go first, and the later rate mark wins.
 func (r *Runner) Load(ctx context.Context) error {
 	r.loadMu.Lock()
 	defer r.loadMu.Unlock()
@@ -287,7 +292,7 @@ func (r *Runner) Load(ctx context.Context) error {
 
 	st, err := r.opts.Store.Load(ctx)
 	if err != nil {
-		r.CheckerError(keyLoad, "cannot load state: "+err.Error())
+		r.loadErr = err
 
 		return fmt.Errorf("load health state: %w", err)
 	}
@@ -347,6 +352,19 @@ func (r *Runner) Clear(key string) bool {
 // configuration entry found at start.
 func (r *Runner) CheckerError(key, text string) {
 	r.checker.CheckerError(key, text)
+}
+
+// raiseLoadFailure reports the last failed Load, if any, as a checker error,
+// once the load lock is released.
+func (r *Runner) raiseLoadFailure() {
+	r.loadMu.Lock()
+	err := r.loadErr
+	r.loadErr = nil
+	r.loadMu.Unlock()
+
+	if err != nil {
+		r.CheckerError(keyLoad, "cannot load state: "+err.Error())
+	}
 }
 
 func (r *Runner) writeHeartbeat(c *cycle) {
@@ -476,39 +494,16 @@ func (r *Runner) runBatch(tickCtx context.Context, batch []int) []outcome {
 // stays marked running (so it is not launched again) until it returns.
 func (r *Runner) runOne(tickCtx context.Context, idx int) health.CheckResult {
 	chk := r.opts.Checks[idx]
-	runCtx, cancel := tickCtx, context.CancelFunc(func() {})
-	if chk.Interval > 0 {
-		runCtx, cancel = context.WithTimeout(tickCtx, chk.Interval)
-	}
-	defer cancel()
-
-	done := make(chan health.CheckResult, 1)
 	r.running[idx].Store(true)
-	go func() {
-		res := runSafely(runCtx, chk)
-		r.running[idx].Store(false)
 
-		done <- res
-	}()
-
-	select {
-	case res := <-done:
-		return res
-	case <-runCtx.Done():
-		select {
-		case res := <-done:
-			return res
-		default:
+	res := RunBounded(tickCtx, chk, chk.Interval, func() { r.running[idx].Store(false) })
+	if errors.Is(res.Err, ErrContextDone) {
+		return health.CheckResult{
+			Err: fmt.Errorf("run did not finish before the tick deadline (%s)", r.opts.RunBudget),
 		}
-
-		if tickCtx.Err() != nil {
-			return health.CheckResult{
-				Err: fmt.Errorf("run did not finish before the tick deadline (%s)", r.opts.RunBudget),
-			}
-		}
-
-		return health.CheckResult{Err: fmt.Errorf("run did not finish within %s", chk.Interval)}
 	}
+
+	return res
 }
 
 // apply feeds one result to the engine. Err is a checker error; readings
@@ -633,17 +628,6 @@ func (r *Runner) logDrop(m notify.QueuedMessage) {
 
 func (c *cycle) fail(key, text string) {
 	c.errs = append(c.errs, [2]string{key, text})
-}
-
-// runSafely runs a check, turning a panic into a failed run.
-func runSafely(ctx context.Context, chk health.Check) (res health.CheckResult) {
-	defer func() {
-		if p := recover(); p != nil {
-			res = health.CheckResult{Err: fmt.Errorf("panic: %v", p)}
-		}
-	}()
-
-	return chk.Run(ctx)
 }
 
 func messageKind(k health.AlertKind) notify.Kind {

@@ -351,3 +351,16 @@ func TestLoadErrors(t *testing.T) {
 		t.Errorf("cfg=%v errs=%+v", cfg, errs)
 	}
 }
+
+// TestExampleConfigParses guards the documented sample against drifting from
+// the loader.
+func TestExampleConfigParses(t *testing.T) {
+	cfg, errs := config.Load(filepath.Join("..", "..", "..", "config", "health.example.yaml"))
+	if len(errs) != 0 {
+		t.Fatalf("unexpected errors: %+v", errs)
+	}
+
+	if cfg.Network == nil || cfg.UPS == nil || len(cfg.HTTP) != 1 || len(cfg.Command) != 1 || cfg.ModemProbe == nil {
+		t.Errorf("sections missing: %+v", cfg)
+	}
+}

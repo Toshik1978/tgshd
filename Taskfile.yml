@@ -6,7 +6,7 @@ vars:
   # pure host-health engine (pkg/health/...). The I/O adapters (ping, power,
   # speedtest, telegram transport, zte device client, the host adapters under
   # pkg/host, pkg/mail, pkg/doh), the gammu Postgres repository, and the fx root
-  # (cmd/main.go) run only against real hardware/services and are exercised in
+  # (package cmd) run only against real hardware/services and are exercised in
   # integration, not here.
   COVERPKG: ./pkg/command/...,./pkg/sms,./pkg/script,./cmd/app,./pkg/health/...
   BUILDSTAMP:
@@ -47,7 +47,7 @@ tasks:
       - >-
         GOGC=off go build -v
         -ldflags "-X main.Buildstamp={{.BUILDSTAMP}} -X main.Commit={{.COMMIT}}"
-        -o {{.BINARY}} cmd/main.go
+        -o {{.BINARY}} ./cmd
     generates:
       - "{{.BINARY}}"
 

@@ -66,7 +66,7 @@ group, gated behind an env-var check in `main()`.
 
 | Package | Responsibility |
 | :--- | :--- |
-| `cmd/main.go` | fx composition root, config, env-gated wiring |
+| `cmd` | `main.go`: fx composition root, config, env-gated wiring; `cli.go`: `check --once` / `heartbeat` subcommands; `health*.go`: health wiring and adapters |
 | `cmd/app` | `Application` lifecycle, gocron worker scheduler |
 | `pkg/telegram` | Telegram consumer (routing) + publisher (replies) |
 | `pkg/command` | Command handlers (`/ping`, `/power`, `/speed`, `/5g` `/4g` `/3g`, `/sms`, script) |
@@ -77,6 +77,15 @@ group, gated behind an env-var check in `main()`.
 | `pkg/zte` | ZTE MC888 modem HTTP client (network switch, SMS read) |
 | `pkg/sms` | Incoming-SMS worker (modem → Telegram) + GSM encoding |
 | `pkg/sms/gammu` | Outgoing SMS via a gammu-smsd PostgreSQL outbox |
+| `pkg/health` | Pure alert engine: readings, conditions, thresholds, quiet windows, rate limits (no I/O) |
+| `pkg/health/config` | Strict YAML loader and validation for `BOT_HEALTH_CONFIG` (`config/health.example.yaml`) |
+| `pkg/health/notify` | Alert and checker-error delivery (Telegram, SMS, email) |
+| `pkg/health/runner` | Schedules checks, bounds each run, drives the engine |
+| `pkg/health/report` | Renders state and history as Telegram reply text (`/status`) |
+| `pkg/health/store` | SQLite state store that survives restarts |
+| `pkg/health/check/*` | One package per check type (`network`, `ups`, ...); pure, I/O behind small source interfaces |
+| `pkg/host/*` | Thin host adapters (`sysfs`, `lockfile`, ...) behind the check source interfaces |
+| `pkg/mail` | Plain-text email through an SMTP relay |
 
 ---
 
@@ -102,10 +111,10 @@ These are non-negotiable for changes in this repo.
 
 The CI coverage gate (80% floor) measures the packages that can be cleanly
 unit-tested — `task test:coverage`'s `-coverpkg` scope: `pkg/command`,
-`pkg/sms`, `pkg/script`, and `cmd/app`. Everything that only runs against real
-hardware/services is excluded from the gate: the I/O adapters (`pkg/ping`,
-`pkg/power`, `pkg/speedtest`, the Telegram transport), the ZTE device HTTP
-client (`pkg/zte`), the gammu Postgres repository (`pkg/sms/gammu`), and the fx
-root (`cmd/main.go`). Their tests still run in CI (`go test ./...`) — e.g. the
+`pkg/sms`, `pkg/script`, `cmd/app`, and `pkg/health/...`. Everything that only
+runs against real hardware/services is excluded from the gate: the I/O adapters
+(`pkg/ping`, `pkg/power`, `pkg/speedtest`, the Telegram transport), the ZTE
+device HTTP client (`pkg/zte`), the gammu Postgres repository (`pkg/sms/gammu`), and the fx
+root (`cmd`). Their tests still run in CI (`go test ./...`) — e.g. the
 gammu message-part builder is unit-tested — they just don't count toward the
 coverage gate.
