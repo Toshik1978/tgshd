@@ -27,7 +27,7 @@ func Status(s runner.Snapshot) string {
 		lines = append(lines, "Note: state store degraded, history may be incomplete")
 	}
 	if s.Quiet != "" {
-		lines = append(lines, "Note: quiet window active ("+escape(s.Quiet)+")")
+		lines = append(lines, quietNote(s))
 	}
 	if len(s.Open) == 0 {
 		last := "never"
@@ -42,6 +42,26 @@ func Status(s runner.Snapshot) string {
 	}
 
 	return Truncate(strings.Join(lines, "\n"))
+}
+
+// quietNote renders the quiet-window note: the reason, since when the
+// maintenance lock is held, and the checks the window pauses (FR-026,
+// FR-027). Every check not listed keeps running.
+func quietNote(s runner.Snapshot) string {
+	reason := escape(s.Quiet)
+	if !s.HeldSince.IsZero() {
+		reason += ", held since " + s.HeldSince.Format(timeLayout)
+	}
+	paused := "none"
+	if len(s.Paused) > 0 {
+		names := make([]string, 0, len(s.Paused))
+		for _, p := range s.Paused {
+			names = append(names, escape(p))
+		}
+		paused = strings.Join(names, ", ")
+	}
+
+	return "Note: quiet window active (" + reason + "); paused: " + paused
 }
 
 // OpenKeys renders a heading followed by the open condition keys.

@@ -120,9 +120,10 @@ func TestSlowDeliveriesEndByTheTickDeadline(t *testing.T) {
 		t.Fatalf("heartbeat ticks = %v, want the second at %v", hb.ticks, now)
 	}
 	// No send is retried while the abandoned ones are still in progress, and
-	// every message is still queued exactly once.
-	if tlg.calls.Load() != 1 || mailer.calls.Load() != 1 || sms.calls.Load() != 0 {
-		t.Fatalf("after the second tick telegram tried %d times, email %d, sms %d; want no new attempt",
+	// every message is still queued exactly once. Telegram is failing, so the
+	// queued PROBLEM goes by SMS once, on the now free SMS lane (FR-030).
+	if tlg.calls.Load() != 1 || mailer.calls.Load() != 1 || sms.calls.Load() != 1 {
+		t.Fatalf("after the second tick telegram tried %d times, email %d, sms %d; want only the SMS fallback",
 			tlg.calls.Load(), mailer.calls.Load(), sms.calls.Load())
 	}
 	assertQueuedOnce(t, r, wantQueued)
@@ -135,7 +136,8 @@ func assertQueuedOnce(t *testing.T, r *Runner, want []string) {
 
 	queued := r.notifier.Export()
 	texts := make([]string, 0, len(queued))
-	for _, q := range queued {
+	for i := range queued {
+		q := &queued[i]
 		texts = append(texts, q.Text)
 	}
 	if len(texts) != len(want) {
@@ -492,5 +494,110 @@ func TestDefaultBudgetsKeepTheHeartbeatFresh(t *testing.T) {
 	}
 	if window := MaxTickTime - MaxTickTime/mailShareDiv; window < 20*time.Second {
 		t.Fatalf("Telegram and SMS window after the runs = %v, want at least 20s", window)
+	}
+}
+
+// TestTelegramFailingEmailAfterTheTicksDeliveries: with Telegram failing,
+// the tick that reaches telegram_failing_after emails the one notice after
+// its deliveries, records it in the alert log, and no later tick repeats it;
+// a quiet tick checks it too.
+func TestTelegramFailingEmailAfterTheTicksDeliveries(t *testing.T) {
+	chk := newFakeCheck(nil, "ups", reading("ups/main", health.Bad, "on battery"))
+	f := newFixture(t, &fakeStore{}, checkOf(chk))
+	mailer := &fakeMailer{}
+	f.r = New(Options{
+		Checks: []health.Check{checkOf(chk)}, Store: f.st, Host: host, Telegram: f.tlg, Mailer: mailer,
+		TelegramFailingAfter: 2 * time.Minute, Maintenance: f.maint,
+		Now: func() time.Time { return f.now }, Location: zone(),
+	})
+	f.tlg.setFail(true)
+
+	f.r.Push(context.Background(), "ups", "test", "test") // fails: failing since t0.
+	f.tick(t)
+	f.next(t)
+	f.next(t)
+	f.next(t) // 1m30s
+	if got := mailer.count(); got != 0 {
+		t.Fatalf("emails = %d before telegram_failing_after", got)
+	}
+
+	f.next(t) // 2m: due.
+	if got := mailer.count(); got != 1 ||
+		!strings.HasSuffix(mailer.bodies[0], "Telegram delivery failing since 05:00") {
+		t.Fatalf("emails = %q, want the one notice", mailer.bodies)
+	}
+	if got := countContaining(f.st.alertTexts(), "Telegram delivery failing"); got != 1 {
+		t.Fatalf("alert log = %q, want the notice recorded once", f.st.alertTexts())
+	}
+
+	f.maint.held = true
+	for range 4 {
+		f.next(t)
+	}
+	if got := mailer.count(); got != 1 {
+		t.Fatalf("emails = %d, want no second notice while the failure lasts", got)
+	}
+
+	// Recovery, then a new failure noticed only in a quiet tick.
+	f.tlg.setFail(false)
+	f.maint.held = false
+	f.next(t)
+	f.tlg.setFail(true)
+	f.r.Push(context.Background(), "ups", "test", "test")
+	f.maint.held = true
+	f.now = f.now.Add(2 * time.Minute)
+	f.tick(t)
+	if got := mailer.count(); got != 2 {
+		t.Fatalf("emails = %d, want the new failure noticed in a quiet tick", got)
+	}
+}
+
+// TestTelegramFailingAfterDefault is 15 minutes.
+func TestTelegramFailingAfterDefault(t *testing.T) {
+	r := New(Options{})
+	if r.opts.TelegramFailingAfter != DefaultTelegramFailingAfter || DefaultTelegramFailingAfter != 15*time.Minute {
+		t.Fatalf("telegram_failing_after = %v, want 15m", r.opts.TelegramFailingAfter)
+	}
+}
+
+// alertTexts returns the texts of the alert-log records written so far.
+func (f *fakeStore) alertTexts() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	out := make([]string, 0, len(f.alerts))
+	for _, a := range f.alerts {
+		out = append(out, a.Text)
+	}
+
+	return out
+}
+
+// TestSendContextEndsAfterTheSendStop: the tick's send context never ends
+// before the lanes' send stop, so a send whose context ran out at the
+// deadline is followed only by refusals, never by a send on another free
+// lane (the SMS fallback after a Telegram hang).
+func TestSendContextEndsAfterTheSendStop(t *testing.T) {
+	r := New(Options{TickBudget: time.Millisecond, Telegram: &fakeSender{}, Host: host})
+	for range 500 {
+		start := time.Now()
+		sendCtx, end := r.boundSends(context.Background())
+		stop := r.sends.stop(false)
+		if dl, ok := sendCtx.Deadline(); !ok || dl.Before(start) || dl.After(time.Now().Add(time.Millisecond)) {
+			end()
+			t.Fatalf("send deadline = %v (set %v), want the send budget from the start", dl, ok)
+		}
+		<-sendCtx.Done()
+		if !errors.Is(context.Cause(sendCtx), context.DeadlineExceeded) {
+			end()
+			t.Fatalf("cause = %v, want the deadline", context.Cause(sendCtx))
+		}
+		select {
+		case <-stop:
+		default:
+			end()
+			t.Fatal("the send context ended while the send stop was still open")
+		}
+		end()
 	}
 }

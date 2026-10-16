@@ -535,3 +535,62 @@ command:
 		t.Errorf("groups = %+v %+v %+v %+v", cfg.UPS, cfg.HTTP, cfg.Freshness, cfg.Command)
 	}
 }
+
+func TestQuietAndDeliveryKeys(t *testing.T) {
+	g := mustParse(t, "").General
+	if g.MaintenanceMaxHold.Duration() != 6*time.Hour || g.TelegramFailingAfter.Duration() != 15*time.Minute {
+		t.Errorf("general defaults = %+v", g)
+	}
+
+	g = mustParse(t, "general: {maintenance_max_hold: 1h, telegram_failing_after: 1m}\n").General
+	if g.MaintenanceMaxHold.Duration() != time.Hour || g.TelegramFailingAfter.Duration() != time.Minute {
+		t.Errorf("general parsed = %+v", g)
+	}
+
+	cfg := mustParse(t, `
+network: {internet_targets: [203.0.113.1]}
+ups:
+disks:
+temperatures:
+kernel:
+containers:
+http: [{name: a, url: "https://a.example.org/"}]
+command: [{name: c, run: [/bin/true]}]
+freshness: [{name: f, path: /tmp/f, max_age: 1d}]
+`)
+	hardware := map[string]bool{
+		"disks": cfg.Disks.PauseInQuietWindows, "temperatures": cfg.Temperatures.PauseInQuietWindows,
+		"kernel": cfg.Kernel.PauseInQuietWindows,
+	}
+	for name, got := range hardware {
+		if got {
+			t.Errorf("%s pause_in_quiet_windows default = true, want false", name)
+		}
+	}
+	others := map[string]bool{
+		"network": cfg.Network.PauseInQuietWindows, "ups": cfg.UPS.PauseInQuietWindows,
+		"containers": cfg.Containers.PauseInQuietWindows, "http": cfg.HTTP[0].PauseInQuietWindows,
+		"command": cfg.Command[0].PauseInQuietWindows, "freshness": cfg.Freshness[0].PauseInQuietWindows,
+	}
+	for name, got := range others {
+		if !got {
+			t.Errorf("%s pause_in_quiet_windows default = false, want true", name)
+		}
+	}
+
+	cfg = mustParse(t, "disks: {pause_in_quiet_windows: true}\nups: {pause_in_quiet_windows: false}\n")
+	if !cfg.Disks.PauseInQuietWindows || cfg.UPS.PauseInQuietWindows {
+		t.Errorf("explicit values not honoured: %+v %+v", cfg.Disks.Common, cfg.UPS.Common)
+	}
+}
+
+func TestQuietAndDeliveryKeyErrors(t *testing.T) {
+	for _, doc := range []string{
+		"general: {maintenance_max_hold: 0s}\n",
+		"general: {telegram_failing_after: 59s}\n",
+	} {
+		if _, errs := config.Parse([]byte(doc), "health.yaml"); len(errs) == 0 {
+			t.Errorf("%q must be rejected", doc)
+		}
+	}
+}

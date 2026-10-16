@@ -65,7 +65,9 @@ func (r *Runner) dispatchFixes(ctx context.Context, c *cycle) {
 // tick is dropped. Nothing is sent. The best-effort checkpoint keeps the
 // conditions as they were before the tick's runs (none of its results was
 // dispatched) and leaves the checks' own state as last saved, so no result of
-// the tick is lost unseen.
+// the tick is lost unseen; the runner's own state is saved: the delivery
+// state goes with the queue it describes, and the maintenance-lock
+// observation with it.
 func (r *Runner) saveInterruptedFixes(ctx context.Context, c *cycle, loaded bool) {
 	r.takeFixes(c)
 	if len(c.fixes) == 0 || r.opts.Store == nil {
@@ -82,6 +84,7 @@ func (r *Runner) saveInterruptedFixes(ctx context.Context, c *cycle, loaded bool
 	defer cancel()
 
 	st := store.State{Conditions: c.before, RateMarks: r.marks.Export(), Queue: r.notifier.Export()}
+	r.save(r.own, &st)
 	if err := r.opts.Store.Checkpoint(saveCtx, st, alerts, samples); err != nil {
 		r.opts.Logger.Warn("Cannot record the fixes of an interrupted health tick", zap.Error(err))
 	}

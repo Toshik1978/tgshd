@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"time"
+	"unicode/utf8"
 
 	"github.com/Toshik1978/tgshd/pkg/health/notify"
 )
@@ -53,7 +54,7 @@ func (s *Store) Alerts(ctx context.Context, filter string, since time.Time, limi
 	args := []any{since.Unix()}
 	if filter != "" {
 		query += ` AND (check_name = ? OR substr(key, 1, ?) = ?)`
-		args = append(args, filter, len(filter), filter)
+		args = append(args, filter, utf8.RuneCountInString(filter), filter)
 	}
 	query += ` ORDER BY at DESC, id DESC`
 	if limit > 0 {
@@ -100,7 +101,7 @@ WITH u AS (
     WHERE day >= ?5 AND day <= ?2 AND substr(metric, 1, ?3) = ?4
 )
 SELECT metric, MIN(mn), SUM(av * n) / SUM(n), MAX(mx), SUM(n) FROM u GROUP BY metric ORDER BY metric`
-	out, err := s.queryStats(ctx, agg, from.Unix(), now.Unix(), len(prefix), prefix, dayStart(from))
+	out, err := s.queryStats(ctx, agg, from.Unix(), now.Unix(), utf8.RuneCountInString(prefix), prefix, dayStart(from))
 	if err != nil {
 		return nil, err
 	}

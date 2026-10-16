@@ -3,12 +3,15 @@ package runner
 import (
 	"context"
 	"errors"
+	"fmt"
 	"maps"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/Toshik1978/tgshd/pkg/health"
+	"github.com/Toshik1978/tgshd/pkg/health/notify"
 	"github.com/Toshik1978/tgshd/pkg/health/store"
 )
 
@@ -235,5 +238,157 @@ func TestKVPersister(t *testing.T) {
 	st = store.State{KV: map[string]string{"kernel.state": "old"}}
 	if err := p.Save(&st); err == nil || !errors.Is(err, s.exportErr) || st.KV["kernel.state"] != "old" {
 		t.Fatalf("save error = %v, kv %v; want it wrapped and the old value left alone", err, st.KV)
+	}
+}
+
+func TestCheckpointCarriesQueuedKindCheckAndKey(t *testing.T) {
+	c := newFakeCheck(nil, "ups", reading("ups/main", health.Bad, "on battery"))
+	st := &fakeStore{}
+	f := newFixture(t, st, checkOf(c))
+	f.tick(t)
+
+	f.tlg.setFail(true)
+	c.set(reading("ups/main", health.Bad, "on battery"))
+	f.next(t)
+	c.set(reading("ups/main", health.Good, "on mains"))
+	f.next(t)
+	f.r.Push(context.Background(), "summary", "Weekly summary", "Weekly summary sent")
+	f.next(t)
+
+	got := make([]string, 0, len(st.state.Queue))
+	for _, m := range st.state.Queue {
+		got = append(got, m.Kind+"|"+m.Check+"|"+m.Key)
+	}
+	want := []string{"resolved|ups|ups/main", "event|summary|summary"}
+	if !slices.Equal(got, want) {
+		t.Fatalf("stored queue kind|check|key = %q, want %q", got, want)
+	}
+}
+
+// mailFixture is newFixture with a mailer and a 2-minute telegram_failing_after.
+func mailFixture(t *testing.T, st *fakeStore, mailer *fakeMailer, checks ...health.Check) *fixture {
+	t.Helper()
+
+	f := newFixture(t, st, checks...)
+	f.r = New(Options{
+		Checks: checks, Store: st, Host: host, Telegram: f.tlg, SMS: f.sms, Mailer: mailer,
+		TelegramFailingAfter: 2 * time.Minute, Maintenance: f.maint,
+		Now: func() time.Time { return f.now }, Location: zone(),
+	})
+
+	return f
+}
+
+// TestRestartSendsTheTelegramFailingEmailOnce: the Telegram failure and its
+// notice are kept in kv notify.channels, so a restart during the same
+// outage neither starts it anew nor emails again (FR-029).
+func TestRestartSendsTheTelegramFailingEmailOnce(t *testing.T) {
+	st := &fakeStore{}
+	mailer := &fakeMailer{}
+	f1 := mailFixture(t, st, mailer)
+	f1.tlg.setFail(true)
+	f1.r.Push(context.Background(), "ups", "test", "test") // Failing since t0.
+	f1.tick(t)
+	for range 4 {
+		f1.next(t)
+	}
+	if got := mailer.count(); got != 1 {
+		t.Fatalf("emails = %d before the restart, want the one notice", got)
+	}
+
+	f2 := mailFixture(t, st, mailer)
+	f2.tlg.setFail(true)
+	f2.now = f1.now.Add(Tick)
+	f2.r.Push(context.Background(), "ups", "test", "test")
+	f2.tick(t)
+	for range 10 {
+		f2.next(t)
+	}
+	if got := mailer.count(); got != 1 {
+		t.Fatalf("emails = %q, want no second notice after the restart", mailer.bodies)
+	}
+	if h := f2.r.notifier.TelegramHealth(); !h.FailingSince.Equal(t0()) {
+		t.Fatalf("telegram = %+v, want still failing since %v", h, t0())
+	}
+}
+
+// TestRestartKeepsQueuedProblemsSMSSent: a queued PROBLEM sent by SMS
+// through the fallback is not sent by SMS again after a restart (its key is
+// kept in kv notify.sms_problems), and its RESOLVED still goes by SMS
+// (FR-030).
+func TestRestartKeepsQueuedProblemsSMSSent(t *testing.T) {
+	st := &fakeStore{}
+	ups := newFakeCheck(nil, "ups", reading("ups/main", health.Bad, "on battery"))
+	f1 := newFixture(t, st, checkOf(ups))
+	f1.tlg.setFail(true)
+	f1.tick(t)
+	problem := host + ": PROBLEM: on battery (since 05:00)"
+	if got := f1.sms.texts(); !slices.Equal(got, []string{problem}) {
+		t.Fatalf("sms before the restart = %q, want the PROBLEM once", got)
+	}
+
+	f2 := newFixture(t, st, checkOf(ups))
+	f2.tlg.setFail(true)
+	f2.now = f1.now.Add(Tick)
+	f2.tick(t)
+	f2.next(t)
+	if got := f2.sms.texts(); len(got) != 0 {
+		t.Fatalf("sms after the restart = %q, want the restored PROBLEM not sent again", got)
+	}
+
+	ups.set(reading("ups/main", health.Good, "on mains"))
+	f2.next(t)
+	if got := f2.sms.texts(); !slices.Equal(got, []string{host + ": RESOLVED: on mains"}) {
+		t.Fatalf("sms = %q, want the RESOLVED by SMS", got)
+	}
+}
+
+// TestRestartKeepsTheUndeliveredList: listed PROBLEMs and the Folded count
+// are kept in kv notify.undelivered until a delivered message has shown them
+// (FR-031).
+func TestRestartKeepsTheUndeliveredList(t *testing.T) {
+	st := &fakeStore{}
+	kern := newFakeCheck(nil, "kernel", health.CheckResult{})
+	f1 := newFixture(t, st, checkOf(kern))
+	for i := range notify.MaxUndelivered + 2 {
+		f1.r.notifier.ListUndelivered(notify.QueuedMessage{
+			Kind:  string(notify.KindProblem),
+			Key:   fmt.Sprintf("command/job%02d", i),
+			Plain: fmt.Sprintf("job%02d failed", i),
+		})
+	}
+	f1.tick(t)
+
+	f2 := newFixture(t, st, checkOf(kern))
+	f2.now = f1.now.Add(Tick)
+	f2.tick(t)
+	f2.r.Push(context.Background(), "test", "next", "next")
+
+	texts := f2.tlg.texts()
+	if len(texts) != 1 || strings.Count(texts[0], ", no longer open\n") != notify.MaxUndelivered ||
+		!strings.Contains(texts[0], "PROBLEM: job00 failed, no longer open\n") ||
+		!strings.Contains(texts[0], "… and 2 more undelivered PROBLEMs\n") {
+		t.Fatalf("telegram after the restart = %q, want the listed PROBLEMs and the counted line", texts)
+	}
+
+	f2.next(t)
+	u, err := notify.DecodeUndelivered(st.state.KV[notify.KVUndelivered])
+	if err != nil || !u.Empty() {
+		t.Fatalf("stored undelivered = %+v, %v; want empty once shown", u, err)
+	}
+}
+
+// TestCorruptDeliveryStateIsACheckerError: a stored delivery state that does
+// not decode is a checker error; the runner carries on.
+func TestCorruptDeliveryStateIsACheckerError(t *testing.T) {
+	st := &fakeStore{state: store.State{KV: map[string]string{notify.KVChannels: "{"}}}
+	f := newFixture(t, st, checkOf(newFakeCheck(nil, "kernel", health.CheckResult{})))
+	f.tick(t)
+
+	if got := countContaining(f.tlg.texts(), "cannot restore state: restore "+notify.KVChannels); got != 1 {
+		t.Fatalf("telegram = %q, want the restore failure", f.tlg.texts())
+	}
+	if _, ok := st.state.KV[notify.KVChannels]; !ok || st.state.KV[notify.KVChannels] == "{" {
+		t.Fatalf("stored channels = %q, want rewritten from memory", st.state.KV[notify.KVChannels])
 	}
 }

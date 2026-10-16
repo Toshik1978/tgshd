@@ -26,6 +26,9 @@ type Check struct {
 	Mode Mode
 	// NeedsInternet skips the check while the outside is known down.
 	NeedsInternet bool
+	// PauseInQuiet holds the check back during quiet windows (maintenance and
+	// boot grace); a check without it keeps running through them.
+	PauseInQuiet bool
 	// DependsOn is a condition key; the check is skipped while it is bad.
 	DependsOn string
 	// Run performs one run of the check.

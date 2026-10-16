@@ -354,7 +354,7 @@ func TestQueueKindRoundTrip(t *testing.T) {
 			Key:       "disks/TEST0000000001/wear",
 		},
 		{ID: 3, CreatedAt: ts(12), Channel: "email", Text: "e", Kind: "event"},
-		{ID: 4, CreatedAt: ts(13), Channel: "tlg", Text: "unset"},
+		{ID: 4, CreatedAt: ts(13), Channel: "tlg", Text: "unset", Kind: "event"},
 	}
 	if err := s.Checkpoint(ctx, State{Queue: want}, nil, nil); err != nil {
 		t.Fatalf("Checkpoint: %v", err)
@@ -363,13 +363,38 @@ func TestQueueKindRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
-	want[3].Kind = "event" // the zero value is stored as event
 	if !reflect.DeepEqual(got.Queue, want) {
 		t.Errorf("queue = %+v, want %+v", got.Queue, want)
 	}
 
-	bad := State{Queue: []notify.QueuedMessage{{ID: 9, CreatedAt: ts(1), Channel: "tlg", Kind: "bogus"}}}
-	if err = s.Checkpoint(ctx, bad, nil, nil); err == nil || errors.Is(err, ErrDegraded) {
-		t.Fatalf("bad kind = %v, want plain error", err)
+	for _, kind := range []string{"bogus", ""} {
+		bad := State{Queue: []notify.QueuedMessage{{ID: 9, CreatedAt: ts(1), Channel: "tlg", Kind: kind}}}
+		if err = s.Checkpoint(ctx, bad, nil, nil); err == nil || errors.Is(err, ErrDegraded) {
+			t.Fatalf("kind %q = %v, want plain error", kind, err)
+		}
+	}
+}
+
+// TestQueuePlainAndSinceRoundTrip: the queue keeps an item's plain text and
+// since (migration 3); a zero since stays zero.
+func TestQueuePlainAndSinceRoundTrip(t *testing.T) {
+	s := openTemp(t)
+	ctx := context.Background()
+	want := []notify.QueuedMessage{
+		{
+			ID: 1, CreatedAt: ts(20), Channel: "tlg", Text: "h: PROBLEM: x&lt;y (since 10:00)",
+			Kind: "problem", Check: "disks", Key: "disks/a", Plain: "x<y", Since: ts(10),
+		},
+		{ID: 2, CreatedAt: ts(21), Channel: "sms", Text: "h: event", Kind: "event", Plain: "event"},
+	}
+	if err := s.Checkpoint(ctx, State{Queue: want}, nil, nil); err != nil {
+		t.Fatalf("Checkpoint: %v", err)
+	}
+	got, err := s.Load(ctx)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !reflect.DeepEqual(got.Queue, want) {
+		t.Errorf("queue = %+v, want %+v", got.Queue, want)
 	}
 }

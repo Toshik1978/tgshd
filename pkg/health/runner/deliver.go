@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/Toshik1978/tgshd/pkg/health/notify"
 )
@@ -106,8 +107,8 @@ func (l *lane) run(ctx context.Context, send func(context.Context) error) error 
 
 // boundSends starts the tick's delivery deadlines, from now: Telegram and SMS
 // sends end by the tick budget less the email share, emails by the full
-// budget. Do calls it once its runs have ended (at the start of a quiet tick),
-// so the runs never use up the delivery window. Until
+// budget. Do calls it once its runs have ended, so the runs never use up the
+// delivery window. Until
 // the returned end is called, every send is bounded by them, also one made
 // with a context of its own (the checker errors'); shutdown ends only the
 // sends made with the returned context, which carries the send deadline.
@@ -118,14 +119,38 @@ func (r *Runner) boundSends(ctx context.Context) (context.Context, func()) {
 	sendDeadline, cancelSend := context.WithTimeout(base, sendBudget)
 	mailDeadline, cancelMail := context.WithTimeout(base, budget)
 	r.sends.begin(sendDeadline.Done(), mailDeadline.Done())
-	sendCtx, cancel := context.WithTimeout(ctx, sendBudget)
+	// The send context ends from the send stop itself, not from a timer of
+	// its own: two timers for the same instant fire in either order, and a
+	// send context ending first would let a send on a free lane (the SMS
+	// fallback after a Telegram hang) start past the deadline.
+	sendCtx, cancel := context.WithCancelCause(ctx)
+	stopAfter := context.AfterFunc(sendDeadline, func() { cancel(context.DeadlineExceeded) })
+	deadline, _ := sendDeadline.Deadline()
+	if dl, ok := ctx.Deadline(); ok && dl.Before(deadline) {
+		deadline = dl
+	}
 
-	return sendCtx, func() {
-		cancel()
+	return sendContext{Context: sendCtx, deadline: deadline}, func() {
+		stopAfter()
+		cancel(nil)
 		r.sends.end()
 		cancelSend()
 		cancelMail()
 	}
+}
+
+// sendContext is the tick's send context: it ends when the send stop has
+// closed (or its parent ends) and still reports the send deadline, which
+// adapters use to bound their I/O.
+type sendContext struct {
+	context.Context //nolint:containedctx // wraps the context to report its deadline
+
+	deadline time.Time
+}
+
+// Deadline implements context.Context.
+func (c sendContext) Deadline() (time.Time, bool) {
+	return c.deadline, true
 }
 
 // boundedSender is a notify.Sender whose sends go through its lane.
@@ -162,4 +187,12 @@ func (d *deliveries) bind(o *Options) {
 	if o.Mailer != nil {
 		o.Mailer = boundedMailer{next: o.Mailer, lane: &lane{d: d, mail: true}}
 	}
+}
+
+// noticeTelegramFailing sends the one email notice of a Telegram delivery
+// failing for TelegramFailingAfter (FR-029). Do calls it after
+// the tick's deliveries, within its delivery window, so the tick's own failed
+// sends count and the email is bounded like every other send.
+func (r *Runner) noticeTelegramFailing() {
+	r.checker.TelegramFailing(r.opts.TelegramFailingAfter)
 }

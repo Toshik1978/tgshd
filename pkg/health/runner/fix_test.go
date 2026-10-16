@@ -205,9 +205,15 @@ func TestFixesOfAnInterruptedTickReachTheAlertLog(t *testing.T) {
 	if st.state.KV["kernel.state"] != "stored" || slices.Contains(p.order.get(), "save kernel.state") {
 		t.Fatalf("kv = %v, calls %v: the checks' state must not be saved", st.state.KV, p.order.get())
 	}
+	if _, ok := st.state.KV[notify.KVSMSProblems]; !ok {
+		t.Fatalf("kv = %v, want the delivery state saved with the queue", st.state.KV)
+	}
 }
 
-func TestLateFixesAreTakenNextTickAndNeverInAQuietWindow(t *testing.T) {
+// TestLateFixesAreTakenNextTickAlsoInAQuietWindow: a fix finished after its
+// run's deadline is taken by the next tick; a quiet tick is no exception,
+// since it runs the checks not set to pause and ends as a normal tick (R15).
+func TestLateFixesAreTakenNextTickAlsoInAQuietWindow(t *testing.T) {
 	st := &fakeStore{}
 	src := &fakeFixes{}
 	f := newFixture(t, st)
@@ -222,8 +228,8 @@ func TestLateFixesAreTakenNextTickAndNeverInAQuietWindow(t *testing.T) {
 	src.add(Fix{At: f.now, Check: "command", Key: "command/app/fix", Text: "late", Send: true})
 	f.maint.held = true
 	f.next(t)
-	if src.takes != 1 {
-		t.Fatalf("takes = %d, a quiet tick must not take fixes", src.takes)
+	if src.takes != 2 {
+		t.Fatalf("takes = %d, want the quiet tick to take the fix", src.takes)
 	}
 
 	f.maint.held = false

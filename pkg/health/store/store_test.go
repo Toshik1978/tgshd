@@ -94,8 +94,8 @@ func TestOpenCreatesSchema(t *testing.T) {
 			t.Errorf("index %s missing", n)
 		}
 	}
-	if v := pragma(t, s.db, "user_version"); v != "2" {
-		t.Errorf("user_version = %s, want 2", v)
+	if v := pragma(t, s.db, "user_version"); v != "3" {
+		t.Errorf("user_version = %s, want 3", v)
 	}
 	if v := pragma(t, s.db, "journal_mode"); v != "wal" {
 		t.Errorf("journal_mode = %s, want wal", v)
@@ -154,8 +154,8 @@ func TestOpenIsIdempotentAndKeepsData(t *testing.T) {
 	if got := kvValue(t, s.db, "a"); got != "b" {
 		t.Errorf("kv a = %q, want b", got)
 	}
-	if got := pragma(t, s.db, "user_version"); got != "2" {
-		t.Errorf("user_version = %s, want 2", got)
+	if got := pragma(t, s.db, "user_version"); got != "3" {
+		t.Errorf("user_version = %s, want 3", got)
 	}
 }
 
@@ -357,7 +357,7 @@ func seedV1(t *testing.T, dir string) {
 	}
 }
 
-func TestMigrateV1ToV2(t *testing.T) {
+func TestMigrateV1ToCurrent(t *testing.T) {
 	dir := t.TempDir()
 	ctx := context.Background()
 	seedV1(t, dir)
@@ -376,15 +376,77 @@ func TestMigrateV1ToV2(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 	defer func() { _ = s.Close() }()
-	if v := pragma(t, s.db, "user_version"); v != "2" {
-		t.Errorf("user_version = %s, want 2", v)
+	if v := pragma(t, s.db, "user_version"); v != "3" {
+		t.Errorf("user_version = %s, want 3", v)
 	}
 	st, err := s.Load(ctx)
 	if err != nil {
 		t.Fatalf("Load: %v", err)
 	}
 	if len(st.Queue) != 1 || st.Queue[0].ID != 3 || st.Queue[0].Kind != "event" ||
-		st.Queue[0].Check != "" || st.Queue[0].Key != "" {
+		st.Queue[0].Check != "" || st.Queue[0].Key != "" || st.Queue[0].Plain != "" || !st.Queue[0].Since.IsZero() {
 		t.Errorf("queue = %+v, want the 001 row read back as event", st.Queue)
+	}
+}
+
+// seedV2 creates a version-2 database holding one queued PROBLEM.
+func seedV2(t *testing.T, dir string) {
+	t.Helper()
+	raw, err := sql.Open(driverName, "file:"+filepath.Join(dir, FileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = raw.Close() }()
+	ctx := context.Background()
+	for _, q := range []string{
+		schemaV1,
+		schemaV2,
+		`INSERT INTO queue (id, created_at, channel, text, attempts, kind, check_name, key)
+		VALUES (4, 100, 'tlg', 'h: PROBLEM: hot (since 10:00)', 1, 'problem', 'disks', 'disks/a')`,
+		"PRAGMA user_version = 2",
+	} {
+		if _, err = raw.ExecContext(ctx, q); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// TestMigrateV2ToV3: migration 3 adds the queue item's plain text and since;
+// a row written before it reads back with both empty, so the notifier falls
+// back to parsing its rendered text.
+func TestMigrateV2ToV3(t *testing.T) {
+	dir := t.TempDir()
+	ctx := context.Background()
+	seedV2(t, dir)
+
+	ro, err := OpenReadOnly(ctx, dir)
+	if err == nil {
+		_ = ro.Close()
+		t.Fatal("OpenReadOnly accepted a version-2 database")
+	}
+	var old *OldSchemaError
+	if !errors.As(err, &old) || old.Version != 2 {
+		t.Errorf("OpenReadOnly error = %v, want OldSchemaError at version 2", err)
+	}
+
+	s, err := Open(ctx, dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+	if v := pragma(t, s.db, "user_version"); v != "3" {
+		t.Errorf("user_version = %s, want 3", v)
+	}
+	st, err := s.Load(ctx)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(st.Queue) != 1 {
+		t.Fatalf("queue = %+v, want the 002 row", st.Queue)
+	}
+	q := st.Queue[0]
+	if q.ID != 4 || q.Kind != "problem" || q.Key != "disks/a" || q.Text != "h: PROBLEM: hot (since 10:00)" ||
+		q.Plain != "" || !q.Since.IsZero() {
+		t.Errorf("queue row = %+v, want the 002 row with no plain text and no since", q)
 	}
 }

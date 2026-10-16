@@ -118,6 +118,27 @@ func TestMetricsCurrentAndStats(t *testing.T) {
 	}
 }
 
+// TestPrefixFiltersMatchNonASCII: a prefix is matched by characters, so a
+// key or metric with multi-byte characters (a container or sensor name) is
+// found by its prefix.
+func TestPrefixFiltersMatchNonASCII(t *testing.T) {
+	s := openTemp(t)
+	now := nowT()
+	seed(t, s, State{}, []Alert{
+		{At: now.Add(-time.Hour), Kind: KindEvent, Check: "temps", Key: "temps/датчик/high", Text: "a"},
+	}, []SampleRow{{At: now.Add(-time.Hour), Metric: "temp.датчик", Value: 40}})
+	ctx := context.Background()
+
+	got, err := s.Alerts(ctx, "temps/датчик", now.Add(-24*time.Hour), 0)
+	if err != nil || len(got) != 1 {
+		t.Fatalf("alerts by a non-ASCII key prefix = %+v, %v, want the one record", got, err)
+	}
+	stats, err := s.Metrics(ctx, "temp.да", now)
+	if err != nil || len(stats) != 1 || stats[0].Metric != "temp.датчик" {
+		t.Fatalf("metrics by a non-ASCII prefix = %+v, %v, want temp.датчик", stats, err)
+	}
+}
+
 func TestMetricsOnlyDaily(t *testing.T) {
 	s := openTemp(t)
 	now := nowT()
@@ -205,8 +226,8 @@ func TestRetention(t *testing.T) {
 	nextDay := day.AddDate(0, 0, 1)
 
 	seed(t, s, State{Queue: []notify.QueuedMessage{
-		{ID: 1, CreatedAt: now.Add(-8 * 24 * time.Hour), Channel: "sms", Text: "old"},
-		{ID: 2, CreatedAt: now.Add(-6 * 24 * time.Hour), Channel: "tlg", Text: "fresh"},
+		{ID: 1, CreatedAt: now.Add(-8 * 24 * time.Hour), Channel: "sms", Text: "old", Kind: "event"},
+		{ID: 2, CreatedAt: now.Add(-6 * 24 * time.Hour), Channel: "tlg", Text: "fresh", Kind: "event"},
 	}}, []Alert{
 		{At: now.Add(-366 * 24 * time.Hour), Kind: KindEvent, Check: "c", Key: "c/a", Text: "gone"},
 		{At: now.Add(-364 * 24 * time.Hour), Kind: KindEvent, Check: "c", Key: "c/a", Text: "kept"},

@@ -8,9 +8,10 @@
 #
 # Durations use Go syntax (30s, 15m, 6h) plus d for days (8d).
 # Per-check common keys: interval, threshold, mode (tlg | sms | tlg-or-sms,
-# default tlg), needs_internet (default false) and summary_group (default none:
+# default tlg), needs_internet (default false), summary_group (default none:
 # one weekly-summary line per check; checks naming the same group, [a-z0-9-]+,
-# share one line).
+# share one line) and pause_in_quiet_windows (default false for disks,
+# temperatures and kernel; true for every other check).
 
 general:
   state_dir: /var/lib/tgshd                 # state database and instance lock
@@ -18,6 +19,8 @@ general:
   maintenance_lock: /run/maintenance.lock   # optional; absent => no maintenance windows
   boot_grace: 10m
   concurrency: 4
+  maintenance_max_hold: 6h                  # longest a maintenance window is honoured
+  telegram_failing_after: 15m               # Telegram failures this long switch alerts to email/SMS
 
 # Weekly report; omit the section to disable it.
 summary:

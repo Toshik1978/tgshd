@@ -201,8 +201,9 @@ values and raises `kernel/<controller>/edac-unreadable` (R11).
 
 ### QueuedMessage (amended)
 
-`{ID, CreatedAt, Channel, Text, Attempts, Kind, Check, Key}` — `Kind` ∈ `problem`, `resolved`,
-`event`; rows from 001 read as `event`.
+`{ID, CreatedAt, Channel, Text, Attempts, Kind, Check, Key, Plain, Since}` — `Kind` ∈ `problem`,
+`resolved`, `event`; rows from 001 read as `event`; rows from before migration 3 have `Plain`
+empty and `Since` zero.
 
 ### Channel health (new, R17)
 
@@ -269,14 +270,22 @@ Both judged by `max_age` and `future_tolerance` (R25). Stamp kept for the summar
 start failure ⇒ checker error; timeout ⇒ `timeout_verdict`; exit ≠ 0 ⇒ Bad; `forbid_output`
 match ⇒ Bad; `expect_output` no match ⇒ Bad; else Good.
 
-## SQLite schema (`pkg/health/store`, `user_version = 2`)
+## SQLite schema (`pkg/health/store`, `user_version = 3`)
 
 ```sql
 -- migration 2
 ALTER TABLE queue ADD COLUMN kind TEXT NOT NULL DEFAULT 'event';
 ALTER TABLE queue ADD COLUMN check_name TEXT NOT NULL DEFAULT '';
 ALTER TABLE queue ADD COLUMN key TEXT NOT NULL DEFAULT '';
+-- migration 3
+ALTER TABLE queue ADD COLUMN plain TEXT NOT NULL DEFAULT '';
+ALTER TABLE queue ADD COLUMN since INTEGER;
 ```
+
+Migration 3 keeps `QueuedMessage.Plain` (the text without host prefix, label or since) and
+`Since` (streak start, Unix seconds, NULL when none), so a PROBLEM dropped after a restart is
+listed from them. Rows written before it read back empty and fall back to parsing the rendered
+text.
 
 `store.validate` rejects a queue `kind` outside `problem`, `resolved`, `event`. All other new
 state lives in `baselines.data` and `kv` (see above). New kv keys: `notify.channels`,

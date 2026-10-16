@@ -10,7 +10,8 @@ const (
 	ReasonBootGrace = "boot grace"
 )
 
-// Quiet reports whether nothing may be judged right now, and why. A held
+// Quiet reports whether a quiet window is open, and why; the checks set to
+// pause in quiet windows (Check.PauseInQuiet) are not judged in it. A held
 // maintenance lock takes precedence over the boot grace period. A grace of zero
 // or less disables the boot grace window.
 func Quiet(maintHeld bool, uptime, grace time.Duration) (bool, string) {

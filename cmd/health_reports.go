@@ -230,12 +230,10 @@ func statusDrive(s *disks.DriveStatus, missing bool, now time.Time) command.Driv
 	return d
 }
 
-// hook sets the runner's daily retention (with a store only) and weekly
-// summary jobs.
+// hook sets the runner's daily (queue expiry, and retention with a store)
+// and weekly summary jobs.
 func (h *healthReports) hook(opts *runner.Options) {
-	if h.store != nil {
-		opts.Daily = h.daily
-	}
+	opts.Daily = h.daily
 	opts.Weekly = h.weekly
 }
 
@@ -271,13 +269,19 @@ func (h *healthReports) handlers(logger *zap.Logger, publisher command.Publisher
 // (the runner logs each, and the tick's flush no longer sends them), then
 // applies the store's retention rules in the host's zone. A stored message the
 // runner did not hold is logged here (never its text). A state database not
-// open (yet) or closed skips the retention quietly.
+// open (yet) or closed skips the retention quietly, and without a state
+// database (memory only) there is none.
 func (h *healthReports) daily(ctx context.Context, now time.Time) error {
 	expired := map[int64]bool{}
 	if rh := h.bound(); rh.expire != nil {
-		for _, m := range rh.expire(now, queueMaxAge) {
+		dropped := rh.expire(now, queueMaxAge)
+		for i := range dropped {
+			m := &dropped[i]
 			expired[m.ID] = true
 		}
+	}
+	if h.store == nil {
+		return nil
 	}
 	res, err := h.store.Retention(ctx, now.In(h.loc))
 	switch {
@@ -290,7 +294,8 @@ func (h *healthReports) daily(ctx context.Context, now time.Time) error {
 	case err != nil:
 		return fmt.Errorf("retention: %w", err)
 	}
-	for _, m := range res.QueueDropped {
+	for i := range res.QueueDropped {
+		m := &res.QueueDropped[i]
 		if expired[m.ID] {
 			continue
 		}

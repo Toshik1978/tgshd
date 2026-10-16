@@ -1,6 +1,7 @@
 // Package runner is the health worker: one 30 s tick that writes the
-// heartbeat, honours quiet windows, runs due checks (network first), feeds the
-// alert engine, delivers messages and checkpoints state (research R2).
+// heartbeat, runs due checks (network first; in a quiet window only those not
+// set to pause), feeds the alert engine, delivers messages and checkpoints
+// state (research R2, R15).
 package runner
 
 import (
@@ -31,11 +32,10 @@ const (
 	// further. With MaxTickTime it bounds a tick to 70 s plus store work.
 	MaxRunTime = 40 * time.Second
 	// MaxTickTime is the default delivery budget of a tick, counted from the
-	// end of its runs (from the start of a quiet tick): every Telegram, SMS
-	// and email send of the tick (checker errors, flush, dispatch, fixes,
-	// weekly push) ends by it, also when a channel hangs. Telegram and SMS get
-	// its first 27 s even when a run used the whole MaxRunTime; the last 3 s
-	// (a tenth) are kept for email. Load, the daily job and the checkpoint are
+	// end of its runs: every Telegram, SMS and email send of the tick (checker
+	// errors, flush, dispatch, fixes, weekly push) ends by it, also when a
+	// channel hangs. Telegram and SMS get its first 27 s even when a run used
+	// the whole MaxRunTime; the last 3 s (a tenth) are kept for email. Load, the daily job and the checkpoint are
 	// not bounded; they are local store work. The worst tick is thus 40 s of
 	// runs + 30 s of deliveries = 70 s plus store work, which leaves 20 s for
 	// the store under the 90 s of three periods. gocron (singleton,
@@ -45,6 +45,10 @@ const (
 	// plus one minute (SC-006). A watchdog must therefore alarm only on an age
 	// strictly greater than 90 s.
 	MaxTickTime = 30 * time.Second
+	// DefaultTelegramFailingAfter is how long Telegram delivery fails before
+	// its one email notice when Options.TelegramFailingAfter is unset
+	// (general.telegram_failing_after).
+	DefaultTelegramFailingAfter = 15 * time.Minute
 
 	// KeyRouter and KeyInternet are the network conditions that, while bad,
 	// mean the outside is known down.
@@ -91,9 +95,9 @@ type Options struct {
 	// periods) to keep the heartbeat within one cycle plus one minute.
 	RunBudget time.Duration
 	// TickBudget is the tick's delivery budget, counted from the end of its
-	// runs (from its start in a quiet tick), so a run that uses all of
-	// RunBudget never eats it: Telegram and SMS sends end by it less a tenth
-	// kept for email, emails by all of it. Defaults to MaxTickTime. A tick
+	// runs, so a run that uses all of RunBudget never eats it: Telegram and
+	// SMS sends end by it less a tenth kept for email, emails by all of it.
+	// Defaults to MaxTickTime. A tick
 	// lasts at most RunBudget + TickBudget plus local store work: 70 s plus
 	// store work by default (see MaxTickTime). Undelivered messages stay queued.
 	TickBudget  time.Duration
@@ -116,16 +120,22 @@ type Options struct {
 	// SMS and Mailer may be nil.
 	SMS    notify.Sender
 	Mailer notify.Mailer
-	Logger *zap.Logger
+	// TelegramFailingAfter is how long Telegram delivery fails before the one
+	// email notice (FR-029); defaults to DefaultTelegramFailingAfter.
+	TelegramFailingAfter time.Duration
+	// MaintenanceMaxHold is how long the maintenance lock may be held before
+	// its checker error (FR-027); defaults to DefaultMaintenanceMaxHold.
+	MaintenanceMaxHold time.Duration
+	Logger             *zap.Logger
 	// Now defaults to time.Now.
 	Now func() time.Time
 	// Location is the host's zone for "since" times; defaults to time.Local.
 	Location *time.Location
-	// Daily runs once per host-local day on a non-quiet tick (e.g. store
-	// retention); nil disables it. Weekly runs once per WeeklySlot on a
-	// non-quiet tick; it needs both Weekly and WeeklySlot. A job counts as done
-	// when attempted, so a failing hook is not retried until its next day or
-	// week; the error is reported as a checker error.
+	// Daily runs once per host-local day, also in a quiet window (e.g. queue
+	// expiry and store retention); nil disables it. Weekly runs once per
+	// WeeklySlot on a non-quiet tick; it needs both Weekly and WeeklySlot. A
+	// job counts as done when attempted, so a failing hook is not retried
+	// until its next day or week; the error is reported as a checker error.
 	Daily      func(ctx context.Context, now time.Time) error
 	Weekly     func(ctx context.Context, now time.Time) error
 	WeeklySlot *Slot
@@ -143,10 +153,17 @@ type Snapshot struct {
 	Open []OpenCondition
 	// Checks is the number of configured checks.
 	Checks int
-	// LastCycle is the end of the last judged cycle (zero before the first).
+	// LastCycle is the time of the last completed tick, quiet or not; a quiet
+	// tick runs the checks not set to pause (zero before the first).
 	LastCycle time.Time
 	// Quiet is the active quiet-window reason, empty when none.
-	Quiet         string
+	Quiet string
+	// HeldSince is since when the maintenance lock is held, zero while it
+	// is free.
+	HeldSince time.Time
+	// Paused are the configured checks set to pause in quiet windows
+	// (Check.PauseInQuiet), in configuration order.
+	Paused        []string
 	StoreDegraded bool
 }
 
@@ -157,7 +174,10 @@ type Runner struct {
 	marks    *health.RateMarks
 	notifier *notify.Notifier
 	checker  *notify.CheckerErrors
-	network  int // index of the network check, -1 when absent
+	// own persists the runner's own state: the notifier's delivery state and
+	// the maintenance-lock observation.
+	own     []Persister
+	network int // index of the network check, -1 when absent
 	// sends bounds every delivery by the running tick's deadline.
 	sends deliveries
 
@@ -174,6 +194,9 @@ type Runner struct {
 	// only touched by Do.
 	pendingAlerts  []store.Alert
 	pendingSamples []store.SampleRow
+	// saveReported tells that a state-write failure went out to the operator
+	// and its recovery notice is due; only touched by Do.
+	saveReported bool
 
 	loadMu sync.Mutex
 	loaded bool
@@ -188,6 +211,10 @@ type Runner struct {
 	mu        sync.Mutex
 	quiet     string
 	lastCycle time.Time
+	// maint is the maintenance-lock observation; maintObserved tells that a
+	// tick has probed the lock since start.
+	maint         MaintenanceLock
+	maintObserved bool
 	// logged are alert-log records made outside a tick's dispatch (clears,
 	// retires, pushes); the next checkpoint takes them.
 	logged []store.Alert
@@ -215,24 +242,7 @@ type cycle struct {
 
 // New creates a Runner and its notifier and checker errors.
 func New(opts Options) *Runner {
-	if opts.Now == nil {
-		opts.Now = time.Now
-	}
-	if opts.Location == nil {
-		opts.Location = time.Local //nolint:gosmopolitan // "since" times are shown in the host's wall-clock time
-	}
-	if opts.Logger == nil {
-		opts.Logger = zap.NewNop()
-	}
-	if opts.Concurrency <= 0 {
-		opts.Concurrency = DefaultConcurrency
-	}
-	if opts.RunBudget <= 0 {
-		opts.RunBudget = MaxRunTime
-	}
-	if opts.TickBudget <= 0 {
-		opts.TickBudget = MaxTickTime
-	}
+	opts = withDefaults(opts)
 
 	r := &Runner{
 		opts:    opts,
@@ -256,8 +266,9 @@ func New(opts Options) *Runner {
 		Telegram:       r.opts.Telegram,
 		SMS:            r.opts.SMS,
 		OnCheckerError: func(key, text string) { r.checker.CheckerError(key, text) },
-		OnDrop:         r.logDrop,
+		OnDrop:         r.dropped,
 		Now:            opts.Now,
+		Location:       opts.Location,
 	})
 	r.checker = notify.NewCheckerErrors(notify.CheckerOptions{
 		Host:     opts.Host,
@@ -266,9 +277,41 @@ func New(opts Options) *Runner {
 		Marks:    r.marks,
 		Logger:   opts.Logger,
 		Now:      opts.Now,
+		Location: opts.Location,
 	})
+	r.own = ownPersisters(r)
 
 	return r
+}
+
+// withDefaults fills the unset options with their defaults.
+func withDefaults(opts Options) Options {
+	if opts.Now == nil {
+		opts.Now = time.Now
+	}
+	if opts.Location == nil {
+		opts.Location = time.Local //nolint:gosmopolitan // "since" times are shown in the host's wall-clock time
+	}
+	if opts.Logger == nil {
+		opts.Logger = zap.NewNop()
+	}
+	if opts.Concurrency <= 0 {
+		opts.Concurrency = DefaultConcurrency
+	}
+	if opts.RunBudget <= 0 {
+		opts.RunBudget = MaxRunTime
+	}
+	if opts.TickBudget <= 0 {
+		opts.TickBudget = MaxTickTime
+	}
+	if opts.TelegramFailingAfter <= 0 {
+		opts.TelegramFailingAfter = DefaultTelegramFailingAfter
+	}
+	if opts.MaintenanceMaxHold <= 0 {
+		opts.MaintenanceMaxHold = DefaultMaintenanceMaxHold
+	}
+
+	return opts
 }
 
 // Name implements app.Worker.
@@ -277,9 +320,11 @@ func (*Runner) Name() string { return WorkerName }
 // Duration implements app.Worker.
 func (*Runner) Duration() time.Duration { return Tick }
 
-// Do runs one tick: heartbeat first, then inside a quiet window only its
-// checker errors and a checkpoint; otherwise network first, the other due
-// checks, flush, dispatch, checkpoint.
+// Do runs one tick: heartbeat first, then network first, the other due
+// checks, flush, dispatch, checkpoint. Inside a quiet window (maintenance or
+// boot grace) the checks set to pause (Check.PauseInQuiet) are not run and
+// the weekly job waits; every other step is the same, the daily job included
+// (FR-026, R15).
 // The tick sends nothing before its runs end; its deliveries (not Load, the
 // daily job or the checkpoint) then end by its TickBudget, so a hung run never
 // leaves them without a window and a slow channel never delays the next
@@ -294,12 +339,10 @@ func (r *Runner) Do(ctx context.Context) error {
 	loaded := r.Load(ctx) == nil
 
 	reason := r.quietReason(c)
+	quiet := reason != ""
 	r.mu.Lock()
 	r.quiet = reason
 	r.mu.Unlock()
-	if reason != "" {
-		return r.quietTick(ctx, c, loaded)
-	}
 
 	if loaded {
 		r.restoreSchedule()
@@ -307,7 +350,7 @@ func (r *Runner) Do(ctx context.Context) error {
 	if len(r.opts.Fixes) > 0 {
 		c.before = r.engine.Conditions()
 	}
-	if !r.runChecks(ctx, c) {
+	if !r.runChecks(ctx, c, quiet) {
 		_, endSends := r.beginSends(ctx)
 		defer endSends()
 		r.saveInterruptedFixes(ctx, c, loaded)
@@ -316,7 +359,9 @@ func (r *Runner) Do(ctx context.Context) error {
 	}
 	r.takeFixes(c)
 	// The daily job runs before the flush, so a queued message it expires is
-	// never sent.
+	// never sent. It is local store work and judges nothing, so it runs in a
+	// quiet window too: a long window never delivers a message past its
+	// maximum age.
 	if loaded {
 		r.runDaily(ctx, c)
 	}
@@ -328,11 +373,12 @@ func (r *Runner) Do(ctx context.Context) error {
 	r.dispatch(sendCtx, c)
 	r.dispatchFixes(sendCtx, c)
 	// The weekly job pushes the summary after the older news; cut off by the
-	// tick deadline, it is retried next tick.
-	if loaded {
+	// tick deadline, it is retried next tick. It waits for a non-quiet tick.
+	if loaded && !quiet {
 		r.runWeekly(sendCtx, c)
 	}
 	r.raise(c)
+	r.noticeTelegramFailing()
 	err := r.checkpoint(ctx, c, loaded)
 
 	r.mu.Lock()
@@ -358,7 +404,7 @@ func (r *Runner) Load(ctx context.Context) error {
 	}
 	if r.opts.Store == nil {
 		r.loaded = true
-		r.restore(store.State{})
+		r.restore(r.opts.Persisters, store.State{})
 
 		return nil
 	}
@@ -371,10 +417,13 @@ func (r *Runner) Load(ctx context.Context) error {
 	}
 	r.loaded = true
 	r.loadedKV = st.KV
+	// The runner's own state goes first: the SMS fallback must never see the
+	// restored queue without the SMS-sent set.
+	r.restore(r.own, st)
 	r.engine.Merge(st.Conditions)
 	r.marks.Merge(st.RateMarks)
 	r.notifier.Merge(st.Queue)
-	r.restore(st)
+	r.restore(r.opts.Persisters, st)
 
 	return nil
 }
@@ -391,6 +440,14 @@ func (r *Runner) Snapshot() Snapshot {
 		Checks:        len(r.opts.Checks),
 		Quiet:         r.quiet,
 		StoreDegraded: degraded,
+	}
+	if !r.maint.HeldSince.IsZero() {
+		s.HeldSince = r.maint.HeldSince.In(r.opts.Location)
+	}
+	for i := range r.opts.Checks {
+		if r.opts.Checks[i].PauseInQuiet {
+			s.Paused = append(s.Paused, r.opts.Checks[i].Name)
+		}
 	}
 	if !r.lastCycle.IsZero() {
 		s.LastCycle = r.lastCycle.In(r.opts.Location)
@@ -498,25 +555,19 @@ func (r *Runner) writeHeartbeat(c *cycle) {
 	}
 }
 
-// quietTick ends a tick inside a quiet window: it runs no check, raises the
-// tick's checker errors and checkpoints, so what it raised (messages queued,
-// rate marks, alert-log records) survives a crash during a long window.
-func (r *Runner) quietTick(ctx context.Context, c *cycle, loaded bool) error {
-	_, endSends := r.beginSends(ctx)
-	defer endSends()
-	r.raise(c)
-
-	return r.checkpoint(ctx, c, loaded)
-}
-
-// quietReason probes the maintenance lock and the uptime. A probe that fails
-// is reported and does not open a quiet window.
+// quietReason probes the maintenance lock and the uptime, and observes the
+// lock for the stuck limit. A probe that fails is reported and does not open a
+// quiet window.
 func (r *Runner) quietReason(c *cycle) string {
 	held := false
 	if r.opts.Maintenance != nil {
 		var err error
 		if held, err = r.opts.Maintenance.MaintenanceHeld(); err != nil {
+			// A failed probe never opens the window, whatever it reported.
+			held = false
 			c.fail(keyMaintenance, "cannot probe maintenance lock: "+err.Error())
+		} else {
+			r.observeMaintenance(c, held)
 		}
 	}
 	grace := r.opts.BootGrace
@@ -536,13 +587,15 @@ func (r *Runner) quietReason(c *cycle) string {
 
 // runChecks runs the network check first when due, sets the notifier's
 // offline flag from its conditions, then runs the other eligible checks, all
-// within one tick deadline of RunBudget. It reports false, having applied
-// nothing more, when ctx ends (shutdown).
-func (r *Runner) runChecks(ctx context.Context, c *cycle) bool {
+// within one tick deadline of RunBudget. In a quiet tick the checks set to
+// pause are skipped and stay due. It reports false, having applied nothing
+// more, when ctx ends (shutdown).
+func (r *Runner) runChecks(ctx context.Context, c *cycle, quiet bool) bool {
 	tickCtx, cancel := context.WithTimeout(ctx, r.opts.RunBudget)
 	defer cancel()
 
-	if n := r.network; n >= 0 && !r.running[n].Load() && due(r.lastRun[n], c.now, r.opts.Checks[n].Interval) {
+	if n := r.network; n >= 0 && !r.paused(n, quiet) && !r.running[n].Load() &&
+		due(r.lastRun[n], c.now, r.opts.Checks[n].Interval) {
 		r.lastRun[n] = c.now
 		res := r.runOne(tickCtx, n)
 		if ctx.Err() != nil {
@@ -550,10 +603,12 @@ func (r *Runner) runChecks(ctx context.Context, c *cycle) bool {
 		}
 		r.apply(c, r.opts.Checks[n], res)
 	}
+	// While the network check is paused by a quiet window, its conditions
+	// (and so the offline flag) stay as they were before the window.
 	offline := r.bad(KeyRouter) || r.bad(KeyInternet)
 	r.notifier.SetOffline(offline)
 
-	batch := r.eligible(c.now, offline)
+	batch := r.eligible(c.now, offline, quiet)
 	results := r.runBatch(tickCtx, batch)
 	if ctx.Err() != nil {
 		return false
@@ -569,14 +624,14 @@ func (r *Runner) runChecks(ctx context.Context, c *cycle) bool {
 }
 
 // eligible returns the indexes of the non-network checks that are due, not
-// still in flight, and neither need the internet while offline nor depend on
-// a bad condition.
-func (r *Runner) eligible(now time.Time, offline bool) []int {
+// paused by a quiet window, not still in flight, and neither need the
+// internet while offline nor depend on a bad condition.
+func (r *Runner) eligible(now time.Time, offline, quiet bool) []int {
 	var out []int
 	for i := range r.opts.Checks {
 		chk := &r.opts.Checks[i]
 		switch {
-		case i == r.network, r.running[i].Load(), !due(r.lastRun[i], now, chk.Interval):
+		case i == r.network, r.paused(i, quiet), r.running[i].Load(), !due(r.lastRun[i], now, chk.Interval):
 		case chk.NeedsInternet && offline:
 		case chk.DependsOn != "" && r.bad(chk.DependsOn):
 		default:
@@ -585,6 +640,11 @@ func (r *Runner) eligible(now time.Time, offline bool) []int {
 	}
 
 	return out
+}
+
+// paused reports whether the check at idx is held back by a quiet tick.
+func (r *Runner) paused(idx int, quiet bool) bool {
+	return quiet && r.opts.Checks[idx].PauseInQuiet
 }
 
 // runBatch starts the checks at the given indexes in order, at most
@@ -732,7 +792,8 @@ func (r *Runner) raise(c *cycle) {
 // Until state has been loaded nothing is written (a snapshot would replace the
 // unseen stored state) and the records stay pending. A write failure is
 // reported (the store returns it once per outage) and the runner carries on
-// from memory; only a cancelled context is returned.
+// from memory; the first write that succeeds afterwards sends the recovery
+// notice (saveRecovered). Only a cancelled context is returned.
 func (r *Runner) checkpoint(ctx context.Context, c *cycle, loaded bool) error {
 	r.pendingAlerts = append(r.pendingAlerts, r.records(c)...)
 	r.pendingSamples = append(r.pendingSamples, c.samples...)
@@ -755,13 +816,31 @@ func (r *Runner) checkpoint(ctx context.Context, c *cycle, loaded bool) error {
 	err := r.opts.Store.Checkpoint(ctx, st, alerts, samples)
 	switch {
 	case err == nil:
+		// A store still degraded returns nil for every failure after the first.
+		if !r.opts.Store.Degraded() {
+			r.saveRecovered()
+		}
 	case ctx.Err() != nil:
 		return fmt.Errorf("checkpoint health state: %w", err)
 	default:
-		r.CheckerError(keySave, "cannot save state: "+err.Error())
+		if r.checker.Report(keySave, "cannot save state: "+err.Error()) {
+			r.saveReported = true
+		}
 	}
 
 	return nil
+}
+
+// saveRecovered sends the one recovery notice of a reported state-write
+// failure (FR-032, R20) through CheckerErrors.Recovered: by Telegram, and by
+// email when the failure went by email; the failure's rate marks are given
+// back, so a later failure is reported at once.
+func (r *Runner) saveRecovered() {
+	if !r.saveReported {
+		return
+	}
+	r.saveReported = false
+	r.checker.Recovered(keySave, "state can be saved again")
 }
 
 // records returns the alert-log records of this tick: clears made since the
@@ -797,9 +876,34 @@ func (r *Runner) bad(key string) bool {
 	return ok
 }
 
+// dropped handles a message dropped from the retry queue undelivered (R19):
+// it is logged, and a PROBLEM is never lost. A PROBLEM of the condition's
+// current streak, still open, reopens the condition, so the next Bad reading
+// raises it again; otherwise (an earlier streak, a new streak not yet open,
+// or resolved and no longer tracked) it is listed ahead of the next message
+// delivered to Telegram.
+func (r *Runner) dropped(m notify.QueuedMessage) {
+	r.logDrop(m)
+	if m.Kind != string(notify.KindProblem) {
+		return
+	}
+
+	// A stored CreatedAt has whole seconds, so the streak start is compared
+	// at that precision.
+	cond, ok := r.engine.Condition(m.Key)
+	current := ok && !m.CreatedAt.Before(cond.StreakStart.Truncate(time.Second))
+	if current && r.engine.Reopen(m.Key) {
+		r.opts.Logger.Info("dropped PROBLEM reopened to be raised again", zap.String("key", m.Key))
+
+		return
+	}
+	r.notifier.ListUndelivered(m)
+}
+
 func (r *Runner) logDrop(m notify.QueuedMessage) {
 	r.opts.Logger.Warn("health message dropped from the retry queue",
 		zap.Int64("id", m.ID), zap.String("channel", m.Channel),
+		zap.String("kind", m.Kind), zap.String("key", m.Key),
 		zap.Time("created_at", m.CreatedAt), zap.Int("attempts", m.Attempts))
 }
 

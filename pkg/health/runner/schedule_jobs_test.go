@@ -216,22 +216,29 @@ func TestWeeklySlotRestartBeforeAndAfter(t *testing.T) {
 	}
 }
 
-func TestJobsSkippedInQuietWindowAndRunAfter(t *testing.T) {
+// TestDailyRunsInQuietWindowWeeklyWaits: the daily job (queue expiry and
+// retention, local store work) runs in a quiet tick too, so a long window
+// cannot deliver queued messages past their maximum age; the weekly summary
+// waits for the window to end.
+func TestDailyRunsInQuietWindowWeeklyWaits(t *testing.T) {
 	st := &fakeStore{}
 	j := &jobs{}
-	f := jobFixture(st, j, t0())
-	f.maint.held = true
+	f := jobFixture(st, j, t0()) // Friday 05:00 local, before the weekly slot.
 	f.tick(t)
 
-	if len(j.daily) != 0 {
-		t.Fatal("daily ran inside a quiet window")
+	f.maint.held = true
+	f.now = time.Date(2026, 1, 3, 5, 0, 0, 0, zone()) // Next day, past the slot.
+	f.tick(t)
+
+	if len(j.daily) != 2 || len(j.weekly) != 0 {
+		t.Fatalf("daily %d (want 2), weekly %d (want 0) inside the window", len(j.daily), len(j.weekly))
 	}
 
 	f.maint.held = false
 	f.next(t)
 
-	if len(j.daily) != 1 {
-		t.Fatalf("daily ran %d times after the window, want 1", len(j.daily))
+	if len(j.daily) != 2 || len(j.weekly) != 1 {
+		t.Fatalf("daily %d (want 2), weekly %d (want 1) after the window", len(j.daily), len(j.weekly))
 	}
 }
 

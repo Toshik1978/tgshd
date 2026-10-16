@@ -270,3 +270,69 @@ func TestZeroVerdictIsUnknown(t *testing.T) {
 		t.Fatalf("zero-verdict reading resolved: %v", alerts)
 	}
 }
+
+func TestReopen(t *testing.T) {
+	t0 := start()
+	th := 2 * time.Minute
+
+	open := func() *Engine {
+		e := NewEngine()
+		for i := range 3 {
+			e.Apply(t0.Add(time.Duration(i)*iv), "c", iv, th, rd(Bad, "x"))
+		}
+		return e
+	}
+
+	t.Run("open condition is reopened and keeps its streak", func(t *testing.T) {
+		e := open()
+		before, _ := e.Condition(key)
+		if !before.Open {
+			t.Fatal("setup: condition not open")
+		}
+		if !e.Reopen(key) {
+			t.Fatal("Reopen reported false for an open condition")
+		}
+		c, ok := e.Condition(key)
+		if !ok || c.Open || !c.OpenedAt.IsZero() {
+			t.Fatalf("not reopened: %+v", c)
+		}
+		if !c.StreakStart.Equal(before.StreakStart) || c.BadFor != before.BadFor {
+			t.Fatalf("streak or BadFor changed: %+v vs %+v", c, before)
+		}
+	})
+
+	t.Run("next bad reading raises the problem at once", func(t *testing.T) {
+		e := open()
+		e.Reopen(key)
+		got := e.Apply(t0.Add(3*iv), "c", iv, th, rd(Bad, "x"))
+		if len(got) != 1 || got[0].Kind != AlertProblem {
+			t.Fatalf("got %v", got)
+		}
+	})
+
+	t.Run("good reading resolves silently", func(t *testing.T) {
+		e := open()
+		e.Reopen(key)
+		if got := e.Apply(t0.Add(3*iv), "c", iv, th, rd(Good, "ok")); len(got) != 0 {
+			t.Fatalf("unexpected alerts %v", got)
+		}
+		if _, ok := e.Condition(key); ok {
+			t.Fatal("condition still tracked")
+		}
+	})
+
+	t.Run("unopened or untracked is a no-op", func(t *testing.T) {
+		e := NewEngine()
+		if e.Reopen(key) {
+			t.Fatal("untracked key reported true")
+		}
+		e.Apply(t0, "c", iv, th, rd(Bad, "x"))
+		before, _ := e.Condition(key)
+		if e.Reopen(key) {
+			t.Fatal("not-open condition reported true")
+		}
+		if after, _ := e.Condition(key); after != before {
+			t.Fatalf("changed: %+v vs %+v", after, before)
+		}
+	})
+}

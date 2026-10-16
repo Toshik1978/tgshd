@@ -326,7 +326,7 @@ func TestQuietWindowsStillWriteHeartbeat(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			c := newFakeCheck(nil, "ups", reading("ups/main", health.Bad, "on battery"))
-			f := newFixture(t, &fakeStore{}, checkOf(c))
+			f := newFixture(t, &fakeStore{}, pausing(c))
 			f.maint.held, f.up.up = tt.held, tt.uptime
 
 			f.tick(t)
@@ -373,7 +373,11 @@ func TestNetworkFirstOfflineSkipAndFlushBeforeDispatch(t *testing.T) {
 	if got := order.get(); len(got) != 2 || got[0] != "network" || got[1] != "disk" {
 		t.Fatalf("run order = %v, want [network disk] (web skipped while offline)", got)
 	}
-	wantSMS := []string{host + ": PROBLEM: internet unreachable (since 05:00)"}
+	// The disk PROBLEM queued while offline goes by SMS too (FR-030).
+	wantSMS := []string{
+		host + ": PROBLEM: internet unreachable (since 05:00)",
+		host + ": PROBLEM: disk failing (since 05:00)",
+	}
 	if got := f.sms.texts(); !slices.Equal(got, wantSMS) {
 		t.Fatalf("sms = %q, want %q", got, wantSMS)
 	}
@@ -1276,5 +1280,376 @@ func TestNestedPlainErrorKeepsRunErrorKey(t *testing.T) {
 				t.Fatalf("a plain error was lost: %q", tlg)
 			}
 		})
+	}
+}
+
+// expireAll drops every queued message as the daily 7-day expiry would.
+func (f *fixture) expireAll(t *testing.T) {
+	t.Helper()
+
+	if dropped := f.r.ExpireQueue(f.now.Add(8*24*time.Hour), 7*24*time.Hour); len(dropped) == 0 {
+		t.Fatal("nothing was queued to drop")
+	}
+}
+
+const undeliveredLine = "Undelivered earlier:\nPROBLEM: a hot (since 05:00), no longer open\n\n"
+
+// TestDroppedProblemReopens: a PROBLEM dropped undelivered while its
+// condition is still open leaves the condition not open, so the next Bad
+// reading raises it again (US2 acc. 3, SC-005).
+func TestDroppedProblemReopens(t *testing.T) {
+	c := newFakeCheck(nil, "disks", reading("disks/a", health.Bad, "a hot"))
+	f := newFixture(t, &fakeStore{}, checkOf(c))
+	f.tlg.setFail(true)
+	f.sms.setFail(true)
+	f.tick(t)
+	f.expireAll(t)
+
+	f.tlg.setFail(false)
+	f.next(t)
+
+	got := f.tlg.texts()
+	if want := host + ": PROBLEM: a hot (since 05:00)"; !slices.Equal(got, []string{want}) {
+		t.Fatalf("sent = %q, want the PROBLEM raised again: %q", got, want)
+	}
+}
+
+// TestDroppedProblemNewStreakListed: a PROBLEM dropped undelivered after its
+// condition resolved and started a new streak is listed ahead of the next
+// message delivered to Telegram, once.
+func TestDroppedProblemNewStreakListed(t *testing.T) {
+	c := newFakeCheck(nil, "disks", reading("disks/a", health.Bad, "a hot"))
+	chk := checkOf(c)
+	chk.Threshold = 2 * Tick
+	f := newFixture(t, &fakeStore{}, chk)
+	f.tlg.setFail(true)
+	f.sms.setFail(true)
+	f.tick(t)
+	f.next(t)
+	f.next(t) // PROBLEM, queued.
+	c.set(reading("disks/a", health.Good, "a ok"))
+	f.next(t) // RESOLVED, queued.
+	c.set(reading("disks/a", health.Bad, "a hot"))
+	f.next(t) // A new streak, not open yet.
+	if cond, ok := f.r.engine.Condition("disks/a"); !ok || cond.Open {
+		t.Fatalf("condition = %+v, %v; want tracked and not open", cond, ok)
+	}
+	f.expireAll(t)
+
+	f.tlg.setFail(false)
+	f.r.Push(context.Background(), "test", "first", "first")
+	f.r.Push(context.Background(), "test", "second", "second")
+
+	want := []string{undeliveredLine + host + ": first", host + ": second"}
+	if got := f.tlg.texts(); !slices.Equal(got, want) {
+		t.Fatalf("sent = %q, want %q", got, want)
+	}
+	if cond, _ := f.r.engine.Condition("disks/a"); cond.Open {
+		t.Fatal("listing the dropped PROBLEM opened the new streak")
+	}
+}
+
+// TestDroppedResolvedListed: a PROBLEM dropped undelivered after its
+// condition resolved (no longer tracked) is listed ahead of the next message
+// delivered to Telegram; a failed delivery keeps it listed.
+func TestDroppedResolvedListed(t *testing.T) {
+	c := newFakeCheck(nil, "disks", reading("disks/a", health.Bad, "a hot"))
+	f := newFixture(t, &fakeStore{}, checkOf(c))
+	f.tlg.setFail(true)
+	f.sms.setFail(true)
+	f.tick(t)
+	c.set(reading("disks/a", health.Good, "a ok"))
+	f.next(t)
+	if _, ok := f.r.engine.Condition("disks/a"); ok {
+		t.Fatal("condition still tracked after it resolved")
+	}
+	f.expireAll(t)
+
+	f.r.Push(context.Background(), "test", "lost", "lost") // Fails, queued.
+	f.tlg.setFail(false)
+	f.r.Push(context.Background(), "test", "first", "first")
+	f.r.Push(context.Background(), "test", "second", "second")
+
+	want := []string{undeliveredLine + host + ": first", host + ": second"}
+	if got := f.tlg.texts(); !slices.Equal(got, want) {
+		t.Fatalf("sent = %q, want %q", got, want)
+	}
+}
+
+// TestDroppedStaleStreakListed: a PROBLEM of an earlier streak dropped while
+// a later streak of its condition is open is listed, not reopened, so the
+// later streak is not announced twice.
+func TestDroppedStaleStreakListed(t *testing.T) {
+	c := newFakeCheck(nil, "disks", reading("disks/a", health.Bad, "a hot"))
+	f := newFixture(t, &fakeStore{}, checkOf(c))
+	f.tlg.setFail(true)
+	f.sms.setFail(true)
+	f.tick(t) // PROBLEM1, queued.
+	c.set(reading("disks/a", health.Good, "a ok"))
+	f.next(t) // RESOLVED1, queued.
+	c.set(reading("disks/a", health.Bad, "a hot"))
+	f.next(t) // PROBLEM2, queued; the condition is open again.
+
+	// Drop PROBLEM1 only.
+	dropped := f.r.ExpireQueue(f.now, f.now.Sub(t0())-time.Second)
+	if len(dropped) != 1 || dropped[0].Kind != string(notify.KindProblem) {
+		t.Fatalf("dropped = %+v, want PROBLEM1 only", dropped)
+	}
+	if cond, _ := f.r.engine.Condition("disks/a"); !cond.Open {
+		t.Fatal("the drop of an earlier streak's PROBLEM reopened the current streak")
+	}
+
+	f.tlg.setFail(false)
+	f.next(t)
+	f.next(t)
+
+	got := f.tlg.texts()
+	if n := countContaining(got, "no longer open"); n != 1 {
+		t.Fatalf("sent = %q, want PROBLEM1 listed once", got)
+	}
+	if n := countContaining(got, host+": PROBLEM: a hot"); n != 1 {
+		t.Fatalf("sent = %q, want PROBLEM2 sent once", got)
+	}
+}
+
+// TestTrimmedProblemListed: a PROBLEM at the head of a queue trimmed at
+// MaxQueue (here a stored queue without the plain text, whose condition is no
+// longer tracked) is listed ahead of the next message delivered to Telegram.
+func TestTrimmedProblemListed(t *testing.T) {
+	queue := make([]notify.QueuedMessage, 0, notify.MaxQueue+1)
+	queue = append(queue, notify.QueuedMessage{
+		ID: 1, CreatedAt: t0(), Channel: notify.ChannelTelegram, Kind: string(notify.KindProblem),
+		Check: "disks", Key: "disks/a", Text: host + ": PROBLEM: a hot (since 05:00)",
+	})
+	for i := range notify.MaxQueue {
+		queue = append(queue, notify.QueuedMessage{
+			ID: int64(
+				i + 2,
+			),
+			CreatedAt: t0(),
+			Channel:   notify.ChannelTelegram,
+			Kind:      string(notify.KindEvent),
+			Text:      "x",
+		})
+	}
+	f := newFixture(t, &fakeStore{state: store.State{Queue: queue}})
+	if err := f.r.Load(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	f.r.Push(context.Background(), "test", "first", "first")
+
+	if got := f.tlg.texts(); len(got) != 1 || got[0] != undeliveredLine+host+": first" {
+		t.Fatalf("sent = %q, want the trimmed PROBLEM listed ahead of the first message", got)
+	}
+}
+
+// TestStoreRecoveryNotice: once a reported state-write failure ends, one
+// recovery notice goes out (US2 acc. 7, FR-032), by Telegram, and by email
+// when the failure went by email; the failure's rate marks are given back,
+// so a new failure is reported at once.
+func TestStoreRecoveryNotice(t *testing.T) {
+	const (
+		failText    = host + ": CHECKER ERROR: health: cannot save state"
+		recoverText = host + ": CHECKER OK: health: state can be saved again"
+	)
+	tests := []struct {
+		name  string
+		mail  bool
+		email int // recovery notices by email
+	}{
+		{"telegram only", false, 0},
+		{"failure went by email", true, 1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			st := &fakeStore{}
+			mailer := &fakeMailer{}
+			c := newFakeCheck(nil, "ups", reading("ups/main", health.Good, ""))
+			f := newFixture(t, st, checkOf(c))
+			if tt.mail {
+				f = mailFixture(t, st, mailer, checkOf(c))
+			}
+			setFail := func(fail bool) {
+				st.mu.Lock()
+				st.fail = fail
+				st.mu.Unlock()
+			}
+
+			f.tick(t)
+			if n := countContaining(f.tlg.texts(), recoverText); n != 0 {
+				t.Fatalf("recovery notice sent %d times without a failure", n)
+			}
+
+			setFail(true)
+			f.next(t)
+			f.next(t) // Still failing: the store returns nil while degraded.
+			if n := countContaining(f.tlg.texts(), recoverText); n != 0 {
+				t.Fatalf("telegram = %q, want no recovery notice while the store is degraded", f.tlg.texts())
+			}
+			if n := countContaining(mailer.bodies, recoverText); n != 0 {
+				t.Fatalf("emails = %q, want no recovery notice while the store is degraded", mailer.bodies)
+			}
+			setFail(false)
+			f.next(t)
+			f.next(t)
+
+			if n := countContaining(f.tlg.texts(), recoverText); n != 1 {
+				t.Fatalf("telegram = %q, want one recovery notice", f.tlg.texts())
+			}
+			if n := countContaining(mailer.bodies, recoverText); n != tt.email {
+				t.Fatalf("emails = %q, want %d recovery notices", mailer.bodies, tt.email)
+			}
+			for _, m := range f.r.marks.Export() {
+				if m.Key == keySave {
+					t.Fatalf("rate mark %+v kept after the recovery", m)
+				}
+			}
+
+			setFail(true)
+			f.next(t)
+			if n := countContaining(f.tlg.texts(), failText); n != 2 {
+				t.Fatalf("telegram = %q, want the new failure reported at once", f.tlg.texts())
+			}
+		})
+	}
+}
+
+// pausing returns the check of c set to pause in quiet windows.
+func pausing(c *fakeCheck) health.Check {
+	chk := checkOf(c)
+	chk.PauseInQuiet = true
+
+	return chk
+}
+
+// TestHardwareRunsInMaintenance: while the maintenance lock is held, a check
+// not set to pause (disks by default) runs and its PROBLEM goes out in the
+// same tick (US2 acc. 4, SC-006); a check set to pause (containers by
+// default) is not judged and runs once the window ends; queued messages are
+// flushed and the tick checkpoints as a normal one (FR-026, R15).
+func TestHardwareRunsInMaintenance(t *testing.T) {
+	disks := newFakeCheck(nil, "disks", reading("disks/TEST0000000001/reallocated", health.Good, ""))
+	ctrs := newFakeCheck(nil, "containers", reading("containers/app", health.Good, ""))
+	f := newFixture(t, &fakeStore{}, checkOf(disks), pausing(ctrs))
+	f.tick(t)
+
+	f.maint.held = true
+	f.tlg.setFail(true)
+	f.r.Push(context.Background(), "ups", "queued in the window", "queued")
+	f.tlg.setFail(false)
+	disks.set(reading("disks/TEST0000000001/reallocated", health.Bad, "reallocated sectors rose to 8"))
+	ctrs.set(reading("containers/app", health.Bad, "app is down"))
+	f.next(t)
+
+	if f.r.Snapshot().Quiet != health.ReasonMaintenance {
+		t.Fatal("the tick was not quiet")
+	}
+	if disks.count() != 2 || ctrs.count() != 1 {
+		t.Fatalf("runs: disks %d (want 2), containers %d (want 1, not in the window)", disks.count(), ctrs.count())
+	}
+	texts := f.tlg.texts()
+	if countContaining(texts, "PROBLEM: reallocated sectors rose to 8") != 1 ||
+		countContaining(texts, "app is down") != 0 {
+		t.Fatalf("telegram = %q, want the drive PROBLEM and nothing about the container", texts)
+	}
+	if countContaining(texts, "queued in the window") != 1 {
+		t.Fatalf("telegram = %q, want the queued message flushed", texts)
+	}
+	f.st.mu.Lock()
+	conds := slices.Clone(f.st.state.Conditions)
+	f.st.mu.Unlock()
+	if len(conds) != 1 || conds[0].Key != "disks/TEST0000000001/reallocated" {
+		t.Fatalf("checkpointed conditions = %+v, want the drive condition", conds)
+	}
+
+	f.maint.held = false
+	f.next(t)
+	if ctrs.count() != 2 || countContaining(f.tlg.texts(), "PROBLEM: app is down") != 1 {
+		t.Fatalf("containers ran %d times, telegram = %q, want it judged after the window",
+			ctrs.count(), f.tlg.texts())
+	}
+}
+
+// TestBootGraceHardware: in the boot-grace window after a reboot, the
+// temperatures check (not set to pause) is judged and alerts at once, while
+// the network check (set to pause) does not run (FR-026, SC-006).
+func TestBootGraceHardware(t *testing.T) {
+	order := &orderLog{}
+	netw := newFakeCheck(order, "network", reading(KeyRouter, health.Bad, "router down"))
+	temps := newFakeCheck(order, "temperatures", reading("temperatures/cpu/package0", health.Bad, "CPU at 99°C"))
+	f := newFixture(t, &fakeStore{}, pausing(netw), checkOf(temps))
+	f.up.up = time.Minute
+
+	f.tick(t)
+
+	if f.r.Snapshot().Quiet != health.ReasonBootGrace {
+		t.Fatal("the tick was not quiet")
+	}
+	if got := order.get(); !slices.Equal(got, []string{"temperatures"}) {
+		t.Fatalf("runs = %q, want only the temperatures check", got)
+	}
+	if got := f.tlg.texts(); countContaining(got, "PROBLEM: CPU at 99°C") != 1 || countContaining(got, "router") != 0 {
+		t.Fatalf("telegram = %q, want the temperature PROBLEM only", got)
+	}
+	if f.st.checkpoints != 1 {
+		t.Fatalf("checkpoints = %d, want 1", f.st.checkpoints)
+	}
+}
+
+// TestNoStoreRecoveryNoticeForAnUnreportedFailure: a state-write failure held
+// back by its rate limit was never told to the operator, so its end sends no
+// recovery notice.
+func TestNoStoreRecoveryNoticeForAnUnreportedFailure(t *testing.T) {
+	st := &fakeStore{state: store.State{RateMarks: []health.RateMark{
+		{Key: keySave, Channel: notify.ChannelTelegram, LastSentAt: t0().Add(-time.Hour)},
+	}}}
+	c := newFakeCheck(nil, "ups", reading("ups/main", health.Good, ""))
+	f := newFixture(t, st, checkOf(c))
+	f.tick(t)
+
+	st.mu.Lock()
+	st.fail = true
+	st.mu.Unlock()
+	f.next(t)
+	st.mu.Lock()
+	st.fail = false
+	st.mu.Unlock()
+	f.next(t)
+
+	if got := f.tlg.texts(); len(got) != 0 {
+		t.Fatalf("telegram = %q, want neither the rate-limited failure nor a recovery notice", got)
+	}
+}
+
+// TestSnapshotPaused: the snapshot lists the configured checks set to pause
+// in quiet windows, in configuration order, and since when the maintenance
+// lock is held while it is (FR-026, FR-027, R15).
+func TestSnapshotPaused(t *testing.T) {
+	disks := newFakeCheck(nil, "disks", reading("disks/TEST0000000001/reallocated", health.Good, ""))
+	ctrs := newFakeCheck(nil, "containers", reading("containers/app", health.Good, ""))
+	ups := newFakeCheck(nil, "ups", reading("ups/status", health.Good, ""))
+	f := newFixture(t, &fakeStore{}, pausing(ctrs), checkOf(disks), pausing(ups))
+
+	if got := f.r.Snapshot().Paused; !slices.Equal(got, []string{"containers", "ups"}) {
+		t.Fatalf("paused = %q, want containers and ups", got)
+	}
+
+	f.maint.held = true
+	f.tick(t)
+	f.next(t)
+	if got := f.r.Snapshot().HeldSince; !got.Equal(t0()) || got.Location().String() != zone().String() {
+		t.Fatalf("held since = %v, want %v in the host zone", got, t0())
+	}
+
+	f.maint.held = false
+	f.next(t)
+	if got := f.r.Snapshot().HeldSince; !got.IsZero() {
+		t.Fatalf("held since = %v after the lock was freed, want zero", got)
+	}
+
+	if got := newFixture(t, &fakeStore{}, checkOf(disks)).r.Snapshot().Paused; len(got) != 0 {
+		t.Fatalf("paused = %q, want none", got)
 	}
 }

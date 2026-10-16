@@ -9,7 +9,16 @@ import (
 // Default values for every section, as shown in the configuration contract.
 
 func common(interval, threshold time.Duration, mode Mode) Common {
-	return Common{Interval: Duration(interval), Threshold: Duration(threshold), Mode: mode}
+	return Common{Interval: Duration(interval), Threshold: Duration(threshold), Mode: mode, PauseInQuietWindows: true}
+}
+
+// hardwareCommon is common for the hardware checks, which keep running through
+// quiet windows unless pause_in_quiet_windows is set.
+func hardwareCommon(interval, threshold time.Duration, mode Mode) Common {
+	c := common(interval, threshold, mode)
+	c.PauseInQuietWindows = false
+
+	return c
 }
 
 func defaultGeneral() General {
@@ -18,6 +27,9 @@ func defaultGeneral() General {
 		HeartbeatFile: "/run/tgshd/heartbeat",
 		BootGrace:     Duration(10 * time.Minute),
 		Concurrency:   4,
+
+		MaintenanceMaxHold:   Duration(6 * time.Hour),
+		TelegramFailingAfter: Duration(15 * time.Minute),
 	}
 }
 
@@ -35,7 +47,7 @@ func defaultUPS() UPS {
 
 func defaultDisks() Disks {
 	return Disks{
-		Common:            common(15*time.Minute, 0, ModeTLG),
+		Common:            hardwareCommon(15*time.Minute, 0, ModeTLG),
 		WearPercent:       80,
 		SelftestMaxAge:    Duration(40 * day),
 		SpareFloorPercent: 20,
@@ -45,7 +57,7 @@ func defaultDisks() Disks {
 
 func defaultTemperatures() Temperatures {
 	return Temperatures{
-		Common:         common(15*time.Minute, 0, ModeTLG),
+		Common:         hardwareCommon(15*time.Minute, 0, ModeTLG),
 		Limits:         Limits{CPU: 90, DriveNVMe: 60, DriveSATA: 60, GPU: 85, Board: 75},
 		LimitsBySerial: map[string]int{},
 		BoardSensors:   []BoardSensor{},
@@ -53,7 +65,7 @@ func defaultTemperatures() Temperatures {
 }
 
 func defaultKernel() Kernel {
-	return Kernel{Common: common(15*time.Minute, 0, ModeTLG)}
+	return Kernel{Common: hardwareCommon(15*time.Minute, 0, ModeTLG)}
 }
 
 func defaultContainers() Containers {

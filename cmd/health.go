@@ -331,6 +331,9 @@ func runnerOptions(
 		Mailer:      d.mailer,
 		Logger:      logger,
 		WeeklySlot:  weeklySlot(hs.Config.Summary, logger),
+
+		MaintenanceMaxHold:   g.MaintenanceMaxHold.Duration(),
+		TelegramFailingAfter: g.TelegramFailingAfter.Duration(),
 	}
 	if g.MaintenanceLock != "" {
 		opts.Maintenance = maintenanceFile(g.MaintenanceLock)
@@ -440,6 +443,7 @@ func newCheck(name string, c hcfg.Common, run func(context.Context) health.Check
 		Threshold:     c.Threshold.Duration(),
 		Mode:          health.Mode(c.Mode),
 		NeedsInternet: c.NeedsInternet,
+		PauseInQuiet:  c.PauseInQuietWindows,
 		Run:           run,
 	}
 }

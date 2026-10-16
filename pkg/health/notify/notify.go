@@ -88,11 +88,16 @@ type QueuedMessage struct {
 	Channel   string
 	Text      string
 	Attempts  int
-	// Kind is "problem", "resolved" or "event"; the zero value reads as "event".
+	// Kind is "problem", "resolved" or "event"; the notifier always sets it.
 	Kind string
 	// Check and Key identify the condition a problem or resolved message is about.
 	Check string
 	Key   string
+	// Plain is the message's own text, without host prefix, label or since,
+	// and Since its streak start; both are set at enqueue and persisted (zero
+	// for messages restored from a store older than migration 3).
+	Plain string
+	Since time.Time
 }
 
 // Options configures a Notifier.
@@ -106,10 +111,14 @@ type Options struct {
 	SMS Sender
 	// OnCheckerError is called once when mode sms degrades to tlg.
 	OnCheckerError func(key, text string)
-	// OnDrop is called for every message dropped from a full queue.
+	// OnDrop is called for every message dropped from the queue undelivered
+	// (trimmed at MaxQueue or expired), outside the notifier's lock.
 	OnDrop func(QueuedMessage)
 	// Now defaults to time.Now.
 	Now func() time.Time
+	// Location is the host's zone, in which the since of a listed
+	// undelivered PROBLEM is read back; defaults to time.Local.
+	Location *time.Location
 }
 
 // Notifier formats, routes and queues pushed messages.
@@ -121,9 +130,29 @@ type Notifier struct {
 	nextID   int64
 	offline  bool
 	degraded bool
+	// telegram is the delivery health of the Telegram channel (R17).
+	telegram ChannelHealth
+	// telegramOK is set once a Telegram send succeeded: a stored failure
+	// restored afterwards is over.
+	telegramOK bool
+	// smsProblems are the condition keys whose PROBLEM went by SMS through
+	// the fallback (R18).
+	smsProblems SMSProblems
+	// resolvedBefore maps a condition key to the first queue ID after its
+	// latest RESOLVED: a PROBLEM of that key queued with a lower ID is
+	// resolved and never goes by SMS through the fallback.
+	resolvedBefore map[string]int64
 	// inflight are the queued messages whose abandoned send is still in
 	// progress, by ID.
 	inflight map[int64]*flight
+	// undelivered are the dropped PROBLEMs listed ahead of the next message
+	// delivered to Telegram (R19).
+	undelivered Undelivered
+	// showing is set while a Telegram send carries the undelivered prefix,
+	// so a concurrent send does not show (and acknowledge) the same items;
+	// held is the number of items it shows.
+	showing bool
+	held    int
 }
 
 // New creates a Notifier.
@@ -136,7 +165,11 @@ func New(opts Options) *Notifier {
 		opts.Now = time.Now
 	}
 
-	return &Notifier{opts: opts, nextID: 1, inflight: map[int64]*flight{}}
+	if opts.Location == nil {
+		opts.Location = time.Local //nolint:gosmopolitan // "since" times are the host's wall-clock time
+	}
+
+	return &Notifier{opts: opts, nextID: 1, inflight: map[int64]*flight{}, resolvedBefore: map[string]int64{}}
 }
 
 // SetOffline marks the outside as known down: Telegram messages are queued
@@ -146,6 +179,36 @@ func (n *Notifier) SetOffline(offline bool) {
 	defer n.mu.Unlock()
 
 	n.offline = offline
+}
+
+// TelegramHealth returns the delivery health of the Telegram channel.
+func (n *Notifier) TelegramHealth() ChannelHealth {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	return n.telegram
+}
+
+// MarkTelegramReported records that the notice of the Telegram failure that
+// began at since went out. It does nothing when Telegram is OK or failing
+// since another moment (it recovered and failed again meanwhile).
+func (n *Notifier) MarkTelegramReported(since time.Time) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	if n.telegram.FailingSince.Equal(since) {
+		n.telegram.MarkReported()
+	}
+}
+
+// ListUndelivered lists a PROBLEM dropped from the queue undelivered whose
+// condition is no longer open: its plain text and since go ahead of the next
+// message delivered to Telegram, and stay listed until one has shown them.
+func (n *Notifier) ListUndelivered(item QueuedMessage) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	n.undelivered.Add(undeliveredFrom(item, n.opts.Host, n.opts.Location, n.opts.Now()))
 }
 
 // Notify delivers a message. Failed deliveries are queued, so the returned
@@ -163,14 +226,23 @@ func (n *Notifier) Notify(ctx context.Context, msg Message) error {
 		hook(SMSUnavailableKey, "SMS alerts are configured but no SMS backend is available; using Telegram")
 	}
 
+	viaSMS := false
+
 	switch mode {
 	case ModeSMS:
-		n.sendSMS(ctx, plain)
+		n.sendSMS(ctx, msg, plain)
+		viaSMS = true
 	case ModeTelegramOrSMS:
-		n.sendTelegramOrSMS(ctx, plain, rich, offline)
+		viaSMS = n.sendTelegramOrSMS(ctx, msg, plain, rich, offline)
 	case ModeTelegram:
-		n.sendTelegram(ctx, rich, offline)
+		n.sendTelegram(ctx, msg, rich, offline)
 	}
+
+	if msg.Kind == KindResolved {
+		n.resolvedBySMS(ctx, msg, plain, viaSMS)
+	}
+
+	n.smsFallback(ctx)
 
 	return nil
 }
@@ -194,7 +266,8 @@ func (n *Notifier) Flush(ctx context.Context) {
 		blocked[ChannelSMS] = true
 	}
 
-	for _, item := range pending {
+	for i := range pending {
+		item := &pending[i]
 		if blocked[item.Channel] {
 			continue
 		}
@@ -205,7 +278,11 @@ func (n *Notifier) Flush(ctx context.Context) {
 			continue
 		}
 
-		if err := n.send(ctx, item.Channel, item.Text); err != nil {
+		err := n.send(ctx, item.Channel, item.Text)
+		if item.Channel == ChannelTelegram {
+			n.telegramSent(err)
+		}
+		if err != nil {
 			blocked[item.Channel] = true
 
 			n.bumpAttempts(item.ID)
@@ -216,6 +293,8 @@ func (n *Notifier) Flush(ctx context.Context) {
 
 		n.remove(item.ID)
 	}
+
+	n.smsFallback(ctx)
 }
 
 // Export returns a copy of the retry queue for persistence.
@@ -233,9 +312,11 @@ func (n *Notifier) Restore(items []QueuedMessage) {
 	n.queue = append([]QueuedMessage(nil), items...)
 	n.inflight = map[int64]*flight{}
 
-	for _, item := range items {
+	for i := range items {
+		item := &items[i]
 		n.nextID = max(n.nextID, item.ID+1)
 	}
+	n.moveResolvedLocked(nil)
 
 	dropped := n.trim()
 	n.mu.Unlock()
@@ -252,13 +333,15 @@ func (n *Notifier) Merge(stored []QueuedMessage) {
 	n.mu.Lock()
 
 	var top int64
-	for _, item := range stored {
+	for i := range stored {
+		item := &stored[i]
 		top = max(top, item.ID)
 	}
 
 	merged := append([]QueuedMessage(nil), stored...)
 	ids := make(map[int64]int64, len(n.queue))
-	for _, item := range n.queue {
+	for i := range n.queue {
+		item := n.queue[i]
 		top++
 		ids[item.ID] = top
 		item.ID = top
@@ -268,6 +351,7 @@ func (n *Notifier) Merge(stored []QueuedMessage) {
 
 	n.queue = merged
 	n.nextID = max(n.nextID, top+1)
+	n.moveResolvedLocked(ids)
 	dropped := n.trim()
 	n.mu.Unlock()
 
@@ -282,11 +366,12 @@ func (n *Notifier) Expire(now time.Time, maxAge time.Duration) []QueuedMessage {
 
 	n.mu.Lock()
 	var dropped, kept []QueuedMessage
-	for _, item := range n.queue {
+	for i := range n.queue {
+		item := &n.queue[i]
 		if item.CreatedAt.Before(cutoff) {
-			dropped = append(dropped, item)
+			dropped = append(dropped, *item)
 		} else {
-			kept = append(kept, item)
+			kept = append(kept, *item)
 		}
 	}
 	n.queue = kept
@@ -297,17 +382,109 @@ func (n *Notifier) Expire(now time.Time, maxAge time.Duration) []QueuedMessage {
 	return dropped
 }
 
-func (n *Notifier) send(ctx context.Context, channel, text string) error {
-	sender := n.opts.Telegram
-	if channel == ChannelSMS {
-		sender = n.opts.SMS
+// telegramSent records the outcome of a Telegram send: nil is a success, any
+// other error a failure, except a refusal past the tick's delivery deadline,
+// which says nothing about Telegram.
+func (n *Notifier) telegramSent(err error) {
+	if errors.Is(err, ErrPastDeadline) {
+		return
 	}
 
-	if err := sender.Send(ctx, text); err != nil {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	n.telegramSentLocked(err)
+}
+
+// telegramSentLocked is telegramSent for a caller that holds the lock.
+func (n *Notifier) telegramSentLocked(err error) {
+	if err == nil {
+		n.telegram.Succeed()
+		n.telegramOK = true
+	} else {
+		n.telegram.Fail(n.opts.Now())
+	}
+}
+
+func (n *Notifier) send(ctx context.Context, channel, text string) error {
+	var err error
+	if channel == ChannelSMS {
+		err = n.opts.SMS.Send(ctx, text)
+	} else {
+		err = n.sendTelegramText(ctx, text)
+	}
+
+	if err != nil {
 		return fmt.Errorf("send %s: %w", channel, err)
 	}
 
 	return nil
+}
+
+// sendTelegramText sends one Telegram message with the undelivered prefix
+// ahead of it, as much as fits the message limit; a successful send
+// acknowledges what the prefix showed. An abandoned send holds the prefix
+// until its result: the returned AbandonedError carries that result on to
+// the caller once the prefix is settled. The caller wraps the error.
+func (n *Notifier) sendTelegramText(ctx context.Context, text string) error {
+	prefix, shown, held := n.takePrefix(MaxMessageUnits - utf16Len(text))
+	err := n.opts.Telegram.Send(ctx, prefix+text)
+	if !held {
+		return err //nolint:wrapcheck // the callers wrap or classify it
+	}
+
+	var ab *AbandonedError
+	if !errors.As(err, &ab) || ab.Result == nil {
+		n.releasePrefix(shown, err == nil)
+
+		return err //nolint:wrapcheck // the callers wrap or classify it
+	}
+
+	// The send is still in progress: the prefix stays held until its result,
+	// which is passed on for the queued message to settle on.
+	result := make(chan error, 1)
+	go func() {
+		late := <-ab.Result
+		n.releasePrefix(shown, late == nil)
+
+		result <- late
+	}()
+
+	return &AbandonedError{Cause: ab.Cause, Result: result}
+}
+
+// takePrefix returns the undelivered prefix for a message with limit units
+// to spare, and whether it holds the prefix: then no other send shows it
+// until releasePrefix.
+func (n *Notifier) takePrefix(limit int) (string, Shown, bool) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	if n.showing || n.undelivered.Empty() {
+		return "", Shown{}, false
+	}
+
+	prefix, shown := n.undelivered.Prefix(limit, n.opts.Now())
+	if prefix == "" {
+		return "", Shown{}, false
+	}
+	n.showing = true
+	n.held = shown.Items
+
+	return prefix, shown, true
+}
+
+// releasePrefix ends a send that carried the prefix; delivered acknowledges
+// what it showed. An undelivered send leaves the items listed.
+func (n *Notifier) releasePrefix(shown Shown, delivered bool) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	n.showing = false
+	n.held = 0
+	if delivered {
+		n.undelivered.Ack(shown)
+	}
 }
 
 func (n *Notifier) resolveMode(msg Message) Mode {
@@ -343,61 +520,235 @@ func (n *Notifier) degrade(mode *Mode) func(key, text string) {
 	return n.opts.OnCheckerError
 }
 
-func (n *Notifier) sendSMS(ctx context.Context, plain string) {
+func (n *Notifier) sendSMS(ctx context.Context, msg Message, plain string) {
 	if err := n.opts.SMS.Send(ctx, plain); err != nil {
-		n.enqueueTracked(ChannelSMS, plain, err)
+		n.enqueueTracked(msg, ChannelSMS, plain, err)
 	}
 }
 
-func (n *Notifier) sendTelegram(ctx context.Context, rich string, offline bool) {
+func (n *Notifier) sendTelegram(ctx context.Context, msg Message, rich string, offline bool) {
 	if offline || n.opts.Telegram == nil {
-		n.enqueue(ChannelTelegram, rich)
+		n.enqueueOffline(msg, rich)
 
 		return
 	}
 
-	if err := n.opts.Telegram.Send(ctx, rich); err != nil {
-		n.enqueueTracked(ChannelTelegram, rich, err)
+	err := n.sendTelegramText(ctx, rich)
+	n.telegramSent(err)
+	if err != nil {
+		n.enqueueTracked(msg, ChannelTelegram, rich, err)
 	}
 }
 
-func (n *Notifier) sendTelegramOrSMS(ctx context.Context, plain, rich string, offline bool) {
-	if n.opts.SMS == nil {
-		n.sendTelegram(ctx, rich, offline)
+// enqueueOffline queues a Telegram message without trying to send it (the
+// outside is known down, or there is no Telegram sender): the channel is
+// failing.
+func (n *Notifier) enqueueOffline(msg Message, rich string) {
+	n.mu.Lock()
+	n.telegram.Fail(n.opts.Now())
+	n.mu.Unlock()
 
-		return
+	n.enqueue(msg, ChannelTelegram, rich)
+}
+
+// sendTelegramOrSMS sends by Telegram, or by SMS when Telegram fails, and
+// reports whether the SMS went out.
+func (n *Notifier) sendTelegramOrSMS(ctx context.Context, msg Message, plain, rich string, offline bool) bool {
+	if n.opts.SMS == nil {
+		n.sendTelegram(ctx, msg, rich, offline)
+
+		return false
 	}
 
 	var tlgErr error
 	if !offline && n.opts.Telegram != nil {
-		if tlgErr = n.opts.Telegram.Send(ctx, rich); tlgErr == nil {
-			return
+		tlgErr = n.sendTelegramText(ctx, rich)
+		n.telegramSent(tlgErr)
+		if tlgErr == nil {
+			return false
 		}
 		// Past the tick's deadline the SMS lane refuses too: queue the
 		// Telegram copy. A busy lane (an abandoned Telegram send still hangs,
 		// a sign Telegram is down) falls back to SMS like a failure.
 		if errors.Is(tlgErr, ErrPastDeadline) {
-			n.enqueue(ChannelTelegram, rich)
+			n.enqueue(msg, ChannelTelegram, rich)
 
-			return
+			return false
 		}
 	}
 
 	if err := n.opts.SMS.Send(ctx, plain); err != nil {
+		n.claimAbandonedProblem(msg, err)
+		if tlgErr == nil {
+			// Telegram was not tried: offline, or no Telegram sender.
+			n.enqueueOffline(msg, rich)
+
+			return false
+		}
 		// The queued Telegram copy follows an abandoned Telegram send.
-		n.enqueueTracked(ChannelTelegram, rich, tlgErr)
+		n.enqueueTracked(msg, ChannelTelegram, rich, tlgErr)
+
+		return false
+	}
+
+	return true
+}
+
+// moveResolvedLocked moves the resolved marks after a Restore or Merge:
+// stored messages predate every RESOLVED seen in memory, so each mark ends
+// past them, and an in-memory message renumbered by a Merge (ids, old ID to
+// new ID, in queue order) stays on its side of the mark. The caller holds the
+// lock and has set nextID.
+func (n *Notifier) moveResolvedLocked(ids map[int64]int64) {
+	for key, mark := range n.resolvedBefore {
+		moved := n.nextID
+		for from, to := range ids {
+			if from >= mark && to < moved {
+				moved = to
+			}
+		}
+		n.resolvedBefore[key] = moved
 	}
 }
 
+// claimAbandonedProblem puts the key of a PROBLEM whose own SMS was
+// abandoned while in progress in the SMS-sent set, so the fallback does not
+// send its queued Telegram copy by SMS again; a late failure takes it out.
+// The caller queues the Telegram copy after it.
+func (n *Notifier) claimAbandonedProblem(msg Message, err error) {
+	var ab *AbandonedError
+	if msg.Kind != KindProblem || !errors.As(err, &ab) || ab.Result == nil {
+		return
+	}
+
+	n.mu.Lock()
+	n.smsProblems.Add(msg.Key)
+	n.mu.Unlock()
+
+	go n.settleFallback(msg.Key, ab.Result)
+}
+
+// resolvedBySMS sends a RESOLVED by SMS as well when its PROBLEM went by SMS
+// through the fallback, unless its own route already sent it by SMS; either
+// way its key leaves the SMS-sent set. A failed SMS is queued for retry. It
+// also marks the PROBLEMs of the key queued so far as resolved, whichever
+// channel the RESOLVED went on, so the fallback skips them.
+func (n *Notifier) resolvedBySMS(ctx context.Context, msg Message, plain string, viaSMS bool) {
+	n.mu.Lock()
+	n.resolvedBefore[msg.Key] = n.nextID
+	wasSMS := n.smsProblems.Remove(msg.Key)
+	n.mu.Unlock()
+
+	if !wasSMS || viaSMS || n.opts.SMS == nil {
+		return
+	}
+
+	n.sendSMS(ctx, msg, plain)
+}
+
+// smsFallback sends by SMS, in plain form, each PROBLEM queued for Telegram
+// while Telegram is failing, once: its key enters the SMS-sent set and its
+// Telegram copy stays queued. It stops at the first failed SMS; the PROBLEMs
+// not sent are tried again at the next call. An SMS abandoned while in
+// progress keeps its key until it returns, so it is not sent twice.
+func (n *Notifier) smsFallback(ctx context.Context) {
+	if n.opts.SMS == nil {
+		return
+	}
+
+	n.mu.Lock()
+	due := n.fallbackDueLocked()
+	n.mu.Unlock()
+
+	for i := range due {
+		item := &due[i]
+		err := n.opts.SMS.Send(ctx, html.UnescapeString(item.Text))
+		if err == nil {
+			continue
+		}
+
+		unsent := due[i:]
+		var ab *AbandonedError
+		if errors.As(err, &ab) && ab.Result != nil {
+			unsent = due[i+1:]
+			go n.settleFallback(item.Key, ab.Result)
+		}
+
+		n.mu.Lock()
+		for i := range unsent {
+			rest := &unsent[i]
+			n.smsProblems.Remove(rest.Key)
+		}
+		n.mu.Unlock()
+
+		return
+	}
+}
+
+// settleFallback waits for an abandoned fallback SMS: a late failure takes
+// its key out of the SMS-sent set, so the next call sends it again.
+func (n *Notifier) settleFallback(key string, result <-chan error) {
+	if err := <-result; err == nil {
+		return
+	}
+
+	n.mu.Lock()
+	defer n.mu.Unlock()
+
+	n.smsProblems.Remove(key)
+}
+
+// fallbackDueLocked returns the queued Telegram PROBLEMs to send by SMS and
+// claims their keys in the SMS-sent set, so a concurrent call skips them. A
+// PROBLEM is due while Telegram is failing, when its key is not in the set,
+// no RESOLVED of the key came after it (queued or sent directly; once
+// resolved, the PROBLEM is news no longer) and no later problem or RESOLVED
+// of the key is queued (this also holds for a queue restored after a
+// restart). The caller holds the lock.
+func (n *Notifier) fallbackDueLocked() []QueuedMessage {
+	if !n.telegram.Failing() {
+		return nil
+	}
+
+	last := map[string]int64{}
+	for i := range n.queue {
+		item := &n.queue[i]
+		if item.Channel == ChannelTelegram && item.Kind != string(KindEvent) {
+			last[item.Key] = item.ID
+		}
+	}
+
+	var due []QueuedMessage
+	for i := range n.queue {
+		item := &n.queue[i]
+		if !n.fallbackDueItemLocked(item, last[item.Key]) {
+			continue
+		}
+
+		n.smsProblems.Add(item.Key)
+		due = append(due, *item)
+	}
+
+	return due
+}
+
+// fallbackDueItemLocked reports whether item is a queued Telegram PROBLEM
+// due for the fallback, given the ID of the last queued problem or RESOLVED
+// of its key. The caller holds the lock.
+func (n *Notifier) fallbackDueItemLocked(item *QueuedMessage, last int64) bool {
+	return item.Channel == ChannelTelegram && item.Kind == string(KindProblem) && item.ID == last &&
+		item.ID >= n.resolvedBefore[item.Key] && !n.smsProblems.Has(item.Key)
+}
+
 // enqueue queues a message.
-func (n *Notifier) enqueue(channel, text string) {
-	n.enqueueTracked(channel, text, nil)
+func (n *Notifier) enqueue(msg Message, channel, text string) {
+	n.enqueueTracked(msg, channel, text, nil)
 }
 
 // enqueueTracked queues a message and, when err says its send was abandoned
 // while still in progress, marks it in flight in the same lock step: a Merge
 // cannot renumber the message in between and leave the mark on a stale ID.
-func (n *Notifier) enqueueTracked(channel, text string, err error) {
+func (n *Notifier) enqueueTracked(msg Message, channel, text string, err error) {
 	n.mu.Lock()
 
 	id := n.nextID
@@ -406,6 +757,11 @@ func (n *Notifier) enqueueTracked(channel, text string, err error) {
 		CreatedAt: n.opts.Now(),
 		Channel:   channel,
 		Text:      text,
+		Kind:      string(queuedKind(msg.Kind)),
+		Check:     msg.Check,
+		Key:       msg.Key,
+		Plain:     msg.Text,
+		Since:     msg.Since,
 	})
 	n.nextID++
 
@@ -417,13 +773,24 @@ func (n *Notifier) enqueueTracked(channel, text string, err error) {
 	n.reportDropped(dropped)
 }
 
+// queuedKind is the kind a queued message is stored under; a message without
+// one is an event.
+func queuedKind(k Kind) Kind {
+	if k == "" {
+		return KindEvent
+	}
+
+	return k
+}
+
 func (n *Notifier) reportDropped(dropped []QueuedMessage) {
 	if n.opts.OnDrop == nil {
 		return
 	}
 
-	for _, item := range dropped {
-		n.opts.OnDrop(item)
+	for i := range dropped {
+		item := &dropped[i]
+		n.opts.OnDrop(*item)
 	}
 }
 
@@ -504,12 +871,18 @@ func (n *Notifier) render(msg Message) (plain, rich string) {
 	return plain, rich
 }
 
-// sinceText renders the start of a streak as HH:MM, with the date ("02 Jan
+// sinceText renders the start of a streak with formatSince at the
+// notifier's now.
+func (n *Notifier) sinceText(since time.Time) string {
+	return formatSince(since, n.opts.Now())
+}
+
+// formatSince renders the start of a streak as HH:MM, with the date ("02 Jan
 // 15:04") when it began on an earlier day than now; days are taken in since's
 // own zone (the host's).
-func (n *Notifier) sinceText(since time.Time) string {
+func formatSince(since, now time.Time) string {
 	sy, sm, sd := since.Date()
-	ny, nm, nd := n.opts.Now().In(since.Location()).Date()
+	ny, nm, nd := now.In(since.Location()).Date()
 	if sy == ny && sm == nm && sd == nd {
 		return since.Format("15:04")
 	}

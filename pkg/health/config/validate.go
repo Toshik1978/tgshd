@@ -134,6 +134,11 @@ func validateGeneral(g *General, p *problems) {
 	p.required("heartbeat_file", g.HeartbeatFile)
 	p.nonNegative("boot_grace", g.BootGrace)
 	p.atLeast("concurrency", g.Concurrency, 1)
+	p.positive("maintenance_max_hold", g.MaintenanceMaxHold)
+
+	if g.TelegramFailingAfter.Duration() < time.Minute {
+		p.addf("telegram_failing_after %v must be at least %v", g.TelegramFailingAfter.Duration(), time.Minute)
+	}
 }
 
 func validateSummary(s *Summary, p *problems) {

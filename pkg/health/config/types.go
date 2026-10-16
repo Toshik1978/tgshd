@@ -26,6 +26,9 @@ type General struct {
 	MaintenanceLock string   `yaml:"maintenance_lock"`
 	BootGrace       Duration `yaml:"boot_grace"`
 	Concurrency     int      `yaml:"concurrency"`
+
+	MaintenanceMaxHold   Duration `yaml:"maintenance_max_hold"`
+	TelegramFailingAfter Duration `yaml:"telegram_failing_after"`
 }
 
 // Summary configures the weekly report.
@@ -44,6 +47,10 @@ type Common struct {
 	// SummaryGroup merges the checks that name the same group into one line
 	// of the weekly summary; empty keeps one line per check.
 	SummaryGroup string `yaml:"summary_group"`
+
+	// PauseInQuietWindows holds the check back during quiet windows. It
+	// defaults to false for disks, temperatures and kernel, true elsewhere.
+	PauseInQuietWindows bool `yaml:"pause_in_quiet_windows"`
 }
 
 // Network is the connectivity check, evaluated first every cycle.

@@ -128,3 +128,42 @@ func TestOpenKeys(t *testing.T) {
 		t.Errorf("got %q", got)
 	}
 }
+
+// TestQuietNoteListsPaused: the quiet note names since when the maintenance
+// lock is held and lists the checks the window pauses, or none (FR-026,
+// FR-027, contracts/telegram-commands.md /status).
+func TestQuietNoteListsPaused(t *testing.T) {
+	held := time.Date(2026, 1, 2, 3, 4, 0, 0, time.UTC)
+	cases := []struct {
+		name string
+		snap runner.Snapshot
+		want string
+	}{
+		{
+			"maintenance",
+			runner.Snapshot{Quiet: "maintenance", HeldSince: held, Paused: []string{"network", "http/<a>"}},
+			"Note: quiet window active (maintenance, held since 2026-01-02 03:04); paused: network, http/&lt;a&gt;",
+		},
+		{
+			"boot grace",
+			runner.Snapshot{Quiet: "boot grace", Paused: []string{"network"}},
+			"Note: quiet window active (boot grace); paused: network",
+		},
+		{
+			"nothing paused",
+			runner.Snapshot{Quiet: "maintenance", HeldSince: held},
+			"Note: quiet window active (maintenance, held since 2026-01-02 03:04); paused: none",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			lines := strings.Split(Status(c.snap), "\n")
+			if lines[0] != c.want {
+				t.Fatalf("note = %q, want %q", lines[0], c.want)
+			}
+		})
+	}
+	if got := Status(runner.Snapshot{Paused: []string{"network"}}); strings.Contains(got, "paused") {
+		t.Fatalf("no quiet window, got %q", got)
+	}
+}

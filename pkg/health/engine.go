@@ -113,6 +113,22 @@ func (e *Engine) ClearPrefix(prefix string) int {
 	return n
 }
 
+// Reopen marks an open condition as not yet raised, so its next Bad reading
+// raises the PROBLEM again at once. StreakStart and BadFor are kept. It reports
+// whether the condition was tracked and open; otherwise nothing changes.
+func (e *Engine) Reopen(key string) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	c, ok := e.conds[key]
+	if !ok || !c.Open {
+		return false
+	}
+	c.Open = false
+	c.OpenedAt = time.Time{}
+
+	return true
+}
+
 // Condition returns a copy of the state tracked for key.
 func (e *Engine) Condition(key string) (Condition, bool) {
 	e.mu.Lock()

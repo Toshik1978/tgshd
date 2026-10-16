@@ -180,10 +180,11 @@ func TestNewCheck(t *testing.T) {
 	t.Parallel()
 
 	common := hcfg.Common{
-		Interval:      hcfg.Duration(5 * time.Minute),
-		Threshold:     hcfg.Duration(time.Minute),
-		Mode:          hcfg.ModeTLGOrSMS,
-		NeedsInternet: true,
+		Interval:            hcfg.Duration(5 * time.Minute),
+		Threshold:           hcfg.Duration(time.Minute),
+		Mode:                hcfg.ModeTLGOrSMS,
+		NeedsInternet:       true,
+		PauseInQuietWindows: true,
 	}
 	ran := false
 	chk := newCheck("ups", common, func(context.Context) health.CheckResult {
@@ -193,7 +194,7 @@ func TestNewCheck(t *testing.T) {
 	})
 
 	if chk.Name != "ups" || chk.Interval != 5*time.Minute || chk.Threshold != time.Minute ||
-		chk.Mode != health.ModeTelegramOrSMS || !chk.NeedsInternet || chk.DependsOn != "" {
+		chk.Mode != health.ModeTelegramOrSMS || !chk.NeedsInternet || !chk.PauseInQuiet || chk.DependsOn != "" {
 		t.Fatalf("newCheck() = %+v", chk)
 	}
 	chk.Run(t.Context())
@@ -469,9 +470,22 @@ func TestRunnerOptions(t *testing.T) {
 	}
 
 	hc.General.MaintenanceLock = "/run/maintenance.lock"
+	hc.General.MaintenanceMaxHold = hcfg.Duration(2 * time.Hour)
+	hc.General.TelegramFailingAfter = hcfg.Duration(30 * time.Minute)
 	opts = runnerOptions(hs, d, checkSet{Checks: checks}, sysfs.NewDefault(), zap.NewNop())
 	if opts.Maintenance == nil {
 		t.Fatal("maintenance lock configured: want a probe")
+	}
+	if opts.MaintenanceMaxHold != 2*time.Hour || opts.TelegramFailingAfter != 30*time.Minute {
+		t.Fatalf("maintenance max hold = %v, telegram failing after = %v; want 2h and 30m from general",
+			opts.MaintenanceMaxHold, opts.TelegramFailingAfter)
+	}
+
+	sms, mailer := &recordingSender{}, &fakeMailer{}
+	opts = runnerOptions(hs, delivery{telegram: telegramSender{}, sms: sms, mailer: mailer},
+		checkSet{Checks: checks}, sysfs.NewDefault(), zap.NewNop())
+	if opts.SMS != sms || opts.Mailer != mailer {
+		t.Fatalf("sms = %v, mailer = %v; want the configured SMS fallback sender and mailer", opts.SMS, opts.Mailer)
 	}
 
 	book, p, fixes := &fakeDriveBook{}, &fakePersister{}, &fakeFixSource{}
@@ -962,5 +976,165 @@ func TestNewHealthRetireWithDisks(t *testing.T) {
 	}
 	if got := pub.messages(); len(got) != 1 || !strings.HasPrefix(got[0], "Unknown drive.") {
 		t.Fatalf("reply = %q, want the disks-backed /retire", got)
+	}
+}
+
+// recordingSender records messages sent through it; it is safe for
+// concurrent use.
+type recordingSender struct {
+	mu   sync.Mutex
+	sent []string
+}
+
+func (s *recordingSender) Send(_ context.Context, text string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.sent = append(s.sent, text)
+
+	return nil
+}
+
+func (s *recordingSender) messages() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return slices.Clone(s.sent)
+}
+
+// fakeMailer stands in for the SMTP relay.
+type fakeMailer struct{}
+
+func (*fakeMailer) Send(context.Context, string, string) error { return nil }
+
+// lockedSMS is a gammu stand-in that is safe for concurrent use.
+type lockedSMS struct {
+	mu   sync.Mutex
+	sent []string
+}
+
+func (s *lockedSMS) Publish(_ context.Context, _, msg string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.sent = append(s.sent, msg)
+
+	return nil
+}
+
+func (s *lockedSMS) messages() []string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return slices.Clone(s.sent)
+}
+
+// TestHealthConfigPausesChecksPerCheck: a loaded configuration keeps the
+// hardware checks running in quiet windows by default, pauses every other
+// check, and honours pause_in_quiet_windows set on a check (FR-026).
+func TestHealthConfigPausesChecksPerCheck(t *testing.T) {
+	t.Parallel()
+
+	path, _ := writeHealthConfig(t, `network:
+  internet_targets: [ "198.51.100.20" ]
+disks: {}
+temperatures:
+  pause_in_quiet_windows: true
+kernel:
+  pause_in_quiet_windows: false
+`)
+	hc, errs := hcfg.Load(path)
+	if hc == nil || len(errs) != 0 {
+		t.Fatalf("Load() = %v, %v", hc, errs)
+	}
+	hs := &healthSetup{Config: hc}
+	logger := zap.NewNop()
+
+	paused := map[string]bool{}
+	for _, set := range []checkSet{
+		networkChecks(hs, sysfs.NewDefault(), logger), disksChecks(hs, logger), tempsChecks(hs, newOpenState()), kernelChecks(hs, logger),
+	} {
+		for _, c := range set.Checks {
+			paused[c.Name] = c.PauseInQuiet
+		}
+	}
+	want := map[string]bool{
+		"network": true, disksCheckName: false, tempsCheckName: true, kernelCheckName: false,
+	}
+	for name, w := range want {
+		got, ok := paused[name]
+		if !ok || got != w {
+			t.Errorf("%s: PauseInQuiet = %v (built %v), want %v", name, got, ok, w)
+		}
+	}
+}
+
+// failingCheckSet is one check that is bad on every run, alerting at once.
+func failingCheckSet() checkSet {
+	return checkSet{Checks: []health.Check{{
+		Name: "ups", Interval: time.Second, Mode: health.ModeTelegram,
+		Run: func(context.Context) health.CheckResult {
+			return health.CheckResult{Readings: []health.Reading{{
+				Key: "ups/power", Verdict: health.Bad, Text: "on battery",
+			}}}
+		},
+	}}}
+}
+
+// TestNewHealthSendsQueuedProblemsBySMSWhileTelegramFails: with gammu and
+// BOT_SMS_PHONE set, a PROBLEM that Telegram cannot take goes by SMS (FR-030).
+func TestNewHealthSendsQueuedProblemsBySMSWhileTelegramFails(t *testing.T) {
+	t.Parallel()
+
+	pub := &fakePublisher{err: errors.New("telegram down")}
+	gammu := &lockedSMS{}
+	p := enabledHealthParams(t, pub, fxtest.NewLifecycle(t), failingCheckSet())
+	p.Config.SMSPhone = "+10000000000"
+	p.SMS = gammu
+
+	out := newHealth(p)
+	if err := out.Workers[0].Do(t.Context()); err != nil {
+		t.Fatalf("Do() = %v", err)
+	}
+
+	got := gammu.messages()
+	if len(got) != 1 || !strings.Contains(got[0], "PROBLEM") || !strings.Contains(got[0], "on battery") {
+		t.Fatalf("SMS = %v, want the queued PROBLEM", got)
+	}
+}
+
+// TestNewHealthWithoutSMSOrSMTPKeepsProblemsQueued: without SMS, SMTP or a
+// store the daemon still runs; a PROBLEM Telegram cannot take stays queued
+// and is delivered once Telegram recovers (Principle V).
+func TestNewHealthWithoutSMSOrSMTPKeepsProblemsQueued(t *testing.T) {
+	t.Parallel()
+
+	pub := &fakePublisher{err: errors.New("telegram down")}
+	p := enabledHealthParams(t, pub, fxtest.NewLifecycle(t), failingCheckSet())
+	if p.Setup.Store != nil || p.SMS != nil || p.Config.SMTP.Enabled() {
+		t.Fatalf("setup must have no store, SMS or SMTP: %+v", p)
+	}
+
+	out := newHealth(p)
+	r := out.Workers[0]
+	if err := r.Do(t.Context()); err != nil {
+		t.Fatalf("Do() = %v", err)
+	}
+
+	pub.mu.Lock()
+	pub.err = nil
+	pub.mu.Unlock()
+	if err := r.Do(t.Context()); err != nil {
+		t.Fatalf("Do() = %v", err)
+	}
+
+	var problems int
+	for _, m := range pub.messages() {
+		if strings.Contains(m, "PROBLEM") && strings.Contains(m, "on battery") {
+			problems++
+		}
+	}
+	if problems != 2 {
+		t.Fatalf("messages = %v; want the failed PROBLEM attempt, then its queued copy delivered", pub.messages())
 	}
 }

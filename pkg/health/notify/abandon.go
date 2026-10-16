@@ -76,10 +76,26 @@ func (n *Notifier) settle(f *flight, result <-chan error) {
 	delete(n.inflight, f.id)
 
 	if err == nil {
+		// A late success is a successful send on the message's channel.
+		if n.queuedChannelLocked(f.id) == ChannelTelegram {
+			n.telegramSentLocked(nil)
+		}
 		n.removeLocked(f.id)
 	} else {
 		n.bumpLocked(f.id)
 	}
+}
+
+// queuedChannelLocked returns the channel of the queued message id, empty
+// when it is not queued. The caller holds the lock.
+func (n *Notifier) queuedChannelLocked(id int64) string {
+	for i := range n.queue {
+		if n.queue[i].ID == id {
+			return n.queue[i].Channel
+		}
+	}
+
+	return ""
 }
 
 // inFlight reports whether the queued message id has a send in progress.

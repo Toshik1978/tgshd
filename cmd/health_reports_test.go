@@ -262,13 +262,26 @@ func TestHealthReportsDailyExpiresTheQueueAndLogsEachDropOnce(t *testing.T) {
 	}
 }
 
-func TestHealthReportsWithoutStoreHasNoDailyJob(t *testing.T) {
+// TestHealthReportsWithoutStoreStillExpiresTheQueue: in memory-only mode the
+// daily job still expires undelivered messages; there is no retention to run.
+func TestHealthReportsWithoutStoreStillExpiresTheQueue(t *testing.T) {
 	t.Parallel()
 
 	var opts runner.Options
-	(&healthReports{}).hook(&opts)
-	if opts.Daily != nil || opts.Weekly == nil {
-		t.Fatalf("daily %v, weekly %v; want only the weekly summary", opts.Daily != nil, opts.Weekly != nil)
+	h := &healthReports{loc: time.UTC, logger: zap.NewNop()}
+	h.hook(&opts)
+	if opts.Daily == nil || opts.Weekly == nil {
+		t.Fatalf("daily %v, weekly %v; want both jobs", opts.Daily != nil, opts.Weekly != nil)
+	}
+	r := &fakeRunner{}
+	h.bind(r)
+	now := time.Date(2026, 10, 16, 3, 0, 0, 0, time.UTC)
+
+	if err := opts.Daily(t.Context(), now); err != nil {
+		t.Fatal(err)
+	}
+	if len(r.expireAt) != 1 {
+		t.Fatalf("queue expired %d times, want once", len(r.expireAt))
 	}
 }
 

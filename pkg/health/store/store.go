@@ -190,7 +190,7 @@ func applyStep(ctx context.Context, db *sql.DB, version int, ddl string) error {
 
 // migrations returns the ordered schema steps; step N brings user_version to N.
 func migrations() []string {
-	return []string{schemaV1, schemaV2}
+	return []string{schemaV1, schemaV2, schemaV3}
 }
 
 const schemaV1 = `
@@ -232,4 +232,12 @@ const schemaV2 = `
 ALTER TABLE queue ADD COLUMN kind TEXT NOT NULL DEFAULT 'event';
 ALTER TABLE queue ADD COLUMN check_name TEXT NOT NULL DEFAULT '';
 ALTER TABLE queue ADD COLUMN key TEXT NOT NULL DEFAULT '';
+`
+
+// schemaV3 keeps a queued message's plain text and streak start, so a
+// PROBLEM dropped after a restart is listed from them, not from its rendered
+// text. Rows written before it read back empty and fall back to parsing.
+const schemaV3 = `
+ALTER TABLE queue ADD COLUMN plain TEXT NOT NULL DEFAULT '';
+ALTER TABLE queue ADD COLUMN since INTEGER;
 `
