@@ -3,8 +3,11 @@ package network_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/netip"
+	"slices"
 	"testing"
+	"time"
 
 	"github.com/Toshik1978/tgshd/pkg/health"
 	"github.com/Toshik1978/tgshd/pkg/health/check/network"
@@ -35,14 +38,6 @@ func (f *fakePinger) Reachable(_ context.Context, hosts []string) (map[string]bo
 	return out, nil
 }
 
-func verdicts(res health.CheckResult) map[string]health.Verdict {
-	m := map[string]health.Verdict{}
-	for _, r := range res.Readings {
-		m[r.Key] = r.Verdict
-	}
-	return m
-}
-
 func TestRun(t *testing.T) {
 	gw := netip.MustParseAddr("192.0.2.1")
 	targets := []string{"203.0.113.10", "198.51.100.20"}
@@ -51,36 +46,37 @@ func TestRun(t *testing.T) {
 		name    string
 		gateway fakeGateway
 		pinger  *fakePinger
-		want    map[string]health.Verdict
+		verdict health.Verdict
+		text    string
 		wantErr bool
 	}{
 		{
 			name:    "all up",
 			gateway: fakeGateway{addr: gw},
 			pinger:  &fakePinger{up: map[string]bool{"192.0.2.1": true, "203.0.113.10": true}},
-			want:    map[string]health.Verdict{"network/router": health.Good, "network/internet": health.Good},
+			verdict: health.Good, text: "Network is reachable",
 		},
 		{
 			name:    "any single target suffices",
 			gateway: fakeGateway{addr: gw},
 			pinger:  &fakePinger{up: map[string]bool{"192.0.2.1": true, "198.51.100.20": true}},
-			want:    map[string]health.Verdict{"network/router": health.Good, "network/internet": health.Good},
+			verdict: health.Good, text: "Network is reachable",
 		},
 		{
 			name:    "internet down",
 			gateway: fakeGateway{addr: gw},
 			pinger:  &fakePinger{up: map[string]bool{"192.0.2.1": true}},
-			want:    map[string]health.Verdict{"network/router": health.Good, "network/internet": health.Bad},
+			verdict: health.Bad, text: "Internet is unreachable (router 192.0.2.1 answers)",
 		},
 		{
-			name:    "router down hides internet",
+			name:    "router down",
 			gateway: fakeGateway{addr: gw},
 			pinger:  &fakePinger{up: map[string]bool{"203.0.113.10": true}},
-			want:    map[string]health.Verdict{"network/router": health.Bad},
+			verdict: health.Bad, text: "Router 192.0.2.1 is not answering",
 		},
 		{
-			name:    "gateway lookup fails",
-			gateway: fakeGateway{err: errors.New("no route")},
+			name:    "route table unreadable",
+			gateway: fakeGateway{err: errors.New("open /proc/net/route: permission denied")},
 			pinger:  &fakePinger{},
 			wantErr: true,
 		},
@@ -103,18 +99,105 @@ func TestRun(t *testing.T) {
 			if res.Err != nil {
 				t.Fatalf("unexpected error: %v", res.Err)
 			}
-			got := verdicts(res)
-			if len(got) != len(tt.want) {
-				t.Fatalf("got %v, want %v", got, tt.want)
+			if len(res.Readings) != 1 {
+				t.Fatalf("readings = %+v, want one", res.Readings)
 			}
-			for k, v := range tt.want {
-				if got[k] != v {
-					t.Errorf("%s = %v, want %v", k, got[k], v)
-				}
+			r := res.Readings[0]
+			if r.Key != network.KeyConnectivity || r.Kind != health.State || r.Verdict != tt.verdict ||
+				r.Text != tt.text {
+				t.Fatalf("reading = %+v, want %s %v %q", r, network.KeyConnectivity, tt.verdict, tt.text)
 			}
 		})
 	}
 }
+
+// TestNoRouteIsRouterDown: without a usable default route the network is
+// judged down (not unreadable), so the PROBLEM is raised (US5 acc. 1, FR-033).
+func TestNoRouteIsRouterDown(t *testing.T) {
+	gw := fakeGateway{err: fmt.Errorf("read route: %w", network.ErrNoRoute)}
+	pinger := &fakePinger{up: map[string]bool{"203.0.113.10": true}}
+	res := network.New(gw, pinger, []string{"203.0.113.10"}).Run(t.Context())
+	if res.Err != nil {
+		t.Fatalf("err = %v, want a Bad reading", res.Err)
+	}
+	if len(res.Readings) != 1 || res.Readings[0].Key != network.KeyConnectivity ||
+		res.Readings[0].Verdict != health.Bad || res.Readings[0].Text != "No usable default route" {
+		t.Fatalf("readings = %+v, want one Bad %q", res.Readings, "No usable default route")
+	}
+
+	e := health.NewEngine()
+	alerts := e.Apply(t0(), network.Name, 5*time.Minute, 0, res.Readings)
+	if len(alerts) != 1 || alerts[0].Kind != health.AlertProblem || alerts[0].Text != "No usable default route" {
+		t.Fatalf("alerts = %+v, want one PROBLEM", alerts)
+	}
+}
+
+// TestCauseShiftOneOutage: an outage whose cause moves between no route, the
+// router and the internet is one condition with exactly one PROBLEM and one
+// RESOLVED (US5 acc. 2, FR-034, SC-008).
+func TestCauseShiftOneOutage(t *testing.T) {
+	addr := netip.MustParseAddr("192.0.2.1")
+	targets := []string{"203.0.113.10"}
+	steps := []struct {
+		gateway fakeGateway
+		up      map[string]bool
+	}{
+		{fakeGateway{addr: addr}, map[string]bool{"192.0.2.1": true, "203.0.113.10": true}},
+		{fakeGateway{addr: addr}, map[string]bool{}},                  // router down
+		{fakeGateway{addr: addr}, map[string]bool{"192.0.2.1": true}}, // internet down
+		{fakeGateway{err: network.ErrNoRoute}, nil},                   // route lost
+		{fakeGateway{addr: addr}, map[string]bool{}},                  // router down again
+		{fakeGateway{addr: addr}, map[string]bool{"192.0.2.1": true}}, // internet down again
+		{fakeGateway{addr: addr}, map[string]bool{"192.0.2.1": true, "203.0.113.10": true}},
+	}
+
+	e := health.NewEngine()
+	now := t0()
+	var problems, resolved int
+	for i, s := range steps {
+		res := network.New(s.gateway, &fakePinger{up: s.up}, targets).Run(t.Context())
+		if res.Err != nil {
+			t.Fatalf("step %d: err = %v", i, res.Err)
+		}
+		for _, a := range e.Apply(now, network.Name, 5*time.Minute, 5*time.Minute, res.Readings) {
+			switch a.Kind {
+			case health.AlertProblem:
+				problems++
+			case health.AlertResolved:
+				resolved++
+			case health.AlertEvent:
+				t.Fatalf("step %d: unexpected event %+v", i, a)
+			}
+		}
+		now = now.Add(5 * time.Minute)
+	}
+	if problems != 1 || resolved != 1 {
+		t.Fatalf("problems = %d, resolved = %d, want 1 and 1", problems, resolved)
+	}
+}
+
+// TestFormerKeysForgotten: every run, readable or not, lists the 001 keys in
+// Forget so a condition stored before the upgrade is cleared silently.
+func TestFormerKeysForgotten(t *testing.T) {
+	addr := netip.MustParseAddr("192.0.2.1")
+	want := []string{"network/router", "network/internet"}
+	cases := map[string]health.CheckResult{
+		"good": network.New(fakeGateway{addr: addr}, &fakePinger{up: map[string]bool{"192.0.2.1": true, "203.0.113.10": true}}, []string{"203.0.113.10"}).
+			Run(t.Context()),
+		"bad":      network.New(fakeGateway{addr: addr}, &fakePinger{}, nil).Run(t.Context()),
+		"no route": network.New(fakeGateway{err: network.ErrNoRoute}, &fakePinger{}, nil).Run(t.Context()),
+		"unreadable": network.New(fakeGateway{err: errors.New("permission denied")}, &fakePinger{}, nil).
+			Run(t.Context()),
+		"no pinger": network.New(fakeGateway{addr: addr}, nil, nil).Run(t.Context()),
+	}
+	for name, res := range cases {
+		if got := slices.Sorted(slices.Values(res.Forget)); !slices.Equal(got, slices.Sorted(slices.Values(want))) {
+			t.Errorf("%s: Forget = %q, want %q", name, res.Forget, want)
+		}
+	}
+}
+
+func t0() time.Time { return time.Date(2026, 3, 2, 10, 0, 0, 0, time.UTC) }
 
 func TestNilPinger(t *testing.T) {
 	res := network.New(fakeGateway{addr: netip.MustParseAddr("192.0.2.1")}, nil, nil).Run(t.Context())
@@ -158,8 +241,8 @@ func TestInternetPingError(t *testing.T) {
 func TestNoInternetTargets(t *testing.T) {
 	gw := fakeGateway{addr: netip.MustParseAddr("192.0.2.1")}
 	res := network.New(gw, &fakePinger{up: map[string]bool{"192.0.2.1": true}}, nil).Run(t.Context())
-	got := verdicts(res)
-	if res.Err != nil || got["network/router"] != health.Good || got["network/internet"] != health.Bad {
+	if res.Err != nil || len(res.Readings) != 1 || res.Readings[0].Verdict != health.Bad ||
+		res.Readings[0].Text != "Internet is unreachable (router 192.0.2.1 answers)" {
 		t.Fatalf("got %+v", res)
 	}
 }

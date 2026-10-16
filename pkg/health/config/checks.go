@@ -14,6 +14,9 @@ type Header struct {
 	Name     string `yaml:"name"`
 	ValueEnv string `yaml:"value_env"`
 	Prefix   string `yaml:"prefix"`
+	// Placeholders are extra markers that mean the secret was never set; a
+	// header whose value contains one (case-insensitive) is a checker error.
+	Placeholders []string `yaml:"placeholders"`
 }
 
 // HTTP is one endpoint check.
@@ -29,6 +32,9 @@ type HTTP struct {
 	Header    *Header  `yaml:"header"`
 	DependsOn string   `yaml:"depends_on"`
 	Container string   `yaml:"container"`
+
+	FollowRedirects bool        `yaml:"follow_redirects"`
+	AuthRefusal     AuthRefusal `yaml:"auth_refusal"`
 }
 
 // Freshness is one file-age check.
@@ -39,6 +45,13 @@ type Freshness struct {
 	Path    string   `yaml:"path"`
 	Content Content  `yaml:"content"`
 	MaxAge  Duration `yaml:"max_age"`
+
+	FutureTolerance Duration `yaml:"future_tolerance"`
+	// URL reads the stamp over HTTP instead of from Path (exactly one is set).
+	// Timeout and Header apply to URL only; Timeout defaults to 15s.
+	URL     string   `yaml:"url"`
+	Timeout Duration `yaml:"timeout"`
+	Header  *Header  `yaml:"header"`
 }
 
 // Fix is the optional auto-remediation of a command check. After,
@@ -60,6 +73,11 @@ type Command struct {
 	Timeout Duration `yaml:"timeout"`
 	Fix     *Fix     `yaml:"fix"`
 	Report  Report   `yaml:"report"`
+
+	// ExpectOutput must match the probe output; ForbidOutput must not (Go RE2).
+	ExpectOutput   string         `yaml:"expect_output"`
+	ForbidOutput   string         `yaml:"forbid_output"`
+	TimeoutVerdict TimeoutVerdict `yaml:"timeout_verdict"`
 }
 
 // ModemProbe is the periodic modem round-trip probe.

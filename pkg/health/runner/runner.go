@@ -50,10 +50,9 @@ const (
 	// (general.telegram_failing_after).
 	DefaultTelegramFailingAfter = 15 * time.Minute
 
-	// KeyRouter and KeyInternet are the network conditions that, while bad,
-	// mean the outside is known down.
-	KeyRouter   = "network/router"
-	KeyInternet = "network/internet"
+	// KeyNetwork is the network condition that, while bad, means the outside
+	// is known down.
+	KeyNetwork = "network/connectivity"
 
 	keyHeartbeat   = "health/heartbeat/write"
 	keyMaintenance = "health/maintenance/probe"
@@ -178,6 +177,10 @@ type Runner struct {
 	// the maintenance-lock observation.
 	own     []Persister
 	network int // index of the network check, -1 when absent
+	// networkUnknown tells that the last network run was unreadable (an
+	// error or no judged reading): checks that need the internet are not run
+	// (FR-036). Only touched by Do.
+	networkUnknown bool
 	// sends bounds every delivery by the running tick's deadline.
 	sends deliveries
 
@@ -601,14 +604,17 @@ func (r *Runner) runChecks(ctx context.Context, c *cycle, quiet bool) bool {
 		if ctx.Err() != nil {
 			return false
 		}
+		r.networkUnknown = unjudged(res)
 		r.apply(c, r.opts.Checks[n], res)
 	}
 	// While the network check is paused by a quiet window, its conditions
 	// (and so the offline flag) stay as they were before the window.
-	offline := r.bad(KeyRouter) || r.bad(KeyInternet)
+	offline := r.bad(KeyNetwork)
 	r.notifier.SetOffline(offline)
 
-	batch := r.eligible(c.now, offline, quiet)
+	// Telegram is still attempted while the network is unknown; only the
+	// checks that need the internet wait for a readable network run.
+	batch := r.eligible(c.now, offline || r.networkUnknown, quiet)
 	results := r.runBatch(tickCtx, batch)
 	if ctx.Err() != nil {
 		return false
@@ -623,23 +629,51 @@ func (r *Runner) runChecks(ctx context.Context, c *cycle, quiet bool) bool {
 	return true
 }
 
+// unjudged reports whether a network run left connectivity unknown: it
+// failed, or returned no Good or Bad reading of KeyNetwork.
+func unjudged(res health.CheckResult) bool {
+	if res.Err != nil {
+		return true
+	}
+	for _, rd := range res.Readings {
+		if rd.Key == KeyNetwork && rd.Kind == health.State && rd.Verdict != health.Unknown {
+			return false
+		}
+	}
+
+	return true
+}
+
 // eligible returns the indexes of the non-network checks that are due, not
 // paused by a quiet window, not still in flight, and neither need the
-// internet while offline nor depend on a bad condition.
-func (r *Runner) eligible(now time.Time, offline, quiet bool) []int {
+// internet while the outside is down or unknown (noInternet) nor depend on a
+// bad condition.
+func (r *Runner) eligible(now time.Time, noInternet, quiet bool) []int {
 	var out []int
 	for i := range r.opts.Checks {
 		chk := &r.opts.Checks[i]
 		switch {
 		case i == r.network, r.paused(i, quiet), r.running[i].Load(), !due(r.lastRun[i], now, chk.Interval):
-		case chk.NeedsInternet && offline:
-		case chk.DependsOn != "" && r.bad(chk.DependsOn):
+		case chk.NeedsInternet && noInternet:
+		case chk.DependsOn != "" && r.bad(dependsOnKey(chk.DependsOn)):
 		default:
 			out = append(out, i)
 		}
 	}
 
 	return out
+}
+
+// dependsOnKey resolves a depends_on condition key. The 001 network keys
+// (network/router, network/internet) name the one network/connectivity
+// condition that replaced them, so a 001 config keeps working.
+func dependsOnKey(key string) string {
+	switch key {
+	case "network/router", "network/internet":
+		return KeyNetwork
+	default:
+		return key
+	}
 }
 
 // paused reports whether the check at idx is held back by a quiet tick.

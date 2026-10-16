@@ -455,8 +455,9 @@ func TestInboxWorkerWithoutHealthHasNoMatcher(t *testing.T) {
 func TestAppOptionsWireTheInboxAndProbe(t *testing.T) {
 	// The fx error hook logs through the standard logger. This test is not
 	// parallel, so silencing it cannot hide the output of another test.
+	prev := log.Writer()
 	log.SetOutput(io.Discard)
-	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+	t.Cleanup(func() { log.SetOutput(prev) })
 
 	needsInbox := fx.Invoke(func(sms.Inbox) {})
 	needsMatcher := fx.Invoke(func(sms.ProbeMatcher) {})

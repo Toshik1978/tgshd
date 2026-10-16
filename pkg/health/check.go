@@ -13,7 +13,7 @@ import (
 // so a run that failed outright returns no readings. A State reading with
 // Verdict Unknown changes no condition and is reported as a checker error
 // keyed "<reading key>/unreadable", so a condition that is deliberately not judged
-// this run (for example the internet while the router is down) is omitted
+// this run (for example a disk in standby) is omitted
 // rather than returned as Unknown.
 type Check struct {
 	// Name is the check name, the first segment of its condition keys.

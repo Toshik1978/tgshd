@@ -358,3 +358,32 @@ func TestJobCancelledByShutdownIsRetried(t *testing.T) {
 		t.Fatalf("daily retried %d times, want 1", len(j.daily))
 	}
 }
+
+// TestRestartRunsTheNetworkCheckFirst: the network state is not stored, so
+// after a restart the network check runs on the first tick although its
+// stored last run is recent; otherwise the checks that need the internet
+// would wait up to a whole network interval.
+func TestRestartRunsTheNetworkCheckFirst(t *testing.T) {
+	st := &fakeStore{}
+	st.state.KV = map[string]string{
+		"schedule.check.network.last": encodeTime(t0().Add(-time.Minute)),
+		"schedule.check.web.last":     encodeTime(t0().Add(-time.Hour)),
+	}
+	netw := newFakeCheck(nil, "network", reading(KeyNetwork, health.Good, "Network is reachable"))
+	netCheck := checkOf(netw)
+	netCheck.Interval = 5 * time.Minute
+	web := newFakeCheck(nil, "web", reading("http/web", health.Good, ""))
+	webCheck := checkOf(web)
+	webCheck.NeedsInternet = true
+	f := newFixture(t, st, netCheck, webCheck)
+
+	f.tick(t)
+
+	if netw.count() != 1 || web.count() != 1 {
+		t.Fatalf("network ran %d, web ran %d times on the first tick, want 1 and 1", netw.count(), web.count())
+	}
+	f.next(t)
+	if netw.count() != 1 {
+		t.Fatalf("network ran %d times, want its interval kept after the first run", netw.count())
+	}
+}

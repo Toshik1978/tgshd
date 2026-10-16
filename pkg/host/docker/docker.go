@@ -5,6 +5,7 @@ package docker
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -15,6 +16,9 @@ import (
 
 // callTimeout bounds every Engine API call so a hung daemon cannot stall a cycle.
 const callTimeout = 10 * time.Second
+
+// ErrNotFound is wrapped by Inspect when the named container does not exist.
+var ErrNotFound = errors.New("container not found")
 
 // Container is the safe subset of container state.
 type Container struct {
@@ -88,13 +92,19 @@ func (c *Client) List(ctx context.Context) ([]Container, error) {
 	return result, nil
 }
 
-// Inspect returns the state of the named container.
+// Inspect returns the state of the named container. When the inspect fails and
+// a re-list filtered by name finds no such container, the error wraps
+// ErrNotFound; any other failure is returned as it is.
 func (c *Client) Inspect(ctx context.Context, name string) (Container, error) {
 	ctx, cancel := context.WithTimeout(ctx, callTimeout)
 	defer cancel()
 
 	res, err := c.api.ContainerInspect(ctx, name, client.ContainerInspectOptions{})
 	if err != nil {
+		if c.missing(ctx, name) {
+			return Container{}, fmt.Errorf("inspect container %q: %w: %w", name, ErrNotFound, err)
+		}
+
 		return Container{}, fmt.Errorf("inspect container %q: %w", name, err)
 	}
 
@@ -111,6 +121,29 @@ func (c *Client) Restart(ctx context.Context, name string) error {
 	}
 
 	return nil
+}
+
+// missing reports whether a list filtered by name proves the container does
+// not exist. The name filter matches substrings, so the names are compared
+// exactly. A failing re-list proves nothing.
+func (c *Client) missing(ctx context.Context, name string) bool {
+	list, err := c.api.ContainerList(ctx, client.ContainerListOptions{
+		All:     true,
+		Filters: client.Filters{}.Add("name", name),
+	})
+	if err != nil {
+		return false
+	}
+
+	for i := range list.Items {
+		for _, n := range list.Items[i].Names {
+			if strings.TrimPrefix(n, "/") == name {
+				return false
+			}
+		}
+	}
+
+	return true
 }
 
 // inspect inspects one container under its own timeout. On failure it re-lists

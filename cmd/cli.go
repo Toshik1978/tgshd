@@ -12,6 +12,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -47,9 +48,9 @@ const (
 	labelBad     = "BAD"
 	labelUnknown = "UNKNOWN"
 
-	// schemaV1Notice is printed when the daemon has not migrated the state
+	// schemaOldNotice is printed when the daemon has not migrated the state
 	// database since the upgrade; the run goes on without stored state.
-	schemaV1Notice = "state database is at schema version 1; run the daemon once to migrate"
+	schemaOldNotice = "state database is at schema version %d; run the daemon once to migrate"
 )
 
 var (
@@ -144,7 +145,11 @@ func runCheckOnce(ctx context.Context, cfg *config, cio cliIO) int {
 	}
 
 	hs := &healthSetup{
-		Config: hc, Host: hostName(cfg.HostName, os.Hostname), Errors: configErrors(entryErrs), OneShot: true,
+		Config:  hc,
+		Host:    hostName(cfg.HostName, os.Hostname),
+		Errors:  configErrors(entryErrs),
+		OneShot: true,
+		Stderr:  cio.stderr,
 	}
 	closeState := attachState(ctx, hs, cio.stderr)
 	defer closeState()
@@ -208,8 +213,8 @@ func attachState(ctx context.Context, hs *healthSetup, stderr io.Writer) (closeS
 	st, err := openStateReadOnly(ctx, hs.Config.General.StateDir)
 	if err != nil {
 		var old *store.OldSchemaError
-		if errors.As(err, &old) && old.Version == 1 {
-			fmt.Fprintln(stderr, schemaV1Notice)
+		if errors.As(err, &old) && old.Version >= 1 {
+			fmt.Fprintf(stderr, schemaOldNotice+"\n", old.Version)
 		} else {
 			fmt.Fprintf(stderr, "tgshd check: stored state not used: %v\n", err)
 		}
@@ -282,8 +287,59 @@ func checkGraph(
 		fx.StopTimeout(checkStopTimeout),
 		fx.Supply(cfg, hs, logger),
 		providers,
+		fx.Invoke(bindStoredOpenState),
 		fx.Invoke(func(p in) { *sets = p.Sets }),
 	}
+}
+
+// bindStoredOpenState gives the temperatures check of a one-shot run the open
+// conditions of the read-only store, which the daemon answers from its runner.
+// Without a stored state (or a temperatures check) the open state stays
+// unbound and answers false.
+func bindStoredOpenState(p struct {
+	fx.In
+
+	Setup *healthSetup
+	Open  *openState `optional:"true"`
+},
+) {
+	if p.Open == nil || !p.Setup.OneShot || p.Setup.Store == nil {
+		return
+	}
+	p.Open.bind(&storedOpen{store: p.Setup.Store, stderr: p.Setup.Stderr})
+}
+
+// storedOpen answers IsOpen from the conditions in the stored state, loaded on
+// first use. A state that cannot be loaded leaves every condition closed.
+type storedOpen struct {
+	store  runner.Store
+	stderr io.Writer
+	once   sync.Once
+	open   map[string]bool
+}
+
+// IsOpen implements openSource.
+func (s *storedOpen) IsOpen(key string) bool {
+	s.once.Do(func() {
+		ctx, cancel := context.WithTimeout(context.Background(), checkStartTimeout)
+		defer cancel()
+		state, err := s.store.Load(ctx)
+		if err != nil {
+			if s.stderr != nil {
+				fmt.Fprintf(s.stderr, "tgshd check: temperature open state unavailable: %v\n", err)
+			}
+
+			return
+		}
+		s.open = make(map[string]bool, len(state.Conditions))
+		for i := range state.Conditions {
+			if c := &state.Conditions[i]; c.Open {
+				s.open[c.Key] = true
+			}
+		}
+	})
+
+	return s.open[key]
 }
 
 // collectCheckSets builds the checks through the providers
@@ -406,7 +462,11 @@ func writeAsleep(w io.Writer, book runner.DriveBook, now time.Time) {
 		if d.AsleepSince.IsZero() {
 			continue
 		}
-		fmt.Fprintf(w, "ASLEEP %s/%s: last read %s\n", disksCheckName, d.Serial, report.Ago(now.Sub(d.LastReadAt)))
+		lastRead := "never read"
+		if !d.LastReadAt.IsZero() {
+			lastRead = "last read " + report.Ago(now.Sub(d.LastReadAt))
+		}
+		fmt.Fprintf(w, "ASLEEP %s/%s: %s\n", disksCheckName, d.Serial, lastRead)
 	}
 }
 

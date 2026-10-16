@@ -161,11 +161,18 @@ type Check struct {
 	src   Source
 	state State
 	now   func() time.Time
+
+	stamps StampSource
 }
 
 // New builds the check for one entry. now is the injected clock.
-func New(cfg config.Freshness, src Source, state State, now func() time.Time) *Check {
-	return &Check{cfg: cfg, src: src, state: state, now: now}
+func New(cfg config.Freshness, src Source, state State, now func() time.Time, opts ...Option) *Check {
+	c := &Check{cfg: cfg, src: src, state: state, now: now}
+	for _, o := range opts {
+		o(c)
+	}
+
+	return c
 }
 
 // Run reads the file's timestamp and judges it against max_age.
@@ -174,12 +181,18 @@ func New(cfg config.Freshness, src Source, state State, now func() time.Time) *C
 // run that saw it missing (not broken yet, and Good would falsely resolve an
 // open stale-file problem), then Bad. Any other read or parse failure is Unknown and leaves
 // the first-missing mark untouched.
-func (c *Check) Run(_ context.Context) health.CheckResult {
+func (c *Check) Run(ctx context.Context) health.CheckResult {
 	now := c.now()
 	reading := health.Reading{Key: "freshness/" + c.cfg.Name, Kind: health.State}
 
-	stamp, err := c.timestamp()
+	stamp, err := c.timestamp(ctx)
 	switch {
+	case isCheckError(err):
+		// Before the missing-file case: a stamp fetch error may wrap
+		// fs.ErrNotExist, but only a missing file earns the grace window.
+		c.state.RecordNoStamp(c.cfg.Name, false)
+
+		return health.CheckResult{Err: err}
 	case errors.Is(err, fs.ErrNotExist):
 		var judged bool
 
@@ -200,7 +213,16 @@ func (c *Check) Run(_ context.Context) health.CheckResult {
 	return health.CheckResult{Readings: []health.Reading{reading}}
 }
 
-func (c *Check) timestamp() (time.Time, error) {
+func isCheckError(err error) bool {
+	var ce health.CheckError
+
+	return errors.As(err, &ce)
+}
+
+func (c *Check) timestamp(ctx context.Context) (time.Time, error) {
+	if c.cfg.URL != "" {
+		return c.httpStamp(ctx)
+	}
 	if c.cfg.Content == config.ContentMtime {
 		t, err := c.src.ModTime(c.cfg.Path)
 		if err != nil {
@@ -220,16 +242,25 @@ func (c *Check) timestamp() (time.Time, error) {
 	return time.Unix(sec, 0), nil
 }
 
+// judgeAge judges the signed age (now minus stamp). A stamp further ahead of
+// now than future_tolerance is Bad: a broken clock or writer would otherwise
+// hide a failing job until that date.
 func (c *Check) judgeAge(r health.Reading, age time.Duration) health.Reading {
+	if ahead := -age; ahead > c.cfg.FutureTolerance.Duration() {
+		r.Verdict = health.Bad
+		r.Text = fmt.Sprintf("freshness %s: %s is dated %s in the future",
+			c.cfg.Name, c.location(), ahead.Round(time.Second))
+		return r
+	}
 	maxAge := c.cfg.MaxAge.Duration()
 	if age > maxAge {
 		r.Verdict = health.Bad
 		r.Text = fmt.Sprintf("freshness %s: %s is %s old (max %s)",
-			c.cfg.Name, c.cfg.Path, age.Round(time.Second), maxAge)
+			c.cfg.Name, c.location(), age.Round(time.Second), maxAge)
 		return r
 	}
 	r.Verdict = health.Good
-	r.Text = fmt.Sprintf("freshness %s: %s is fresh", c.cfg.Name, c.cfg.Path)
+	r.Text = fmt.Sprintf("freshness %s: %s is fresh", c.cfg.Name, c.location())
 
 	return r
 }

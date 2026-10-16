@@ -9,6 +9,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"errors"
+	"fmt"
 	"math/big"
 	"net"
 	"net/http"
@@ -623,7 +624,10 @@ func TestRedirects(t *testing.T) {
 			rec := &recorder{}
 			srv := newHTTPServer(t, redirectHandler(rec))
 
-			res := mustNew(t, entry(srv.URL+"/hop/"+strconv.Itoa(tt.hops)), httpcheck.Options{}).Run(t.Context())
+			e := entry(srv.URL + "/hop/" + strconv.Itoa(tt.hops))
+			e.FollowRedirects = true
+
+			res := mustNew(t, e, httpcheck.Options{}).Run(t.Context())
 			wantVerdict(t, res, tt.verdict, tt.text)
 		})
 	}
@@ -637,6 +641,7 @@ func TestRedirectToSameHostKeepsConnectTo(t *testing.T) {
 	d := &fakeDialer{target: srv.Listener.Addr().String()}
 	e := entry("http://" + appHost + "/hop/2")
 	e.ConnectTo = "192.0.2.5"
+	e.FollowRedirects = true
 
 	wantVerdict(t, mustNew(t, e, httpcheck.Options{Dialer: d}).Run(t.Context()), health.Good, "status 200")
 
@@ -672,6 +677,7 @@ func TestConnectToAppliesOnlyToURLHost(t *testing.T) {
 	d := &fakeDialer{target: srv.Listener.Addr().String()}
 	e := entry("http://" + appHost + "/")
 	e.ConnectTo = "192.0.2.5"
+	e.FollowRedirects = true
 
 	wantVerdict(t, mustNew(t, e, httpcheck.Options{Dialer: d}).Run(t.Context()), health.Good, "status 200")
 
@@ -941,6 +947,7 @@ func TestSecretHeaderNotForwardedToOtherHost(t *testing.T) {
 	}))
 	e := entry("http://" + appHost + "/")
 	e.Header = &config.Header{Name: "X-Api-Key", ValueEnv: tokenEnv}
+	e.FollowRedirects = true
 
 	res := mustNew(t, e, httpcheck.Options{
 		Dialer:    &fakeDialer{target: srv.Listener.Addr().String()},
@@ -975,6 +982,7 @@ func TestSecretHeaderNotForwardedOnDowngrade(t *testing.T) {
 	}}
 	e := entry("https://" + appHost + "/")
 	e.Header = &config.Header{Name: "X-Api-Key", ValueEnv: tokenEnv}
+	e.FollowRedirects = true
 
 	res := mustNew(t, e, httpcheck.Options{Dialer: d, TLSConfig: tlsCfg, LookupEnv: envWith(tokenEnv, secret)}).
 		Run(t.Context())
@@ -1086,4 +1094,274 @@ func countEqual(values []string, want string) int {
 	}
 
 	return n
+}
+
+// TestRedirectNotFollowed proves US5 acceptance scenario 3: by default a
+// redirect is not followed and the first response is judged against status.
+func TestRedirectNotFollowed(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		status  [2]int
+		verdict health.Verdict
+		text    string
+	}{
+		{"redirect inside the default range is up", [2]int{200, 399}, health.Good, "status 302"},
+		{"redirect outside the range is down", [2]int{200, 299}, health.Bad, "status 302, expected 200-299"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			rec := &recorder{}
+			srv := newHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				rec.record(req)
+
+				if req.URL.Path == "/" {
+					http.Redirect(w, req, "http://example.org/login", http.StatusFound)
+
+					return
+				}
+
+				w.WriteHeader(http.StatusOK)
+			}))
+			d := &fakeDialer{target: srv.Listener.Addr().String()}
+			e := entry("http://" + appHost + "/")
+			e.Status = tt.status
+
+			wantVerdict(t, mustNew(t, e, httpcheck.Options{Dialer: d}).Run(t.Context()), tt.verdict, tt.text)
+
+			if got := d.addresses(); len(got) != 1 || got[0] != appHost+":80" {
+				t.Fatalf("dialed %v, want only the URL host (redirect not followed)", got)
+			}
+
+			if rec.calls() != 1 {
+				t.Fatalf("server saw %d requests, want 1", rec.calls())
+			}
+		})
+	}
+}
+
+func TestMissingContainerDown(t *testing.T) {
+	t.Parallel()
+
+	rec := &recorder{}
+	srv := newHTTPServer(t, statusHandler(rec, http.StatusOK))
+	e := entry(srv.URL)
+	e.Container = "web"
+	ctrs := &fakeContainers{err: fmt.Errorf("docker: %w", httpcheck.ErrContainerNotFound)}
+
+	res := mustNew(t, e, httpcheck.Options{Containers: ctrs}).Run(t.Context())
+	wantVerdict(t, res, health.Bad, "container web does not exist")
+
+	if res.Err != nil {
+		t.Fatalf("err = %v, want none: a missing container is judged, not unreadable", res.Err)
+	}
+}
+
+func TestAuthRefusalCheckerError(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name    string
+		mode    config.AuthRefusal
+		status  int
+		wantErr string // empty: a Bad reading is expected instead
+		badText string
+	}{
+		{
+			"401 checker error",
+			config.AuthRefusalCheckerError,
+			http.StatusUnauthorized,
+			"endpoint refused the credentials (401)",
+			"",
+		},
+		{
+			"403 checker error",
+			config.AuthRefusalCheckerError,
+			http.StatusForbidden,
+			"endpoint refused the credentials (403)",
+			"",
+		},
+		{
+			"500 stays down",
+			config.AuthRefusalCheckerError,
+			http.StatusInternalServerError,
+			"",
+			"status 500, expected 200-399",
+		},
+		{"401 down by default", config.AuthRefusalDown, http.StatusUnauthorized, "", "status 401, expected 200-399"},
+		{"403 down when unset", "", http.StatusForbidden, "", "status 403, expected 200-399"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			rec := &recorder{}
+			srv := newHTTPServer(t, statusHandler(rec, tt.status))
+			e := entry(srv.URL)
+			e.AuthRefusal = tt.mode
+			e.Header = &config.Header{Name: "Authorization", ValueEnv: tokenEnv, Prefix: "Bearer "}
+
+			res := mustNew(t, e, httpcheck.Options{LookupEnv: envWith(tokenEnv, secret)}).Run(t.Context())
+
+			if tt.wantErr == "" {
+				wantVerdict(t, res, health.Bad, tt.badText)
+
+				return
+			}
+
+			wantUnjudged(t, res, tt.wantErr)
+
+			ces := health.CheckErrors(res.Err)
+			if len(ces) != 1 || ces[0].Key(key) != key+"/auth" {
+				t.Fatalf("check errors = %+v, want one keyed %s/auth", ces, key)
+			}
+
+			if strings.Contains(res.Err.Error(), secret) {
+				t.Fatalf("err %q leaks the secret", res.Err)
+			}
+		})
+	}
+}
+
+func TestExtraPlaceholder(t *testing.T) {
+	t.Parallel()
+
+	markers := []string{"sample-key", "Not-Deployed"}
+
+	tests := []struct {
+		name  string
+		value string
+		ok    bool
+	}{
+		{"exact marker", "sample-key", false},
+		{"marker in another case", "SAMPLE-KEY", false},
+		{"marker inside the value", "abc-Sample-Key-123", false},
+		{"marker given in mixed case", "not-deployed", false},
+		{"built-in word still rejected", "changeme", false},
+		{"real-looking secret", secret, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			h := config.Header{Name: "Authorization", ValueEnv: tokenEnv, Prefix: "Bearer ", Placeholders: markers}
+
+			got, err := httpcheck.HeaderSecret(&h, envWith(tokenEnv, tt.value))
+			if tt.ok {
+				if err != nil || got != "Bearer "+tt.value {
+					t.Fatalf("HeaderSecret = %q, %v, want the prefixed value", got, err)
+				}
+
+				return
+			}
+
+			if !errors.Is(err, httpcheck.ErrSecret) || !strings.Contains(err.Error(), "placeholder") {
+				t.Fatalf("HeaderSecret err = %v, want ErrSecret naming a placeholder", err)
+			}
+
+			if strings.Contains(err.Error(), tt.value) {
+				t.Fatalf("err %q leaks the value", err)
+			}
+
+			// The check itself uses the same rule: no request, no reading.
+			rec := &recorder{}
+			srv := newHTTPServer(t, statusHandler(rec, http.StatusOK))
+			e := entry(srv.URL)
+			e.Header = &h
+
+			wantUnjudged(t, mustNew(t, e, httpcheck.Options{LookupEnv: envWith(tokenEnv, tt.value)}).Run(t.Context()),
+				"placeholder")
+
+			if rec.calls() != 0 {
+				t.Fatalf("server saw %d requests with a placeholder secret, want 0", rec.calls())
+			}
+		})
+	}
+}
+
+func TestHeaderSecretWithoutHeader(t *testing.T) {
+	t.Parallel()
+
+	if got, err := httpcheck.HeaderSecret(nil, noEnv); got != "" || err != nil {
+		t.Fatalf("HeaderSecret(nil) = %q, %v, want empty and no error", got, err)
+	}
+}
+
+// dohEntry is an entry for appHost that resolves through DoH.
+func dohEntry() config.HTTP {
+	e := entry("https://" + appHost + "/health")
+	e.DoH = "https://doh.example.org/dns-query"
+
+	return e
+}
+
+// TestDoHNXDomainDown proves US5 acceptance scenario 6 (first half): a
+// resolver that answers that the name does not exist makes the endpoint down.
+func TestDoHNXDomainDown(t *testing.T) {
+	t.Parallel()
+
+	d := &fakeDialer{err: errors.New("must not dial")}
+	r := &fakeResolver{err: fmt.Errorf("lookup: %w", httpcheck.ErrNameNotFound)}
+
+	res := mustNew(t, dohEntry(), httpcheck.Options{Dialer: d, Resolver: r}).Run(t.Context())
+	wantVerdict(t, res, health.Bad, "name "+appHost+" does not exist")
+
+	if res.Err != nil {
+		t.Fatalf("err = %v, want none: NXDOMAIN is a judgement", res.Err)
+	}
+
+	if len(d.addresses()) != 0 {
+		t.Fatalf("dialed %v after NXDOMAIN", d.addresses())
+	}
+}
+
+func TestDoHNoDataDown(t *testing.T) {
+	t.Parallel()
+
+	d := &fakeDialer{err: errors.New("must not dial")}
+	r := &fakeResolver{err: fmt.Errorf("lookup: %w", httpcheck.ErrNoAddress)}
+
+	res := mustNew(t, dohEntry(), httpcheck.Options{Dialer: d, Resolver: r}).Run(t.Context())
+	wantVerdict(t, res, health.Bad, "name "+appHost+" has no address")
+
+	if res.Err != nil {
+		t.Fatalf("err = %v, want none: NODATA is a judgement", res.Err)
+	}
+}
+
+// TestDoHUnreachableUnknown proves US5 acceptance scenario 6 (second half):
+// any resolver failure other than a definitive negative answer is unreadable.
+func TestDoHUnreachableUnknown(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{"resolver unreachable", errors.New("send request: connection refused")},
+		{"SERVFAIL", errors.New("doh: A query: DNS error RCodeServerFailure")},
+		{"non-200 status", errors.New("unexpected HTTP status 502 Bad Gateway")},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			d := &fakeDialer{err: errors.New("must not dial")}
+			r := &fakeResolver{err: tt.err}
+
+			res := mustNew(t, dohEntry(), httpcheck.Options{Dialer: d, Resolver: r}).Run(t.Context())
+			wantUnjudged(t, res, "resolve "+appHost)
+
+			if !errors.Is(res.Err, tt.err) {
+				t.Fatalf("err = %v, want it to wrap the resolver error", res.Err)
+			}
+		})
+	}
 }

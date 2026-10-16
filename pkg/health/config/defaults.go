@@ -37,8 +37,12 @@ func defaultSummary() Summary {
 	return Summary{WeekdayName: "monday", Time: "09:00"}
 }
 
+// thresholdIsInterval marks a network threshold left out of the config; it
+// resolves to the network interval once the section is decoded (FR-035).
+const thresholdIsInterval = Duration(-1)
+
 func defaultNetwork() Network {
-	return Network{Common: common(5*time.Minute, 0, ModeSMS)}
+	return Network{Common: common(5*time.Minute, time.Duration(thresholdIsInterval), ModeSMS)}
 }
 
 func defaultUPS() UPS {
@@ -77,6 +81,8 @@ func defaultHTTP() HTTP {
 		Common:  common(10*time.Minute, 10*time.Minute, ModeTLG),
 		Timeout: Duration(15 * time.Second),
 		Status:  [2]int{200, 399},
+
+		AuthRefusal: AuthRefusalDown,
 	}
 }
 
@@ -84,6 +90,9 @@ func defaultFreshness() Freshness {
 	return Freshness{
 		Common:  common(15*time.Minute, 0, ModeTLG),
 		Content: ContentEpoch,
+
+		FutureTolerance: Duration(time.Hour),
+		Timeout:         Duration(15 * time.Second),
 	}
 }
 
@@ -92,6 +101,8 @@ func defaultCommand() Command {
 		Common:  common(5*time.Minute, 0, ModeTLG),
 		Timeout: Duration(health.MaxCheckTimeout),
 		Report:  ReportAlert,
+
+		TimeoutVerdict: TimeoutBroken,
 	}
 }
 

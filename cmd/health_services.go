@@ -2,9 +2,11 @@ package main
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"maps"
+	"net/netip"
 	"os"
 	"sync"
 	"time"
@@ -24,6 +26,7 @@ import (
 	"github.com/Toshik1978/tgshd/pkg/health/store"
 	"github.com/Toshik1978/tgshd/pkg/host/docker"
 	"github.com/Toshik1978/tgshd/pkg/host/execprobe"
+	"github.com/Toshik1978/tgshd/pkg/host/httpstamp"
 )
 
 const (
@@ -103,7 +106,7 @@ func buildHTTPChecks(entries []hcfg.HTTP, ctrs httpcheck.Containers) checkSet {
 		if e.DoH != "" {
 			// The default client has no timeout of its own; the check bounds
 			// every lookup by the entry's timeout.
-			opts.Resolver = doh.New(e.DoH, nil)
+			opts.Resolver = dohResolver{doh.New(e.DoH, nil)}
 		}
 		chk, err := httpcheck.New(*e, opts)
 		if err != nil {
@@ -119,6 +122,29 @@ func buildHTTPChecks(entries []hcfg.HTTP, ctrs httpcheck.Containers) checkSet {
 	return set
 }
 
+// dohLookup is the part of *doh.Resolver the adapter wraps.
+type dohLookup interface {
+	Lookup(ctx context.Context, host string) ([]netip.Addr, error)
+}
+
+// dohResolver adapts a DoH resolver to httpcheck.Resolver. The pure check
+// package does not import pkg/doh, so the definitive negative answers are
+// mapped onto its sentinels here; every other error passes through.
+type dohResolver struct{ dohLookup }
+
+func (r dohResolver) Lookup(ctx context.Context, host string) ([]netip.Addr, error) {
+	addrs, err := r.dohLookup.Lookup(ctx, host)
+
+	switch {
+	case errors.Is(err, doh.ErrNXDomain):
+		return nil, fmt.Errorf("%w: %w", httpcheck.ErrNameNotFound, err)
+	case errors.Is(err, doh.ErrNoAddresses):
+		return nil, fmt.Errorf("%w: %w", httpcheck.ErrNoAddress, err)
+	default:
+		return addrs, err //nolint:wrapcheck // passed through unchanged; the check adds the context
+	}
+}
+
 // freshnessChecks provides one freshness check per configured entry. Their
 // first-missing marks and stamps share one state, persisted in the store's
 // kv; the weekly summary reads the stamps from it.
@@ -131,9 +157,13 @@ func freshnessChecks(hs *healthSetup) checkSet {
 		names = append(names, hs.Config.Freshness[i].Name)
 	}
 	state := newFreshnessState(names)
+	// Entries with a url read their stamp through the HTTP adapter; the
+	// header secret is read from the environment by the check itself.
+	stamps := freshness.WithStampSource(httpstamp.New(nil))
 	set := checkSet{Persisters: []runner.Persister{state}, Stamps: state}
-	for _, e := range hs.Config.Freshness {
-		chk := freshness.New(e, osFiles{}, state, time.Now)
+	for i := range hs.Config.Freshness {
+		e := hs.Config.Freshness[i]
+		chk := freshness.New(e, osFiles{}, state, time.Now, stamps)
 		set.Checks = append(set.Checks, newCheck(freshnessCheckPrefix+e.Name, e.Common, chk.Run))
 	}
 
@@ -457,9 +487,14 @@ func (d *lazyDocker) List(ctx context.Context) ([]containers.Container, error) {
 }
 
 // ContainerHealthy implements httpcheck.Containers: the container runs and
-// its health check, if it has one, reports healthy.
+// its health check, if it has one, reports healthy. A container that does not
+// exist is reported as httpcheck.ErrContainerNotFound, which the pure check
+// judges down (it does not import pkg/host/docker).
 func (d *lazyDocker) ContainerHealthy(ctx context.Context, name string) (bool, error) {
 	c, err := d.inspect(ctx, name)
+	if errors.Is(err, docker.ErrNotFound) {
+		return false, fmt.Errorf("%w: %w", httpcheck.ErrContainerNotFound, err)
+	}
 	if err != nil {
 		return false, err
 	}

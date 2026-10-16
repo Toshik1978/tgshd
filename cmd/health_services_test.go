@@ -3,25 +3,33 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
+	"io"
 	"io/fs"
 	"maps"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
+	"net/url"
 	"os"
 	"path/filepath"
 	"slices"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"go.uber.org/fx/fxtest"
 	"go.uber.org/zap"
+	"golang.org/x/net/dns/dnsmessage"
 
+	"github.com/Toshik1978/tgshd/pkg/doh"
 	"github.com/Toshik1978/tgshd/pkg/health"
 	"github.com/Toshik1978/tgshd/pkg/health/check/command"
 	"github.com/Toshik1978/tgshd/pkg/health/check/freshness"
+	"github.com/Toshik1978/tgshd/pkg/health/check/httpcheck"
 	hcfg "github.com/Toshik1978/tgshd/pkg/health/config"
 	"github.com/Toshik1978/tgshd/pkg/health/runner"
 	"github.com/Toshik1978/tgshd/pkg/health/store"
@@ -55,7 +63,7 @@ func (f *fakeDocker) Inspect(_ context.Context, name string) (docker.Container, 
 	}
 	c, ok := f.containers[name]
 	if !ok {
-		return docker.Container{}, errors.New("no such container")
+		return docker.Container{}, fmt.Errorf("inspect container %q: %w", name, docker.ErrNotFound)
 	}
 
 	return c, nil
@@ -87,16 +95,17 @@ func (f *fakeDocker) restarts() []string {
 type fakeProbe struct {
 	mu    sync.Mutex
 	codes map[string]int
+	out   map[string]string
 	ran   [][]string
 }
 
-func (f *fakeProbe) Run(_ context.Context, argv []string) (int, error) {
+func (f *fakeProbe) Run(_ context.Context, argv []string) (int, []byte, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
 	f.ran = append(f.ran, slices.Clone(argv))
 
-	return f.codes[argv[0]], nil
+	return f.codes[argv[0]], []byte(f.out[argv[0]]), nil
 }
 
 func (f *fakeProbe) runs() [][]string {
@@ -218,6 +227,58 @@ func TestHTTPCheckJudgesItsContainer(t *testing.T) {
 	res := set.Checks[0].Run(t.Context())
 	if !hasKey(res.Readings, "http/app", health.Bad) || res.Err != nil {
 		t.Fatalf("result = %+v, want Bad for the unhealthy container", res)
+	}
+}
+
+func TestHTTPCheckJudgesAMissingContainerDown(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	d := lazyOver(&fakeDocker{containers: map[string]docker.Container{}}, nil)
+	set := buildHTTPChecks([]hcfg.HTTP{{
+		Name: "app", URL: srv.URL, Timeout: hcfg.Duration(5 * time.Second), Status: [2]int{200, 399},
+		Container: "web", Common: commonOf(time.Minute, 0),
+	}}, d)
+
+	res := set.Checks[0].Run(t.Context())
+	if !hasKey(res.Readings, "http/app", health.Bad) || res.Err != nil {
+		t.Fatalf("result = %+v, want Bad for the missing container", res)
+	}
+	if got := res.Readings[0].Text; !strings.Contains(got, "container web does not exist") {
+		t.Fatalf("text = %q, want the missing container named", got)
+	}
+}
+
+func TestLazyDockerMapsAMissingContainer(t *testing.T) {
+	t.Parallel()
+
+	errOther := errors.New("engine API unavailable")
+
+	tests := []struct {
+		name         string
+		api          *fakeDocker
+		wantNotFound bool
+	}{
+		{"missing container", &fakeDocker{containers: map[string]docker.Container{}}, true},
+		{"other failure", &fakeDocker{err: errOther}, false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			_, err := lazyOver(tt.api, nil).ContainerHealthy(t.Context(), "web")
+			if err == nil {
+				t.Fatal("ContainerHealthy() error = nil, want an error")
+			}
+			if got := errors.Is(err, httpcheck.ErrContainerNotFound); got != tt.wantNotFound {
+				t.Fatalf("errors.Is(%v, ErrContainerNotFound) = %v, want %v", err, got, tt.wantNotFound)
+			}
+		})
 	}
 }
 
@@ -498,6 +559,24 @@ func TestCommandFixesAreHandedToTheRunner(t *testing.T) {
 	}
 }
 
+func TestCommandOutputPatternsReachTheCheck(t *testing.T) {
+	t.Parallel()
+
+	probe := &fakeProbe{
+		codes: map[string]int{"queue-ok": 0},
+		out:   map[string]string{"queue-ok": "queue DEGRADED\n"},
+	}
+	cmd := failingCommand(hcfg.Fix{RestartContainer: "worker"}, hcfg.ReportAlert)
+	cmd.Fix = nil
+	cmd.ForbidOutput = "DEGRADED"
+	set := buildCommandChecks([]hcfg.Command{cmd}, probe, lazyOver(&fakeDocker{}, nil), false, zap.NewNop())
+
+	res := set.Checks[0].Run(t.Context())
+	if !hasKey(res.Readings, "command/queue", health.Bad) || !strings.Contains(res.Readings[0].Text, "forbid_output") {
+		t.Fatalf("result = %+v", res)
+	}
+}
+
 func TestOneShotCommandChecksNeverFix(t *testing.T) {
 	t.Parallel()
 
@@ -723,5 +802,214 @@ func TestMergeCheckSetsKeepsSummaryFeeds(t *testing.T) {
 	}
 	if empty := mergeCheckSets(nil); empty.Stamps != nil || empty.Probe != nil {
 		t.Fatalf("no feeds: stamps = %v, probe = %v, want nil interfaces", empty.Stamps, empty.Probe)
+	}
+}
+
+type fakeLookup struct {
+	addrs []netip.Addr
+	err   error
+}
+
+func (f fakeLookup) Lookup(context.Context, string) ([]netip.Addr, error) { return f.addrs, f.err }
+
+func TestDoHResolverMapsErrors(t *testing.T) {
+	t.Parallel()
+
+	errOther := errors.New("DNS error SERVFAIL")
+	addr := netip.MustParseAddr("192.0.2.7")
+
+	tests := []struct {
+		name      string
+		in        error
+		addrs     []netip.Addr
+		want      error
+		wantOther bool
+	}{
+		{name: "success", addrs: []netip.Addr{addr}},
+		{name: "nxdomain", in: fmt.Errorf("lookup: %w", doh.ErrNXDomain), want: httpcheck.ErrNameNotFound},
+		{name: "no data", in: fmt.Errorf("lookup: %w", doh.ErrNoAddresses), want: httpcheck.ErrNoAddress},
+		{name: "other error passes through", in: errOther, want: errOther, wantOther: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			got, err := dohResolver{fakeLookup{addrs: tt.addrs, err: tt.in}}.Lookup(t.Context(), "www.example.org")
+			if tt.want == nil {
+				if err != nil || len(got) != 1 || got[0] != addr {
+					t.Fatalf("Lookup() = %v, %v, want the address", got, err)
+				}
+
+				return
+			}
+			if !errors.Is(err, tt.want) {
+				t.Fatalf("error = %v, want %v", err, tt.want)
+			}
+			if tt.wantOther && (errors.Is(err, httpcheck.ErrNameNotFound) || errors.Is(err, httpcheck.ErrNoAddress)) {
+				t.Errorf("error = %v must not map onto a sentinel", err)
+			}
+		})
+	}
+}
+
+// TestFreshnessURLEntryReadsItsStampOverHTTP: a url entry is read through the
+// httpstamp adapter, with a header whose secret comes from the environment.
+func TestFreshnessURLEntryReadsItsStampOverHTTP(t *testing.T) {
+	t.Setenv("TEST_STAMP_TOKEN", "s3cret-value")
+
+	now := time.Now()
+	var gotHeader atomic.Value // the handler runs on the server's goroutine
+	gotHeader.Store("")
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotHeader.Store(r.Header.Get("X-Token"))
+		_, _ = fmt.Fprint(w, now.Add(-time.Hour).Unix())
+	}))
+	defer srv.Close()
+
+	hs := &healthSetup{Config: &hcfg.Config{Freshness: []hcfg.Freshness{{
+		Name: "dump", URL: srv.URL, Content: hcfg.ContentEpoch, MaxAge: hcfg.Duration(26 * time.Hour),
+		Timeout: hcfg.Duration(5 * time.Second), Common: commonOf(time.Minute, 0),
+		Header: &hcfg.Header{Name: "X-Token", ValueEnv: "TEST_STAMP_TOKEN"},
+	}}}}
+	set := freshnessChecks(hs)
+
+	res := set.Checks[0].Run(t.Context())
+	if res.Err != nil || !hasKey(res.Readings, "freshness/dump", health.Good) {
+		t.Fatalf("result = %+v, want OK from the fetched stamp", res)
+	}
+	if got := gotHeader.Load(); got != "s3cret-value" {
+		t.Errorf("header = %q, want the env secret", got)
+	}
+	want := now.Add(-time.Hour).Unix()
+	if stamp, present, readOK := set.Stamps.Stamp("dump"); !present || !readOK || stamp.Unix() != want {
+		t.Errorf("stamp = %v %v %v", stamp, present, readOK)
+	}
+}
+
+// TestHTTPCheckJudgesTheFirstResponseOfARedirect: without follow_redirects a
+// redirecting server is judged on its 302, not on the page behind it.
+func TestHTTPCheckJudgesTheFirstResponseOfARedirect(t *testing.T) {
+	t.Parallel()
+
+	var followed atomic.Bool // the handler runs on the server's goroutine
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/final" {
+			followed.Store(true)
+
+			return
+		}
+		http.Redirect(w, r, "/final", http.StatusFound)
+	}))
+	defer srv.Close()
+
+	entry := func(status [2]int) hcfg.HTTP {
+		return hcfg.HTTP{
+			Name: "app", URL: srv.URL, Timeout: hcfg.Duration(5 * time.Second), Status: status,
+			Common: commonOf(time.Minute, 0),
+		}
+	}
+	bad := buildHTTPChecks([]hcfg.HTTP{entry([2]int{200, 299})}, lazyOver(&fakeDocker{}, nil)).Checks[0].Run(
+		t.Context(),
+	)
+	if !hasKey(bad.Readings, "http/app", health.Bad) {
+		t.Fatalf("result = %+v, want Bad: the 302 is outside 200-299", bad)
+	}
+	ok := buildHTTPChecks([]hcfg.HTTP{entry([2]int{300, 399})}, lazyOver(&fakeDocker{}, nil)).Checks[0].Run(t.Context())
+	if !hasKey(ok.Readings, "http/app", health.Good) {
+		t.Fatalf("result = %+v, want OK: the 302 is inside 300-399", ok)
+	}
+	if followed.Load() {
+		t.Error("the redirect was followed")
+	}
+}
+
+// TestHTTPCheckResolvesThroughItsDoHEndpoint: an entry that sets doh resolves
+// the host through that endpoint, and the target is dialled at the answer.
+func TestHTTPCheckResolvesThroughItsDoHEndpoint(t *testing.T) {
+	t.Parallel()
+
+	web := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer web.Close()
+	webURL, err := url.Parse(web.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := webURL.Port()
+
+	var asked []string
+	var mu sync.Mutex
+	dohSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var q dnsmessage.Message
+		if err := q.Unpack(body); err != nil || len(q.Questions) != 1 {
+			http.Error(w, "bad query", http.StatusBadRequest)
+
+			return
+		}
+		mu.Lock()
+		asked = append(asked, q.Questions[0].Name.String())
+		mu.Unlock()
+		resp := dnsmessage.Message{Questions: q.Questions}
+		resp.ID, resp.Response = q.ID, true
+		if q.Questions[0].Type == dnsmessage.TypeA {
+			resp.Answers = []dnsmessage.Resource{
+				{
+					Header: dnsmessage.ResourceHeader{
+						Name:  q.Questions[0].Name,
+						Type:  dnsmessage.TypeA,
+						Class: dnsmessage.ClassINET,
+						TTL:   60,
+					},
+					Body: &dnsmessage.AResource{A: [4]byte{127, 0, 0, 1}},
+				},
+			}
+		}
+		packed, _ := resp.Pack()
+		w.Header().Set("Content-Type", "application/dns-message")
+		_, _ = w.Write(packed)
+	}))
+	defer dohSrv.Close()
+
+	set := buildHTTPChecks([]hcfg.HTTP{{
+		Name: "app", URL: "http://app.example.org:" + port + "/", DoH: dohSrv.URL,
+		Timeout: hcfg.Duration(5 * time.Second), Status: [2]int{200, 299}, Common: commonOf(time.Minute, 0),
+	}}, lazyOver(&fakeDocker{}, nil))
+
+	res := set.Checks[0].Run(t.Context())
+	if res.Err != nil || !hasKey(res.Readings, "http/app", health.Good) {
+		t.Fatalf("result = %+v, want OK through the DoH answer", res)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if len(asked) == 0 || asked[0] != "app.example.org." {
+		t.Errorf("DoH queries = %v, want app.example.org.", asked)
+	}
+}
+
+// TestCommandCheckJudgesItsOutputThroughTheRunner: the daemon's probe runner
+// captures output, and the check judges expect_output on it.
+func TestCommandCheckJudgesItsOutputThroughTheRunner(t *testing.T) {
+	t.Parallel()
+
+	script := filepath.Join(t.TempDir(), "probe.sh")
+	// Run through /bin/sh rather than exec'ing the script: a parallel test's
+	// fork can inherit the write descriptor and fail the exec with ETXTBSY.
+	if err := os.WriteFile(script, []byte("echo 'queue DEGRADED'\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	entry := hcfg.Command{
+		Name: "queue", Run: []string{"/bin/sh", script}, Timeout: hcfg.Duration(5 * time.Second),
+		ExpectOutput: "HEALTHY", Common: commonOf(time.Minute, 0),
+	}
+	set := commandChecks(
+		&healthSetup{Config: &hcfg.Config{Command: []hcfg.Command{entry}}},
+		lazyOver(&fakeDocker{}, nil),
+		zap.NewNop(),
+	)
+
+	res := set.Checks[0].Run(t.Context())
+	if !hasKey(res.Readings, "command/queue", health.Bad) || !strings.Contains(res.Readings[0].Text, "expect_output") {
+		t.Fatalf("result = %+v, want Bad on the unmatched expect_output", res)
 	}
 }

@@ -19,15 +19,33 @@ import (
 // left at bound time; with less left the margin is shorter than WaitDelay.
 const WaitDelay = time.Second
 
-// Runner runs commands directly (no shell) and discards their output.
+// MaxOutput caps the captured output; the excess is discarded.
+const MaxOutput = 64 << 10
+
+// Runner runs commands directly (no shell) and captures their output.
 type Runner struct{}
 
-// Run executes argv and returns its exit code. A command that exits non-zero
-// is not an error. When ctx ends the context error is returned; a command
-// that cannot be started returns the start error.
-func (Runner) Run(ctx context.Context, argv []string) (int, error) {
+// capWriter keeps the first MaxOutput bytes and silently drops the rest, so
+// the child never blocks on a full pipe.
+type capWriter struct{ buf []byte }
+
+func (w *capWriter) Write(p []byte) (int, error) {
+	if room := MaxOutput - len(w.buf); room > 0 {
+		w.buf = append(w.buf, p[:min(room, len(p))]...)
+	}
+
+	return len(p), nil
+}
+
+// Run executes argv and returns its exit code and its stdout and stderr
+// together (at most MaxOutput bytes; never logged here). A command that exits
+// non-zero is not an error. When ctx ends the context error is returned; a
+// command that cannot be started returns the start error. A command whose
+// background child holds the output past WaitDelay keeps its own exit code
+// and the output captured so far, and that child's process group is killed.
+func (Runner) Run(ctx context.Context, argv []string) (int, []byte, error) {
 	if len(argv) == 0 {
-		return -1, errors.New("empty command")
+		return -1, nil, errors.New("empty command")
 	}
 	//nolint:gosec // argv is operator configuration and runs without a shell.
 	cmd := exec.CommandContext(ctx, argv[0], argv[1:]...)
@@ -37,19 +55,28 @@ func (Runner) Run(ctx context.Context, argv []string) (int, error) {
 		return killGroup(cmd.Process)
 	}
 	cmd.WaitDelay = WaitDelay
+	out := &capWriter{}
+	cmd.Stdout, cmd.Stderr = out, out
 	err := cmd.Run()
 	if ctxErr := ctx.Err(); ctxErr != nil {
-		return -1, fmt.Errorf("run %s: %w", argv[0], ctxErr)
+		return -1, nil, fmt.Errorf("run %s: %w", argv[0], ctxErr)
 	}
 	var ee *exec.ExitError
 	switch {
 	case err == nil:
-		return 0, nil
+		return 0, out.buf, nil
 	case errors.As(err, &ee):
-		return ee.ExitCode(), nil
+		return ee.ExitCode(), out.buf, nil
+	case errors.Is(err, exec.ErrWaitDelay) && cmd.ProcessState != nil:
+		// The command exited, but a background child it left kept the output
+		// open past WaitDelay. Judge the command itself and kill the leftover
+		// group, which would otherwise pile up run after run.
+		_ = killGroup(cmd.Process)
+
+		return cmd.ProcessState.ExitCode(), out.buf, nil
 	}
 
-	return -1, fmt.Errorf("start %s: %w", argv[0], err)
+	return -1, nil, fmt.Errorf("start %s: %w", argv[0], err)
 }
 
 // killGroup sends SIGKILL to the whole process group of p.

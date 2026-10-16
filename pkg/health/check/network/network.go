@@ -1,4 +1,5 @@
-// Package network checks reachability of the default gateway and the internet.
+// Package network checks reachability of the default gateway and the internet
+// as one connectivity condition.
 package network
 
 import (
@@ -13,11 +14,19 @@ import (
 // Name is the check name used for routing and state.
 const Name = "network"
 
-// Condition keys produced by the check.
+// KeyConnectivity is the one condition the check produces: bad while the
+// host cannot reach the internet, whatever the cause.
+const KeyConnectivity = Name + "/connectivity"
+
+// The 001 condition keys, cleared silently by every run (R21).
 const (
-	KeyRouter   = Name + "/router"
-	KeyInternet = Name + "/internet"
+	formerKeyRouter   = Name + "/router"
+	formerKeyInternet = Name + "/internet"
 )
+
+// ErrNoRoute is what a GatewaySource returns (possibly wrapped) when the
+// host has no usable default route; the check judges it as the router down.
+var ErrNoRoute = errors.New("no usable default route")
 
 // GatewaySource reports the host's default gateway.
 type GatewaySource interface {
@@ -41,14 +50,26 @@ func New(gateway GatewaySource, pinger Pinger, targets []string) *Check {
 	return &Check{gateway: gateway, pinger: pinger, targets: targets}
 }
 
-// Run pings the gateway, then (only if it answers) the internet targets.
-// While the gateway is down the internet is not judged and its reading is omitted.
-// Failing to find the gateway or to ping makes the whole check Unknown.
+// Run judges connectivity as one condition: Bad when there is no default
+// route, when the gateway does not answer, or (gateway up) when no internet
+// target answers. A changing cause stays one Bad streak. Failing to read the
+// route table or to ping makes the run unreadable (Err). Every run lists the
+// 001 keys in Forget.
 func (c *Check) Run(ctx context.Context) health.CheckResult {
+	res := c.run(ctx)
+	res.Forget = []string{formerKeyRouter, formerKeyInternet}
+
+	return res
+}
+
+func (c *Check) run(ctx context.Context) health.CheckResult {
 	if c.pinger == nil {
 		return health.CheckResult{Err: errors.New("ping is not available")}
 	}
 	gw, err := c.gateway.DefaultGateway()
+	if errors.Is(err, ErrNoRoute) {
+		return bad("No usable default route")
+	}
 	if err != nil {
 		return health.CheckResult{Err: fmt.Errorf("find default gateway: %w", err)}
 	}
@@ -59,24 +80,24 @@ func (c *Check) Run(ctx context.Context) health.CheckResult {
 		return health.CheckResult{Err: fmt.Errorf("ping gateway: %w", err)}
 	}
 	if !up[gwHost] {
-		return health.CheckResult{Readings: []health.Reading{
-			{Key: KeyRouter, Verdict: health.Bad, Text: "Router " + gwHost + " is not answering"},
-		}}
+		return bad("Router " + gwHost + " is not answering")
 	}
-	router := health.Reading{Key: KeyRouter, Verdict: health.Good, Text: "Router " + gwHost + " is reachable"}
 
 	up, err = c.pinger.Reachable(ctx, c.targets)
 	if err != nil {
 		return health.CheckResult{Err: fmt.Errorf("ping internet targets: %w", err)}
 	}
-	internet := health.Reading{Key: KeyInternet, Verdict: health.Bad, Text: "Internet is unreachable"}
 	for _, t := range c.targets {
 		if up[t] {
-			internet.Verdict = health.Good
-			internet.Text = "Internet is reachable"
-			break
+			return health.CheckResult{Readings: []health.Reading{
+				{Key: KeyConnectivity, Verdict: health.Good, Text: "Network is reachable"},
+			}}
 		}
 	}
 
-	return health.CheckResult{Readings: []health.Reading{router, internet}}
+	return bad("Internet is unreachable (router " + gwHost + " answers)")
+}
+
+func bad(text string) health.CheckResult {
+	return health.CheckResult{Readings: []health.Reading{{Key: KeyConnectivity, Verdict: health.Bad, Text: text}}}
 }

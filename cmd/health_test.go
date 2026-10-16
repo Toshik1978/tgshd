@@ -19,6 +19,7 @@ import (
 	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/Toshik1978/tgshd/pkg/health"
+	"github.com/Toshik1978/tgshd/pkg/health/check/network"
 	hcfg "github.com/Toshik1978/tgshd/pkg/health/config"
 	"github.com/Toshik1978/tgshd/pkg/health/notify"
 	"github.com/Toshik1978/tgshd/pkg/health/runner"
@@ -268,8 +269,41 @@ func TestBuildNetworkCheck(t *testing.T) {
 		t.Fatalf("check = %+v", chk)
 	}
 	res := chk.Run(t.Context())
-	if len(res.Readings) != 2 || res.Readings[0].Verdict != health.Good || res.Readings[1].Verdict != health.Bad {
+	if len(res.Readings) != 1 || res.Readings[0].Key != network.KeyConnectivity ||
+		res.Readings[0].Verdict != health.Bad {
 		t.Fatalf("readings = %+v", res.Readings)
+	}
+}
+
+// TestGatewaySourceMapsNoRoute: the sysfs reader's "no default gateway" is
+// the pure network.ErrNoRoute (judged as the router down), while a route
+// table that cannot be read stays a plain error (unreadable).
+func TestGatewaySourceMapsNoRoute(t *testing.T) {
+	t.Parallel()
+
+	dir := t.TempDir()
+	const header = "Iface\tDestination\tGateway \tFlags\tRefCnt\tUse\tMetric\tMask\t\tMTU\tWindow\tIRTT\n"
+	writeRoute := func(name, line string) string {
+		path := filepath.Join(dir, name)
+		if err := os.WriteFile(path, []byte(header+line), 0o600); err != nil {
+			t.Fatal(err)
+		}
+
+		return path
+	}
+	noDefault := writeRoute("route-no-default", "eth0\t0002000A\t00000000\t0001\t0\t0\t0\t00FFFFFF\t0\t0\t0\n")
+	withDefault := writeRoute("route-default", "eth0\t00000000\t010200C0\t0003\t0\t0\t0\t00000000\t0\t0\t0\n")
+
+	gw, err := gatewaySource{sysfs.New("", withDefault)}.DefaultGateway()
+	if err != nil || gw != netip.MustParseAddr("192.0.2.1") {
+		t.Fatalf("default route: %v, %v", gw, err)
+	}
+	if _, err = (gatewaySource{sysfs.New("", noDefault)}).DefaultGateway(); !errors.Is(err, network.ErrNoRoute) {
+		t.Fatalf("no default route: err = %v, want network.ErrNoRoute", err)
+	}
+	_, err = gatewaySource{sysfs.New("", filepath.Join(dir, "missing"))}.DefaultGateway()
+	if err == nil || errors.Is(err, network.ErrNoRoute) {
+		t.Fatalf("missing route file: err = %v, want a plain error", err)
 	}
 }
 
@@ -1050,9 +1084,11 @@ kernel:
 	hs := &healthSetup{Config: hc}
 	logger := zap.NewNop()
 
+	probeSet, _ := buildModemProbeCheck(testModemProbeConfig(), nil, lookupPhone, time.Now)
 	paused := map[string]bool{}
 	for _, set := range []checkSet{
 		networkChecks(hs, sysfs.NewDefault(), logger), disksChecks(hs, logger), tempsChecks(hs, newOpenState()), kernelChecks(hs, logger),
+		probeSet,
 	} {
 		for _, c := range set.Checks {
 			paused[c.Name] = c.PauseInQuiet
@@ -1060,6 +1096,7 @@ kernel:
 	}
 	want := map[string]bool{
 		"network": true, disksCheckName: false, tempsCheckName: true, kernelCheckName: false,
+		modemProbeCheckName: true,
 	}
 	for name, w := range want {
 		got, ok := paused[name]
@@ -1136,5 +1173,36 @@ func TestNewHealthWithoutSMSOrSMTPKeepsProblemsQueued(t *testing.T) {
 	}
 	if problems != 2 {
 		t.Fatalf("messages = %v; want the failed PROBLEM attempt, then its queued copy delivered", pub.messages())
+	}
+}
+
+// TestStoreOpenRetriesUseTheShortBound: only the first open of the state
+// database (at start, with its migrations) gets storeOpenTimeout; the retries
+// made by the runner's Load each tick get storeRetryTimeout, so a hanging
+// open never pushes a tick past the heartbeat budget.
+func TestStoreOpenRetriesUseTheShortBound(t *testing.T) {
+	t.Parallel()
+
+	var limits []time.Duration
+	open := boundedOpen(func(ctx context.Context) (*store.Store, error) {
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			t.Fatal("open without a deadline")
+		}
+		limits = append(limits, time.Until(deadline))
+
+		return nil, errors.New("busy")
+	})
+	for range 3 {
+		_, _ = open(t.Context())
+	}
+
+	if len(limits) != 3 || limits[0] <= storeRetryTimeout || limits[0] > storeOpenTimeout {
+		t.Fatalf("limits = %v, want the first bounded by %v", limits, storeOpenTimeout)
+	}
+	for _, l := range limits[1:] {
+		if l > storeRetryTimeout {
+			t.Fatalf("limits = %v, want every retry bounded by %v", limits, storeRetryTimeout)
+		}
 	}
 }

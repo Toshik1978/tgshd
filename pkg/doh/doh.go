@@ -26,6 +26,11 @@ const (
 // ErrNoAddresses is returned when a name resolves without any A or AAAA record.
 var ErrNoAddresses = errors.New("doh: no addresses found")
 
+// ErrNXDomain is returned when the resolver answered that the name does not
+// exist (RCODE NXDOMAIN). Like ErrNoAddresses it is a definitive answer: it is
+// only reported when both the A and the AAAA query were answered.
+var ErrNXDomain = errors.New("doh: name does not exist")
+
 // Resolver resolves host names through a DoH endpoint.
 type Resolver struct {
 	endpoint string
@@ -48,7 +53,10 @@ func New(endpoint string, client *http.Client) *Resolver {
 
 // Lookup returns the A addresses of host followed by its AAAA addresses.
 // An IP literal is returned as is. The lookup honours ctx cancellation and
-// deadline. It fails only when no address could be obtained.
+// deadline. It fails only when no address could be obtained. The failure is
+// ErrNXDomain or ErrNoAddresses only when both queries were answered (NXDOMAIN
+// from either one, or both empty); a transport error, a non-200 status,
+// SERVFAIL or REFUSED yields an ordinary error.
 func (r *Resolver) Lookup(ctx context.Context, host string) ([]netip.Addr, error) {
 	if addr, err := netip.ParseAddr(host); err == nil {
 		return []netip.Addr{addr}, nil
@@ -64,12 +72,19 @@ func (r *Resolver) Lookup(ctx context.Context, host string) ([]netip.Addr, error
 	}
 
 	var (
-		addrs []netip.Addr
-		errs  []error
+		addrs    []netip.Addr
+		errs     []error
+		nxDomain bool
 	)
 
 	for _, typ := range []dnsmessage.Type{dnsmessage.TypeA, dnsmessage.TypeAAAA} {
 		found, err := r.query(ctx, name, typ)
+		if errors.Is(err, ErrNXDomain) {
+			nxDomain = true
+
+			continue
+		}
+
 		if err != nil {
 			errs = append(errs, fmt.Errorf("%s query for %q: %w", typ, host, err))
 
@@ -85,6 +100,10 @@ func (r *Resolver) Lookup(ctx context.Context, host string) ([]netip.Addr, error
 
 	if len(errs) > 0 {
 		return nil, fmt.Errorf("doh: %w", errors.Join(errs...))
+	}
+
+	if nxDomain {
+		return nil, fmt.Errorf("%w: %q", ErrNXDomain, host)
 	}
 
 	return nil, fmt.Errorf("%w for %q", ErrNoAddresses, host)
@@ -167,6 +186,10 @@ func parseAnswer(body []byte, question dnsmessage.Question) ([]netip.Addr, error
 
 	if len(answer.Questions) != 1 || !sameQuestion(answer.Questions[0], question) {
 		return nil, errors.New("response question does not match the query")
+	}
+
+	if answer.RCode == dnsmessage.RCodeNameError {
+		return nil, ErrNXDomain
 	}
 
 	if answer.RCode != dnsmessage.RCodeSuccess {

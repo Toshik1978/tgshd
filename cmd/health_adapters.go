@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	netmail "net/mail"
+	"net/netip"
 	"time"
 
 	"go.uber.org/zap"
@@ -174,7 +175,27 @@ func networkChecks(hs *healthSetup, gateway *sysfs.Reader, logger *zap.Logger) c
 		return checkSet{}
 	}
 
-	return buildNetworkCheck(hs.Config.Network, gateway, ping.New(logger))
+	return buildNetworkCheck(hs.Config.Network, gatewaySource{gateway}, ping.New(logger))
+}
+
+// gatewaySource adapts *sysfs.Reader to network.GatewaySource: no usable
+// default route is network.ErrNoRoute (the router down), while a route table
+// that cannot be read stays a plain error (unreadable).
+type gatewaySource struct {
+	reader *sysfs.Reader
+}
+
+// DefaultGateway implements network.GatewaySource.
+func (g gatewaySource) DefaultGateway() (netip.Addr, error) {
+	gw, err := g.reader.DefaultGateway()
+	if errors.Is(err, sysfs.ErrNoDefaultGateway) {
+		return netip.Addr{}, fmt.Errorf("%w: %w", network.ErrNoRoute, err)
+	}
+	if err != nil {
+		return netip.Addr{}, fmt.Errorf("read default gateway: %w", err)
+	}
+
+	return gw, nil
 }
 
 // buildNetworkCheck builds the network check from its section.

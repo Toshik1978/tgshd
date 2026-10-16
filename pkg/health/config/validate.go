@@ -5,6 +5,7 @@ import (
 	"maps"
 	"net/url"
 	"path"
+	"regexp"
 	"slices"
 	"strings"
 	"time"
@@ -146,6 +147,11 @@ func validateSummary(s *Summary, p *problems) {
 }
 
 func validateNetwork(n *Network, p *problems) {
+	// An absent threshold is one interval: a single lost round heals by
+	// itself, an outage confirmed on the next cycle is real (FR-035).
+	if n.Threshold == thresholdIsInterval {
+		n.Threshold = n.Interval
+	}
 	p.common(&n.Common)
 
 	if len(n.InternetTargets) == 0 {
@@ -287,10 +293,8 @@ func validateHTTP(h *HTTP, p *problems) {
 
 	validateHTTPRouting(h, p)
 
-	if h.Header != nil {
-		p.required("header.name", h.Header.Name)
-		p.required("header.value_env", h.Header.ValueEnv)
-	}
+	p.oneOf("auth_refusal", string(h.AuthRefusal), string(AuthRefusalDown), string(AuthRefusalCheckerError))
+	validateHeader(p, h.Header)
 
 	if h.DependsOn != "" {
 		kind, name, ok := strings.Cut(h.DependsOn, "/")
@@ -298,6 +302,19 @@ func validateHTTP(h *HTTP, p *problems) {
 			p.addf("depends_on %q must look like kind/name with kind one of %s",
 				h.DependsOn, strings.Join(checkKinds(), ", "))
 		}
+	}
+}
+
+func validateHeader(p *problems, h *Header) {
+	if h == nil {
+		return
+	}
+
+	p.required("header.name", h.Name)
+	p.required("header.value_env", h.ValueEnv)
+
+	if slices.Contains(h.Placeholders, "") {
+		p.addf("header.placeholders must not contain empty entries")
 	}
 }
 
@@ -331,9 +348,39 @@ func validateURL(p *problems, key, raw string) {
 
 func validateFreshness(f *Freshness, p *problems) {
 	p.common(&f.Common)
-	p.required("path", f.Path)
 	p.oneOf("content", string(f.Content), string(ContentEpoch), string(ContentMtime))
 	p.positive("max_age", f.MaxAge)
+	p.nonNegative("future_tolerance", f.FutureTolerance)
+
+	if (f.Path == "") == (f.URL == "") {
+		p.addf("freshness needs exactly one of path or url")
+	}
+
+	validateFreshnessURL(f, p)
+}
+
+// validateFreshnessURL checks the keys that only a URL stamp uses and fills its timeout.
+func validateFreshnessURL(f *Freshness, p *problems) {
+	if f.URL == "" {
+		if f.Timeout != defaultFreshness().Timeout {
+			p.addf("timeout is only valid with url")
+		}
+
+		if f.Header != nil {
+			p.addf("header is only valid with url")
+		}
+
+		return
+	}
+
+	validateURL(p, "url", f.URL)
+
+	if f.Content != ContentEpoch {
+		p.addf("url requires content: epoch")
+	}
+
+	p.checkTimeout("timeout", f.Timeout)
+	validateHeader(p, f.Header)
 }
 
 func validateCommand(c *Command, p *problems) {
@@ -345,8 +392,23 @@ func validateCommand(c *Command, p *problems) {
 		p.addf("run needs a non-empty argv")
 	}
 
+	p.oneOf("timeout_verdict", string(c.TimeoutVerdict), string(TimeoutBroken), string(TimeoutUnreadable))
+	validateOutputPattern(p, "expect_output", c.ExpectOutput)
+	validateOutputPattern(p, "forbid_output", c.ForbidOutput)
+
 	if c.Fix != nil {
 		validateFix(c.Fix, p)
+	}
+}
+
+// validateOutputPattern requires a non-empty pattern to compile as Go RE2.
+func validateOutputPattern(p *problems, key, pattern string) {
+	if pattern == "" {
+		return
+	}
+
+	if _, err := regexp.Compile(pattern); err != nil {
+		p.addf("%s is not a valid regular expression: %v", key, err)
 	}
 }
 

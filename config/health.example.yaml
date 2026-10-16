@@ -30,7 +30,7 @@ summary:
 # Evaluated first every cycle.
 network:
   interval: 5m
-  threshold: 0                              # alert on the first bad cycle (each cycle pings 3x)
+  threshold: 5m                             # default: one interval; 0 alerts on the first bad cycle
   internet_targets: [ "203.0.113.10", "198.51.100.20" ]   # any one answering => internet up
   mode: sms                                 # PROBLEM by SMS; RESOLVED by tlg-or-sms (fixed)
 
@@ -81,7 +81,9 @@ http:
     status: [200, 399]
     connect_to: 192.0.2.5                   # optional: dial this address, keep URL host for TLS/Host
     # doh: https://dns.example.org/dns-query  # optional, mutually exclusive with connect_to
-    header: { name: Authorization, value_env: APP_TOKEN, prefix: "Bearer " }   # optional
+    follow_redirects: false                 # default false: a redirect is judged by its own status
+    auth_refusal: down                      # down (default) | checker_error: what a 401/403 means
+    header: { name: Authorization, value_env: APP_TOKEN, prefix: "Bearer ", placeholders: [ "sample-key" ] }   # optional; placeholders: values that mean the secret was never set
     depends_on: http/other-app              # optional: skip while that condition is bad
     needs_internet: false
     container: app                          # optional: also require this container healthy
@@ -91,13 +93,22 @@ freshness:
     path: /var/lib/backup-status/db
     content: epoch                          # epoch (file holds a Unix time) | mtime
     max_age: 26h
+    future_tolerance: 1h                    # a stamp further in the future than this is stale
     summary_group: backups                  # optional: merged with other checks of this group
+  - name: offsite-copy
+    url: https://backup.example.org/last-success   # instead of path: exactly one of the two; needs content: epoch
+    header: { name: X-Api-Key, value_env: BACKUP_STATUS_KEY }   # optional, url only
+    timeout: 15s                            # url only; at most 20s
+    max_age: 30h
 
 command:
   - name: port-guard
     run: [ "/usr/local/bin/probe-port" ]    # argv, no shell
     interval: 5m
     timeout: 20s                            # at most 20s; the probe and its fix each get it
+    timeout_verdict: broken                 # broken (default) | unreadable: what a timed-out probe means
+    # expect_output: "^ok"                  # optional regexp (Go RE2) the output must match
+    # forbid_output: "(?i)degraded|error"   # optional regexp the output must not match
     threshold: 0
     fix:                                    # optional
       after: 2                              # consecutive failures

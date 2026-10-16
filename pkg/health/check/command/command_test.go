@@ -1,9 +1,11 @@
 package command
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"os/exec"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -20,24 +22,27 @@ type call struct {
 
 type fakeRunner struct {
 	probe func(ctx context.Context) (int, error)
+	out   string
 	fix   func() (int, error)
 	mu    sync.Mutex
 	calls []call
 }
 
-func (f *fakeRunner) Run(ctx context.Context, argv []string) (int, error) {
+func (f *fakeRunner) Run(ctx context.Context, argv []string) (int, []byte, error) {
 	deadline, dl := ctx.Deadline()
 	f.mu.Lock()
 	f.calls = append(f.calls, call{argv: argv, hasDead: dl, deadline: deadline})
 	f.mu.Unlock()
 	if argv[0] == "/fix" {
 		if f.fix != nil {
-			return f.fix()
+			code, err := f.fix()
+			return code, nil, err
 		}
-		return 0, nil
+		return 0, nil, nil
 	}
+	code, err := f.probe(ctx)
 
-	return f.probe(ctx)
+	return code, []byte(f.out), err
 }
 
 type fakeDocker struct {
@@ -546,5 +551,132 @@ func TestFixEndsBeforeTheRunDeadline(t *testing.T) {
 	}
 	if dl := r.calls[1].deadline; !dl.Before(parentDL) {
 		t.Fatalf("fix deadline %v is not before the run deadline %v", dl, parentDL)
+	}
+}
+
+func outCfg(expect, forbid string, tv config.TimeoutVerdict) config.Command {
+	c := base()
+	c.ExpectOutput, c.ForbidOutput, c.TimeoutVerdict = expect, forbid, tv
+
+	return c
+}
+
+func timeoutProbe(context.Context) (int, error) { return -1, context.DeadlineExceeded }
+
+// A probe that prints trouble and exits 0 is Bad, and the text names the
+// pattern key, never the output (US5 acceptance 4).
+func TestForbidOutput(t *testing.T) {
+	tests := []struct {
+		name   string
+		forbid string
+		out    string
+		code   int
+		want   health.Verdict
+		text   string
+	}{
+		{"match", `(?i)degraded`, "array DEGRADED sdb\n", 0, health.Bad, "output matched forbid_output"},
+		{"no match", `(?i)degraded`, "all clean\n", 0, health.Good, ""},
+		{"exit wins over output", `degraded`, "degraded", 2, health.Bad, "probe exited with status 2"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := &fakeRunner{probe: exit(tt.code), out: tt.out}
+			ck := newCheck(outCfg("", tt.forbid, config.TimeoutBroken), r, nil, &clock{epochTime()})
+			res := ck.Run(context.Background())
+			if res.Err != nil || len(res.Readings) != 1 {
+				t.Fatalf("res = %+v", res)
+			}
+			got := res.Readings[0]
+			if got.Verdict != tt.want || !strings.Contains(got.Text, tt.text) {
+				t.Fatalf("reading = %+v", got)
+			}
+			if strings.Contains(got.Text, "DEGRADED") || strings.Contains(got.Text, "sdb") {
+				t.Fatalf("text leaks output: %q", got.Text)
+			}
+		})
+	}
+}
+
+func TestExpectOutput(t *testing.T) {
+	tests := []struct {
+		name   string
+		expect string
+		out    string
+		want   health.Verdict
+	}{
+		{"match", `^OK\b`, "OK 3 peers\n", health.Good},
+		{"no match", `^OK\b`, "secret-token-123\n", health.Bad},
+		{"empty output", `^OK\b`, "", health.Bad},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := &fakeRunner{probe: exit(0), out: tt.out}
+			ck := newCheck(outCfg(tt.expect, "", config.TimeoutBroken), r, nil, &clock{epochTime()})
+			res := ck.Run(context.Background())
+			got := res.Readings[0]
+			if got.Verdict != tt.want {
+				t.Fatalf("reading = %+v", got)
+			}
+			if tt.want == health.Bad &&
+				(!strings.Contains(got.Text, "output did not match expect_output") || strings.Contains(got.Text, "secret")) {
+				t.Fatalf("text = %q", got.Text)
+			}
+		})
+	}
+}
+
+func TestForbidBeatsExpect(t *testing.T) {
+	r := &fakeRunner{probe: exit(0), out: "OK but degraded"}
+	ck := newCheck(outCfg(`^OK`, `degraded`, config.TimeoutBroken), r, nil, &clock{epochTime()})
+	res := ck.Run(context.Background())
+	if got := res.Readings[0]; got.Verdict != health.Bad || !strings.Contains(got.Text, "forbid_output") {
+		t.Fatalf("reading = %+v", got)
+	}
+}
+
+func TestTimeoutUnreadable(t *testing.T) {
+	fix := config.Fix{After: 3, Run: []string{"/fix"}, MaxPerHour: 3}
+	cfg := outCfg("", "", config.TimeoutUnreadable)
+	cfg.Fix = &fix
+	r := &fakeRunner{probe: exit(1)}
+	ck := newCheck(cfg, r, nil, &clock{epochTime()})
+	ck.Run(context.Background()) // one strike
+	ck.TakeFixes()
+	before, _ := ck.Export()
+
+	r.probe = timeoutProbe
+	res := ck.Run(context.Background())
+	if !errors.Is(res.Err, context.DeadlineExceeded) || len(res.Readings) != 1 {
+		t.Fatalf("res = %+v", res)
+	}
+	if got := res.Readings[0]; got.Verdict != health.Unknown || got.Key != "command/port-guard" || got.Text == "" {
+		t.Fatalf("reading = %+v", got)
+	}
+	after, _ := ck.Export()
+	if !bytes.Equal(before, after) {
+		t.Fatalf("state changed: %s -> %s", before, after)
+	}
+	if len(ck.TakeFixes()) != 0 {
+		t.Fatal("fix ran on an unreadable timeout")
+	}
+}
+
+func TestTimeoutBrokenIsDefault(t *testing.T) {
+	for _, tv := range []config.TimeoutVerdict{config.TimeoutBroken, ""} {
+		r := &fakeRunner{probe: timeoutProbe}
+		res := newCheck(outCfg("", "", tv), r, nil, &clock{epochTime()}).Run(context.Background())
+		if got := res.Readings[0]; got.Verdict != health.Bad || !strings.Contains(got.Text, "timed out") {
+			t.Fatalf("%q: reading = %+v", tv, got)
+		}
+	}
+}
+
+func TestInvalidOutputPatternIsCheckerError(t *testing.T) {
+	for _, cfg := range []config.Command{outCfg(`(`, "", ""), outCfg("", `[a-`, "")} {
+		r := &fakeRunner{probe: exit(0)}
+		res := newCheck(cfg, r, nil, &clock{epochTime()}).Run(context.Background())
+		if res.Err == nil || len(res.Readings) != 0 || len(r.calls) != 0 {
+			t.Fatalf("res = %+v, calls = %d", res, len(r.calls))
+		}
 	}
 }

@@ -114,8 +114,34 @@ func TestDefaultsAndAbsence(t *testing.T) {
 	if cfg.Containers.Threshold.Duration() != 15*time.Minute {
 		t.Errorf("containers = %+v", cfg.Containers)
 	}
-	if cfg.Network.Mode != config.ModeSMS || cfg.Network.Threshold.Duration() != 0 {
+	if cfg.Network.Mode != config.ModeSMS || cfg.Network.Threshold.Duration() != 5*time.Minute {
 		t.Errorf("network = %+v", cfg.Network)
+	}
+}
+
+// TestNetworkThresholdFollowsInterval: an absent network threshold is the
+// network interval; an explicit one, 0 included, is kept (FR-035).
+func TestNetworkThresholdFollowsInterval(t *testing.T) {
+	tests := []struct {
+		name string
+		yaml string
+		want time.Duration
+	}{
+		{"absent", "network:\n  internet_targets: [\"203.0.113.10\"]\n", 5 * time.Minute},
+		{"absent with interval", "network:\n  interval: 2m\n  internet_targets: [\"203.0.113.10\"]\n", 2 * time.Minute},
+		{"explicit zero", "network:\n  threshold: 0\n  internet_targets: [\"203.0.113.10\"]\n", 0},
+		{"explicit", "network:\n  threshold: 10m\n  internet_targets: [\"203.0.113.10\"]\n", 10 * time.Minute},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := mustParse(t, tt.yaml)
+			if got := cfg.Network.Threshold.Duration(); got != tt.want {
+				t.Fatalf("threshold = %s, want %s", got, tt.want)
+			}
+			if cfg.Network.Mode != config.ModeSMS {
+				t.Fatalf("mode = %q, want sms", cfg.Network.Mode)
+			}
+		})
 	}
 }
 
@@ -592,5 +618,146 @@ func TestQuietAndDeliveryKeyErrors(t *testing.T) {
 		if _, errs := config.Parse([]byte(doc), "health.yaml"); len(errs) == 0 {
 			t.Errorf("%q must be rejected", doc)
 		}
+	}
+}
+
+func TestServiceKeysDefaults(t *testing.T) {
+	cfg := mustParse(t, `
+http:
+  - {name: a, url: "https://a.example.org/", header: {name: X-Key, value_env: KEY}}
+freshness:
+  - {name: f, path: /tmp/f, max_age: 1d}
+  - {name: g, url: "https://b.example.org/stamp", max_age: 1d}
+command:
+  - {name: c, run: [/bin/true]}
+`)
+	h := cfg.HTTP[0]
+	if h.FollowRedirects || h.AuthRefusal != config.AuthRefusalDown || len(h.Header.Placeholders) != 0 {
+		t.Errorf("http defaults = %+v", h)
+	}
+	f, g := cfg.Freshness[0], cfg.Freshness[1]
+	if f.FutureTolerance.Duration() != time.Hour || f.Timeout.Duration() != 15*time.Second || f.URL != "" ||
+		f.Header != nil {
+		t.Errorf("path freshness = %+v", f)
+	}
+	if g.FutureTolerance.Duration() != time.Hour || g.Timeout.Duration() != 15*time.Second {
+		t.Errorf("url freshness = %+v", g)
+	}
+	if c := cfg.Command[0]; c.TimeoutVerdict != config.TimeoutBroken || c.ExpectOutput != "" || c.ForbidOutput != "" {
+		t.Errorf("command defaults = %+v", c)
+	}
+}
+
+func TestServiceKeysParsed(t *testing.T) {
+	cfg := mustParse(t, `
+http:
+  - name: a
+    url: "https://a.example.org/"
+    follow_redirects: true
+    auth_refusal: checker_error
+    header: {name: X-Key, value_env: KEY, placeholders: [sample-key]}
+freshness:
+  - name: g
+    url: "https://b.example.org/stamp"
+    max_age: 1d
+    future_tolerance: 0
+    timeout: 20s
+    header: {name: X-Key, value_env: KEY, prefix: "Bearer ", placeholders: [sample-key]}
+command:
+  - {name: c, run: [/bin/true], expect_output: "^ok", forbid_output: "(?i)degraded", timeout_verdict: unreadable}
+`)
+	h := cfg.HTTP[0]
+	if !h.FollowRedirects || h.AuthRefusal != config.AuthRefusalCheckerError ||
+		h.Header.Placeholders[0] != "sample-key" {
+		t.Errorf("http = %+v", h)
+	}
+	g := cfg.Freshness[0]
+	if g.FutureTolerance != 0 || g.Timeout.Duration() != 20*time.Second || g.Header.Placeholders[0] != "sample-key" {
+		t.Errorf("freshness = %+v", g)
+	}
+	c := cfg.Command[0]
+	if c.ExpectOutput != "^ok" || c.ForbidOutput != "(?i)degraded" || c.TimeoutVerdict != config.TimeoutUnreadable {
+		t.Errorf("command = %+v", c)
+	}
+}
+
+func TestServiceKeyErrors(t *testing.T) {
+	const (
+		httpOK  = `name: a, url: "https://a.example.org/"`
+		freshOK = `name: f, max_age: 1d`
+		hdr     = `{name: X-Key, value_env: KEY}`
+	)
+
+	tests := []struct {
+		name   string
+		doc    string
+		entry  string
+		reason string
+	}{
+		{"auth refusal", "http: [{" + httpOK + ", auth_refusal: ignore}]", "http/a", "auth_refusal"},
+		{
+			"http empty placeholder", "http: [{" + httpOK + ", header: {name: X, value_env: K, placeholders: [\"\"]}}]",
+			"http/a", "placeholders",
+		},
+		{
+			"negative tolerance", "freshness: [{" + freshOK + ", path: /tmp/f, future_tolerance: -1m}]",
+			"freshness/f", "future_tolerance",
+		},
+		{"neither path nor url", "freshness: [{" + freshOK + "}]", "freshness/f", "exactly one of path or url"},
+		{
+			"both path and url", "freshness: [{" + freshOK + ", path: /tmp/f, url: \"https://b.example.org/\"}]",
+			"freshness/f", "exactly one of path or url",
+		},
+		{"bad url scheme", "freshness: [{" + freshOK + ", url: \"ftp://b.example.org/\"}]", "freshness/f", "url"},
+		{
+			"url with mtime", "freshness: [{" + freshOK + ", url: \"https://b.example.org/\", content: mtime}]",
+			"freshness/f", "content: epoch",
+		},
+		{"timeout without url", "freshness: [{" + freshOK + ", path: /tmp/f, timeout: 5s}]", "freshness/f", "timeout"},
+		{
+			"timeout zero", "freshness: [{" + freshOK + ", url: \"https://b.example.org/\", timeout: 0}]",
+			"freshness/f", "timeout",
+		},
+		{
+			"timeout high", "freshness: [{" + freshOK + ", url: \"https://b.example.org/\", timeout: 21s}]",
+			"freshness/f", "timeout",
+		},
+		{
+			"header without url", "freshness: [{" + freshOK + ", path: /tmp/f, header: " + hdr + "}]",
+			"freshness/f", "header",
+		},
+		{
+			"freshness header name",
+			"freshness: [{" + freshOK + ", url: \"https://b.example.org/\", header: {value_env: K}}]",
+			"freshness/f",
+			"header.name",
+		},
+		{
+			"freshness empty placeholder",
+			"freshness: [{" + freshOK + ", url: \"https://b.example.org/\", header: {name: X, value_env: K, placeholders: [\"\"]}}]",
+			"freshness/f",
+			"placeholders",
+		},
+		{"expect regexp", "command: [{name: c, run: [/bin/true], expect_output: \"(\"}]", "command/c", "expect_output"},
+		{
+			"forbid regexp",
+			"command: [{name: c, run: [/bin/true], forbid_output: \"a(?=b)\"}]",
+			"command/c",
+			"forbid_output",
+		},
+		{
+			"timeout verdict",
+			"command: [{name: c, run: [/bin/true], timeout_verdict: down}]",
+			"command/c",
+			"timeout_verdict",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, errs := config.Parse([]byte(tt.doc), "test.yaml")
+			if len(errs) != 1 || errs[0].Entry != tt.entry || !strings.Contains(errs[0].Reason, tt.reason) {
+				t.Errorf("errs = %+v, want one for %s containing %q", errs, tt.entry, tt.reason)
+			}
+		})
 	}
 }

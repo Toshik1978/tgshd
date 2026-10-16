@@ -95,7 +95,9 @@ func later(a, b time.Time) time.Time {
 
 // restoreSchedule merges the stored last-run times into memory once, the
 // later time winning, so a restart neither re-runs every check nor repeats the
-// daily or weekly job.
+// daily or weekly job. The network check's stored time is skipped: its result
+// is not stored, so until it has run the checks that need the internet wait
+// (networkUnknown), and it must not wait out its interval first.
 func (r *Runner) restoreSchedule() {
 	if r.scheduleRestored {
 		return
@@ -107,6 +109,9 @@ func (r *Runner) restoreSchedule() {
 	r.loadMu.Unlock()
 
 	for i := range r.opts.Checks {
+		if i == r.network {
+			continue
+		}
 		r.lastRun[i] = later(r.lastRun[i], decodeTime(kv[checkKey(r.opts.Checks[i].Name)]))
 	}
 	r.dailyLast = later(r.dailyLast, decodeTime(kv[keyDailyLast]))

@@ -421,3 +421,127 @@ func TestLookupDoesNotFollowRedirects(t *testing.T) {
 		t.Fatalf("redirect target was hit %d times", hits)
 	}
 }
+
+func lookupErr(t *testing.T, replies map[dnsmessage.Type]reply) error {
+	t.Helper()
+
+	srv := dnsServer(t, replies)
+
+	got, err := doh.New(srv.URL, srv.Client()).Lookup(context.Background(), "www.example.org")
+	if err == nil {
+		t.Fatalf("Lookup() = %v, want an error", got)
+	}
+
+	return err
+}
+
+func TestNXDomain(t *testing.T) {
+	t.Parallel()
+
+	nx := reply{rcode: dnsmessage.RCodeNameError}
+	empty := reply{}
+
+	tests := []struct {
+		name    string
+		replies map[dnsmessage.Type]reply
+	}{
+		{"both", map[dnsmessage.Type]reply{dnsmessage.TypeA: nx, dnsmessage.TypeAAAA: nx}},
+		{"A only", map[dnsmessage.Type]reply{dnsmessage.TypeA: nx, dnsmessage.TypeAAAA: empty}},
+		{"AAAA only", map[dnsmessage.Type]reply{dnsmessage.TypeA: empty, dnsmessage.TypeAAAA: nx}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := lookupErr(t, tt.replies)
+			if !errors.Is(err, doh.ErrNXDomain) {
+				t.Errorf("error = %v, want doh.ErrNXDomain", err)
+			}
+			if errors.Is(err, doh.ErrNoAddresses) {
+				t.Errorf("error = %v, must not be ErrNoAddresses", err)
+			}
+		})
+	}
+}
+
+// TestAddressesWinOverNXDomain: an A answer with addresses and an NXDOMAIN
+// answer for AAAA is not a negative answer; Lookup returns the addresses.
+func TestAddressesWinOverNXDomain(t *testing.T) {
+	t.Parallel()
+
+	srv := dnsServer(t, map[dnsmessage.Type]reply{
+		dnsmessage.TypeA: {
+			records: []dnsmessage.Resource{aRecord("www.example.org.", [4]byte{192, 0, 2, 1})},
+		},
+		dnsmessage.TypeAAAA: {rcode: dnsmessage.RCodeNameError},
+	})
+
+	got, err := doh.New(srv.URL, srv.Client()).Lookup(context.Background(), "www.example.org")
+	if err != nil || len(got) != 1 || got[0].String() != "192.0.2.1" {
+		t.Fatalf("Lookup() = %v, %v, want [192.0.2.1] and no error", got, err)
+	}
+}
+
+func TestNoData(t *testing.T) {
+	t.Parallel()
+
+	err := lookupErr(t, map[dnsmessage.Type]reply{dnsmessage.TypeA: {}, dnsmessage.TypeAAAA: {}})
+	if !errors.Is(err, doh.ErrNoAddresses) || errors.Is(err, doh.ErrNXDomain) {
+		t.Errorf("error = %v, want doh.ErrNoAddresses only", err)
+	}
+}
+
+func TestServfail(t *testing.T) {
+	t.Parallel()
+
+	nx := reply{rcode: dnsmessage.RCodeNameError}
+	empty := reply{}
+
+	tests := []struct {
+		name    string
+		replies map[dnsmessage.Type]reply
+	}{
+		{"SERVFAIL", map[dnsmessage.Type]reply{
+			dnsmessage.TypeA:    {rcode: dnsmessage.RCodeServerFailure},
+			dnsmessage.TypeAAAA: {rcode: dnsmessage.RCodeServerFailure},
+		}},
+		{"REFUSED", map[dnsmessage.Type]reply{
+			dnsmessage.TypeA:    {rcode: dnsmessage.RCodeRefused},
+			dnsmessage.TypeAAAA: {rcode: dnsmessage.RCodeRefused},
+		}},
+		{"NXDOMAIN with SERVFAIL for the other type is not definitive", map[dnsmessage.Type]reply{
+			dnsmessage.TypeA:    nx,
+			dnsmessage.TypeAAAA: {rcode: dnsmessage.RCodeServerFailure},
+		}},
+		{"empty answer with SERVFAIL for the other type is not definitive", map[dnsmessage.Type]reply{
+			dnsmessage.TypeA:    empty,
+			dnsmessage.TypeAAAA: {rcode: dnsmessage.RCodeRefused},
+		}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			err := lookupErr(t, tt.replies)
+			if errors.Is(err, doh.ErrNXDomain) || errors.Is(err, doh.ErrNoAddresses) {
+				t.Errorf("error = %v, want an ordinary error", err)
+			}
+		})
+	}
+}
+
+func TestTransportErrorIsNotDefinitive(t *testing.T) {
+	t.Parallel()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "boom", http.StatusBadGateway)
+	}))
+	defer srv.Close()
+
+	_, err := doh.New(srv.URL, srv.Client()).Lookup(context.Background(), "www.example.org")
+	if err == nil || errors.Is(err, doh.ErrNXDomain) || errors.Is(err, doh.ErrNoAddresses) {
+		t.Errorf("error = %v, want an ordinary error", err)
+	}
+}

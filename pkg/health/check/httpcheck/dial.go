@@ -13,6 +13,14 @@ import (
 // errNoAddresses reports a DoH answer without any address.
 var errNoAddresses = errors.New("no addresses")
 
+// ErrNameNotFound is returned by a Resolver that got a definitive answer that
+// the name does not exist (NXDOMAIN). The check judges it down.
+var ErrNameNotFound = errors.New("name does not exist")
+
+// ErrNoAddress is returned by a Resolver that got a definitive answer that the
+// name has no A or AAAA record (NODATA). The check judges it down.
+var ErrNoAddress = errors.New("name has no address")
+
 // resolveError is a failed DoH resolution. It means the endpoint could not be
 // judged, not that it is down.
 type resolveError struct {
@@ -25,6 +33,25 @@ func (e *resolveError) Error() string {
 }
 
 func (e *resolveError) Unwrap() error { return e.err }
+
+// negativeAnswer returns the Bad text of a failed DoH resolution that is a
+// definitive negative answer (ErrNameNotFound or ErrNoAddress), and false for
+// every other error, which leaves the endpoint unjudged.
+func negativeAnswer(err error) (string, bool) {
+	re, ok := errors.AsType[*resolveError](err)
+	if !ok {
+		return "", false
+	}
+
+	switch {
+	case errors.Is(re.err, ErrNameNotFound):
+		return fmt.Sprintf("name %s does not exist", re.host), true
+	case errors.Is(re.err, ErrNoAddress):
+		return fmt.Sprintf("name %s has no address", re.host), true
+	default:
+		return "", false
+	}
+}
 
 // traceKey is the context key of the request's dohTrace.
 type traceKey struct{}

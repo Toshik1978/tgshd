@@ -16,6 +16,7 @@ import (
 	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/Toshik1978/tgshd/pkg/health"
+	"github.com/Toshik1978/tgshd/pkg/health/config"
 	"github.com/Toshik1978/tgshd/pkg/health/notify"
 	"github.com/Toshik1978/tgshd/pkg/health/store"
 )
@@ -357,7 +358,7 @@ func TestQuietWindowsStillWriteHeartbeat(t *testing.T) {
 
 func TestNetworkFirstOfflineSkipAndFlushBeforeDispatch(t *testing.T) {
 	order := &orderLog{}
-	netw := newFakeCheck(order, "network", reading(KeyInternet, health.Bad, "internet unreachable"))
+	netw := newFakeCheck(order, "network", reading(KeyNetwork, health.Bad, "internet unreachable"))
 	web := newFakeCheck(order, "web", reading("http/web", health.Good, ""))
 	disk := newFakeCheck(order, "disk", reading("disk/sda", health.Bad, "disk failing"))
 
@@ -385,7 +386,7 @@ func TestNetworkFirstOfflineSkipAndFlushBeforeDispatch(t *testing.T) {
 		t.Fatalf("telegram sent %q while offline, want everything queued", got)
 	}
 
-	netw.set(reading(KeyInternet, health.Good, ""))
+	netw.set(reading(KeyNetwork, health.Good, ""))
 	f.next(t)
 
 	if web.count() != 1 {
@@ -400,8 +401,8 @@ func TestNetworkFirstOfflineSkipAndFlushBeforeDispatch(t *testing.T) {
 	}
 }
 
-func TestRouterDownIsOfflineUntilGood(t *testing.T) {
-	netw := newFakeCheck(nil, "network", reading(KeyRouter, health.Bad, "gateway down"))
+func TestNetworkDownIsOfflineUntilGood(t *testing.T) {
+	netw := newFakeCheck(nil, "network", reading(KeyNetwork, health.Bad, "gateway down"))
 	netCheck := checkOf(netw)
 	netCheck.Interval = 5 * time.Minute
 	web := newFakeCheck(nil, "web", reading("http/web", health.Good, ""))
@@ -424,7 +425,7 @@ func TestRouterDownIsOfflineUntilGood(t *testing.T) {
 		t.Fatal("an unreadable network check must not bring the outside back")
 	}
 
-	netw.set(reading(KeyRouter, health.Good, ""))
+	netw.set(reading(KeyNetwork, health.Good, ""))
 	f.now = f.now.Add(5 * time.Minute)
 	f.tick(t)
 
@@ -1577,7 +1578,7 @@ func TestHardwareRunsInMaintenance(t *testing.T) {
 // the network check (set to pause) does not run (FR-026, SC-006).
 func TestBootGraceHardware(t *testing.T) {
 	order := &orderLog{}
-	netw := newFakeCheck(order, "network", reading(KeyRouter, health.Bad, "router down"))
+	netw := newFakeCheck(order, "network", reading(KeyNetwork, health.Bad, "router down"))
 	temps := newFakeCheck(order, "temperatures", reading("temperatures/cpu/package0", health.Bad, "CPU at 99°C"))
 	f := newFixture(t, &fakeStore{}, pausing(netw), checkOf(temps))
 	f.up.up = time.Minute
@@ -1651,5 +1652,151 @@ func TestSnapshotPaused(t *testing.T) {
 
 	if got := newFixture(t, &fakeStore{}, checkOf(disks)).r.Snapshot().Paused; len(got) != 0 {
 		t.Fatalf("paused = %q, want none", got)
+	}
+}
+
+// TestOfflineFromConnectivity: the outside is known down exactly while the
+// network/connectivity condition is bad, whatever its cause text says; the
+// 001 keys no longer make the runner offline (FR-034, R21).
+func TestOfflineFromConnectivity(t *testing.T) {
+	if KeyNetwork != "network/connectivity" {
+		t.Fatalf("KeyNetwork = %q", KeyNetwork)
+	}
+	netw := newFakeCheck(nil, "network", reading(KeyNetwork, health.Bad, "No usable default route"))
+	web := newFakeCheck(nil, "web", reading("http/web", health.Good, ""))
+	webCheck := checkOf(web)
+	webCheck.NeedsInternet = true
+	f := newFixture(t, &fakeStore{}, checkOf(netw), webCheck)
+
+	f.tick(t)
+	if web.count() != 0 {
+		t.Fatalf("web ran %d times while connectivity is bad, want 0", web.count())
+	}
+
+	netw.set(reading(KeyNetwork, health.Bad, "Internet is unreachable (router 192.0.2.1 answers)"))
+	f.next(t)
+	if web.count() != 0 {
+		t.Fatalf("web ran %d times after the cause changed, want 0", web.count())
+	}
+
+	// A former key going bad does not make the runner offline.
+	netw.set(health.CheckResult{Readings: []health.Reading{
+		{Key: KeyNetwork, Verdict: health.Good, Text: "Network is reachable"},
+		{Key: "network/router", Verdict: health.Bad, Text: "Router 192.0.2.1 is not answering"},
+	}})
+	f.next(t)
+	if web.count() != 1 {
+		t.Fatalf("web ran %d times once connectivity is good, want 1", web.count())
+	}
+}
+
+// TestDependsOnFormerNetworkKeys: a depends_on naming a 001 network key
+// (network/router or network/internet) follows network/connectivity, so a 001
+// config keeps working.
+func TestDependsOnFormerNetworkKeys(t *testing.T) {
+	for _, dep := range []string{"network/router", "network/internet", KeyNetwork} {
+		t.Run(dep, func(t *testing.T) {
+			netw := newFakeCheck(nil, "network", reading(KeyNetwork, health.Bad, "Router 192.0.2.1 is not answering"))
+			b := newFakeCheck(nil, "b", reading("http/b", health.Good, ""))
+			bCheck := checkOf(b)
+			bCheck.DependsOn = dep
+			f := newFixture(t, &fakeStore{}, checkOf(netw), bCheck)
+
+			f.tick(t)
+			if b.count() != 0 {
+				t.Fatalf("b ran %d times while connectivity is bad, want 0", b.count())
+			}
+
+			netw.set(reading(KeyNetwork, health.Good, "Network is reachable"))
+			f.next(t)
+			if b.count() != 1 {
+				t.Fatalf("b ran %d times once connectivity is good, want 1", b.count())
+			}
+		})
+	}
+}
+
+// TestNetworkUnknownSkipsInternetChecks: while the last network run was
+// unreadable (an error, no reading, or only an unknown one), checks that need
+// the internet are not run, yet the outside is not known down, so Telegram is
+// still attempted (FR-036, R21).
+func TestNetworkUnknownSkipsInternetChecks(t *testing.T) {
+	cases := map[string]health.CheckResult{
+		"error":      {Err: errors.New("open /proc/net/route: permission denied"), Forget: []string{"network/router"}},
+		"no reading": {Forget: []string{"network/router"}},
+		"unknown":    {Readings: []health.Reading{{Key: KeyNetwork, Verdict: health.Unknown, Text: "cannot ping"}}},
+	}
+	for name, unreadable := range cases {
+		t.Run(name, func(t *testing.T) {
+			netw := newFakeCheck(nil, "network", unreadable)
+			netCheck := checkOf(netw)
+			netCheck.Interval = 5 * time.Minute
+			web := newFakeCheck(nil, "web", reading("http/web", health.Good, ""))
+			webCheck := checkOf(web)
+			webCheck.NeedsInternet = true
+			disk := newFakeCheck(nil, "disk", reading("disk/sda", health.Bad, "disk failing"))
+			f := newFixture(t, &fakeStore{}, netCheck, webCheck, checkOf(disk))
+
+			f.tick(t)
+			f.next(t) // network not due: still unknown from its last run.
+
+			if web.count() != 0 {
+				t.Fatalf("web ran %d times while the network is unknown, want 0", web.count())
+			}
+			if disk.count() != 2 {
+				t.Fatalf("disk ran %d times, want 2", disk.count())
+			}
+			if got := countContaining(f.tlg.texts(), "PROBLEM: disk failing"); got != 1 {
+				t.Fatalf("telegram = %q, want the disk PROBLEM attempted on Telegram", f.tlg.texts())
+			}
+
+			netw.set(reading(KeyNetwork, health.Good, "Network is reachable"))
+			f.now = f.now.Add(5 * time.Minute)
+			f.tick(t)
+
+			if web.count() != 1 {
+				t.Fatalf("web ran %d times once the network is readable, want 1", web.count())
+			}
+		})
+	}
+}
+
+// TestNetworkThresholdDefault: with the network threshold left out of the
+// config it is one interval, so a single lost round heals without a message
+// while an outage confirmed on the next cycle is one PROBLEM by SMS (FR-035).
+func TestNetworkThresholdDefault(t *testing.T) {
+	cfg, errs := config.Parse([]byte("network:\n  internet_targets: [\"203.0.113.10\"]\n"), "health.yaml")
+	if len(errs) != 0 || cfg.Network == nil {
+		t.Fatalf("parse: %v", errs)
+	}
+	n := cfg.Network
+	if n.Threshold.Duration() != n.Interval.Duration() || n.Interval.Duration() != 5*time.Minute {
+		t.Fatalf("threshold = %s, interval = %s, want both 5m", n.Threshold.Duration(), n.Interval.Duration())
+	}
+
+	netw := newFakeCheck(nil, "network", reading(KeyNetwork, health.Bad, "Router 192.0.2.1 is not answering"))
+	netCheck := checkOf(netw)
+	netCheck.Interval = n.Interval.Duration()
+	netCheck.Threshold = n.Threshold.Duration()
+	netCheck.Mode = health.ModeSMS
+	f := newFixture(t, &fakeStore{}, netCheck)
+
+	// One lost round heals by itself: no message.
+	f.tick(t)
+	netw.set(reading(KeyNetwork, health.Good, "Network is reachable"))
+	f.now = f.now.Add(5 * time.Minute)
+	f.tick(t)
+	if got := append(f.sms.texts(), f.tlg.texts()...); len(got) != 0 {
+		t.Fatalf("sent %q for a single lost round, want nothing", got)
+	}
+
+	// Bad on two consecutive cycles: one PROBLEM by SMS.
+	netw.set(reading(KeyNetwork, health.Bad, "Router 192.0.2.1 is not answering"))
+	f.now = f.now.Add(5 * time.Minute)
+	f.tick(t)
+	f.now = f.now.Add(5 * time.Minute)
+	f.tick(t)
+	if got := countContaining(f.sms.texts(), "PROBLEM: Router 192.0.2.1 is not answering"); got != 1 {
+		t.Fatalf("sms = %q, want one PROBLEM", f.sms.texts())
 	}
 }

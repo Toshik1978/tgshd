@@ -17,11 +17,16 @@ type fakeEngine struct {
 	idFilter   map[string]bool // ids still present on a filtered list
 	listErr    error
 	filterErr  error
+	nameMatch  []container.Summary // returned by a list filtered by name
+	nameErr    error
 }
 
 func (f *fakeEngine) ContainerList(
 	_ context.Context, o client.ContainerListOptions,
 ) (client.ContainerListResult, error) {
+	if _, ok := o.Filters["name"]; ok {
+		return client.ContainerListResult{Items: f.nameMatch}, f.nameErr
+	}
 	if ids, ok := o.Filters["id"]; ok {
 		if f.filterErr != nil {
 			return client.ContainerListResult{}, f.filterErr
@@ -141,5 +146,46 @@ func TestInspect(t *testing.T) {
 	}
 	if _, err := c.Inspect(t.Context(), "gone"); !errors.Is(err, errBoom) {
 		t.Fatalf("Inspect(gone) error = %v, want the engine error", err)
+	}
+}
+
+func TestInspectNotFound(t *testing.T) {
+	errBoom := errors.New("boom")
+
+	tests := []struct {
+		name         string
+		nameMatch    []container.Summary
+		nameErr      error
+		wantNotFound bool
+	}{
+		{name: "re-list finds nothing", wantNotFound: true},
+		{
+			name:         "re-list finds only a similar name",
+			nameMatch:    []container.Summary{{Names: []string{"/gone-2"}}},
+			wantNotFound: true,
+		},
+		{name: "re-list finds the container", nameMatch: []container.Summary{{Names: []string{"/gone"}}}},
+		{name: "re-list fails", nameErr: errBoom},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := &fakeEngine{
+				inspectErr: map[string]error{"gone": errBoom},
+				nameMatch:  tt.nameMatch,
+				nameErr:    tt.nameErr,
+			}
+
+			_, err := (&Client{api: f}).Inspect(t.Context(), "gone")
+			if err == nil {
+				t.Fatal("Inspect() error = nil, want an error")
+			}
+			if got := errors.Is(err, ErrNotFound); got != tt.wantNotFound {
+				t.Errorf("errors.Is(err, ErrNotFound) = %v, want %v (err = %v)", got, tt.wantNotFound, err)
+			}
+			if !errors.Is(err, errBoom) {
+				t.Errorf("the engine error is not wrapped: %v", err)
+			}
+		})
 	}
 }

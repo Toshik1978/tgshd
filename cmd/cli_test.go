@@ -188,7 +188,7 @@ func TestWriteResult(t *testing.T) {
 		Err:     errors.New("read ups status: driver not connected"),
 	}, &tl)
 	writeResult(&buf, "network", health.CheckResult{
-		Readings: []health.Reading{{Key: "network/router", Verdict: health.Good, Text: "gateway answers"}},
+		Readings: []health.Reading{{Key: "network/connectivity", Verdict: health.Good, Text: "Network is reachable"}},
 	}, &tl)
 	writeError(&buf, "config/http/web-app/invalid", "health.yaml: http/web-app: bad url", &tl)
 
@@ -198,7 +198,7 @@ func TestWriteResult(t *testing.T) {
 		"SAMPLE ups.charge: 12.5\n" +
 		"SAMPLE ups.voltage: 230\n" +
 		"ERROR ups/run/error: read ups status: driver not connected\n" +
-		"GOOD network/router: gateway answers\n" +
+		"GOOD network/connectivity: Network is reachable\n" +
 		"ERROR config/http/web-app/invalid: health.yaml: http/web-app: bad url\n"
 	if got := buf.String(); got != want {
 		t.Fatalf("output:\n%s\nwant:\n%s", got, want)
@@ -853,7 +853,6 @@ func setUserVersion(t *testing.T, stateDir string, version int) {
 func TestRunCheckOnceSchemaVersionFallback(t *testing.T) {
 	t.Parallel()
 
-	const v1Notice = "state database is at schema version 1; run the daemon once to migrate"
 	tests := []struct {
 		name       string
 		version    int
@@ -861,6 +860,7 @@ func TestRunCheckOnceSchemaVersionFallback(t *testing.T) {
 		wantWarn   string
 	}{
 		{name: "version one", version: 1, wantNotice: true},
+		{name: "version two", version: 2, wantNotice: true},
 		{name: "version zero is not claimed as one", version: 0, wantWarn: "stored state not used"},
 		{name: "newer than the build", version: 99, wantWarn: "stored state not used"},
 	}
@@ -877,8 +877,9 @@ func TestRunCheckOnceSchemaVersionFallback(t *testing.T) {
 			if !strings.Contains(stdout.String(), "SUMMARY ") {
 				t.Fatalf("the run did not finish: %q", stdout)
 			}
-			if got := strings.Contains(stderr.String(), v1Notice); got != tt.wantNotice {
-				t.Fatalf("v1 notice = %v, want %v: %q", got, tt.wantNotice, stderr)
+			notice := fmt.Sprintf("state database is at schema version %d; run the daemon once to migrate", tt.version)
+			if got := strings.Contains(stderr.String(), notice); got != tt.wantNotice {
+				t.Fatalf("migration notice = %v, want %v: %q", got, tt.wantNotice, stderr)
 			}
 			if tt.wantWarn != "" && !strings.Contains(stderr.String(), tt.wantWarn) {
 				t.Fatalf("stderr = %q, want %q", stderr, tt.wantWarn)
@@ -905,6 +906,7 @@ func TestOneShotAsleep(t *testing.T) {
 		{Serial: "TEST0000000001", LastReadAt: now.Add(-50 * time.Hour), AsleepSince: now.Add(-49 * time.Hour)},
 		{Serial: "TEST0000000002", LastReadAt: now.Add(-time.Minute)},
 		{Serial: "TEST0000000003", LastReadAt: now.Add(-30 * time.Second), AsleepSince: now.Add(-time.Second)},
+		{Serial: "TEST0000000004", AsleepSince: now.Add(-time.Second)},
 	}}
 	path, _ := writeHealthConfig(t, "")
 	cio, stdout, stderr := testIO(nil, now)
@@ -926,8 +928,102 @@ func TestOneShotAsleep(t *testing.T) {
 	}
 	want := "ASLEEP disks/TEST0000000001: last read 2 d ago\n" +
 		"ASLEEP disks/TEST0000000003: last read <1 m ago\n" +
+		"ASLEEP disks/TEST0000000004: never read\n" +
 		"SUMMARY 1 checks, 0 readings (0 good, 0 bad, 0 unknown), 0 samples, 0 errors\n"
 	if got := stdout.String(); got != want {
 		t.Fatalf("stdout:\n%s\nwant:\n%s", got, want)
+	}
+}
+
+// TestOneShotOpenStateReadsTheStoredConditions: under check --once the
+// temperatures open state answers from the conditions of the read-only store;
+// without a store it stays unbound and answers false.
+func TestOneShotOpenStateReadsTheStoredConditions(t *testing.T) {
+	t.Parallel()
+
+	const key = "temps/acpitz/temp1"
+	stateDir := t.TempDir()
+	st, err := store.Open(t.Context(), stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cond := health.Condition{Key: key, Check: "temps", Open: true}
+	closed := health.Condition{Key: "temps/acpitz/temp2", Check: "temps"}
+	state := store.State{Conditions: []health.Condition{cond, closed}}
+	if err = st.Checkpoint(t.Context(), state, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err = st.Close(); err != nil {
+		t.Fatal(err)
+	}
+	ro, err := openStateReadOnly(t.Context(), stateDir)
+	if err != nil || ro == nil {
+		t.Fatalf("open read-only: %v, %v", ro, err)
+	}
+	t.Cleanup(func() { _ = ro.Close() })
+
+	tests := []struct {
+		name string
+		hs   *healthSetup
+		want bool
+	}{
+		{name: "with stored state", hs: &healthSetup{OneShot: true, Store: ro}, want: true},
+		{name: "without stored state", hs: &healthSetup{OneShot: true}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			var open *openState
+			opts := checkGraph(&config{}, tt.hs, zap.NewNop(), fx.Provide(newOpenState), new([]checkSet))
+			opts = append(opts, fx.Invoke(func(o *openState) { open = o }))
+			app := fx.New(opts...)
+			if err := app.Err(); err != nil {
+				t.Fatal(err)
+			}
+			if got := open.IsOpen(key); got != tt.want {
+				t.Fatalf("IsOpen(%q) = %v, want %v", key, got, tt.want)
+			}
+			if open.IsOpen("temps/acpitz/temp2") || open.IsOpen("temps/none") {
+				t.Fatal("only the open stored condition may be open")
+			}
+		})
+	}
+}
+
+// TestOneShotOpenStateWarnsWhenTheStoreCannotBeLoaded: a store that fails to
+// load leaves every condition closed and says so once on stderr.
+func TestOneShotOpenStateWarnsWhenTheStoreCannotBeLoaded(t *testing.T) {
+	t.Parallel()
+
+	stateDir := t.TempDir()
+	st, err := store.Open(t.Context(), stateDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = st.Close(); err != nil {
+		t.Fatal(err)
+	}
+	ro, err := openStateReadOnly(t.Context(), stateDir)
+	if err != nil || ro == nil {
+		t.Fatalf("open read-only: %v, %v", ro, err)
+	}
+	if err = ro.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	var stderr bytes.Buffer
+	hs := &healthSetup{OneShot: true, Store: ro, Stderr: &stderr}
+	var open *openState
+	opts := checkGraph(&config{}, hs, zap.NewNop(), fx.Provide(newOpenState), new([]checkSet))
+	opts = append(opts, fx.Invoke(func(o *openState) { open = o }))
+	if err = fx.New(opts...).Err(); err != nil {
+		t.Fatal(err)
+	}
+	if open.IsOpen("temps/acpitz/temp1") || open.IsOpen("temps/acpitz/temp2") {
+		t.Fatal("an unloadable store must leave every condition closed")
+	}
+	if got := strings.Count(stderr.String(), "temperature open state unavailable: "); got != 1 {
+		t.Fatalf("warnings = %d, want 1: %q", got, &stderr)
 	}
 }

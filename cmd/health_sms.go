@@ -177,7 +177,7 @@ func buildModemProbeCheck(
 		return checkSet{Errors: []startError{{Key: modemProbeCheckName + "/config/invalid", Text: err.Error()}}}, nil
 	}
 	st := &probeState{probe: probe}
-	common := hcfg.Common{Interval: hcfg.Duration(modemProbeInterval), Mode: hcfg.ModeTLG}
+	common := hcfg.Common{Interval: hcfg.Duration(modemProbeInterval), Mode: hcfg.ModeTLG, PauseInQuietWindows: true}
 
 	return checkSet{
 		Checks:     []health.Check{newCheck(modemProbeCheckName, common, st.run)},

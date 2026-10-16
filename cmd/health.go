@@ -3,10 +3,12 @@ package main
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"go.uber.org/fx"
@@ -32,8 +34,14 @@ const (
 	// instanceLockName is the single-instance lock inside the state directory.
 	instanceLockName = "tgshd.lock"
 	stateDirMode     = 0o700
-	// storeOpenTimeout bounds opening and migrating the state database.
+	// storeOpenTimeout bounds the first opening and migrating of the state
+	// database, at start.
 	storeOpenTimeout = 30 * time.Second
+	// storeRetryTimeout bounds each later open, which the runner's Load makes
+	// at the top of every tick while the database is not open: with the tick's
+	// 70 s of runs and deliveries it keeps the tick under the 90 s heartbeat
+	// budget (see runner.MaxTickTime).
+	storeRetryTimeout = 10 * time.Second
 	// startLoadTimeout bounds reading the stored state at start, well inside
 	// fx's 15 s start timeout.
 	startLoadTimeout = 5 * time.Second
@@ -86,6 +94,8 @@ type healthSetup struct {
 	// OneShot is set by check --once: checks only report what they would
 	// fix and never act.
 	OneShot bool
+	// Stderr receives the warnings of a one-shot run; nil discards them.
+	Stderr io.Writer
 }
 
 // stateStore is the state database as the runner and the reports use it;
@@ -221,12 +231,7 @@ func claimState(lc fx.Lifecycle, logger *zap.Logger, hs *healthSetup, dir string
 
 	// The store's *sql.DB keeps its single connection for the daemon's life;
 	// OpenReadOnly (the CLI) relies on that, so no connection lifetime is set.
-	open := func(ctx context.Context) (*store.Store, error) {
-		ctx, cancel := context.WithTimeout(ctx, storeOpenTimeout)
-		defer cancel()
-
-		return store.Open(ctx, dir)
-	}
+	open := boundedOpen(func(ctx context.Context) (*store.Store, error) { return store.Open(ctx, dir) })
 	st, err := open(context.Background())
 	if err != nil {
 		// The runner retries the open with its Load each tick and raises the
@@ -244,6 +249,23 @@ func claimState(lc fx.Lifecycle, logger *zap.Logger, hs *healthSetup, dir string
 	})
 
 	return true
+}
+
+// boundedOpen bounds open by storeOpenTimeout on its first call and by
+// storeRetryTimeout on every later one.
+func boundedOpen(open func(context.Context) (*store.Store, error)) func(context.Context) (*store.Store, error) {
+	var calls atomic.Int32
+
+	return func(ctx context.Context) (*store.Store, error) {
+		limit := storeRetryTimeout
+		if calls.Add(1) == 1 {
+			limit = storeOpenTimeout
+		}
+		ctx, cancel := context.WithTimeout(ctx, limit)
+		defer cancel()
+
+		return open(ctx)
+	}
 }
 
 // closeState closes the store, then releases the instance lock.

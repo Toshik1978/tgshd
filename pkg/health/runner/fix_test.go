@@ -148,7 +148,7 @@ func TestReportedFixesFollowTheEntrysMode(t *testing.T) {
 				// The outside is known down for the tick.
 				checks = append(checks, health.Check{
 					Name: notify.CheckNetwork, Interval: Tick, Run: func(context.Context) health.CheckResult {
-						return reading(KeyInternet, health.Bad, "internet down")
+						return reading(KeyNetwork, health.Bad, "internet down")
 					},
 				})
 			}

@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"io/fs"
+	"strconv"
+	"strings"
 	"testing"
 	"time"
 
@@ -26,10 +28,11 @@ func (f *fakeSource) ReadFile(string) ([]byte, error)   { return []byte(f.data),
 
 func entry(content config.Content) config.Freshness {
 	return config.Freshness{
-		Name:    "db-dump",
-		Path:    "/var/lib/example/db",
-		Content: content,
-		MaxAge:  config.Duration(26 * time.Hour),
+		Name:            "db-dump",
+		Path:            "/var/lib/example/db",
+		Content:         content,
+		MaxAge:          config.Duration(26 * time.Hour),
+		FutureTolerance: config.Duration(time.Hour),
 	}
 }
 
@@ -240,5 +243,52 @@ func TestKVStateStamp(t *testing.T) {
 	}
 	if _, ok := st.Export()["other.a.stamp"]; ok {
 		t.Fatal("foreign key restored")
+	}
+}
+
+// A stamp more than future_tolerance ahead of now is a broken clock or
+// writer and would hide a failing backup: Bad (US5 acceptance 5).
+func TestFutureStamp(t *testing.T) {
+	future := base().Add(3 * time.Hour)
+	tests := []struct {
+		name    string
+		content config.Content
+		src     fakeSource
+	}{
+		{"mtime", config.ContentMtime, fakeSource{mtime: future}},
+		{"epoch", config.ContentEpoch, fakeSource{data: strconv.FormatInt(future.Unix(), 10)}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := run(t, entry(tt.content), &tt.src, freshness.NewKVState(nil), base())
+			if r.Verdict != health.Bad || !strings.Contains(r.Text, "is dated 3h0m0s in the future") {
+				t.Fatalf("reading = %+v", r)
+			}
+		})
+	}
+}
+
+func TestFutureWithinTolerance(t *testing.T) {
+	tests := []struct {
+		name      string
+		ahead     time.Duration
+		tolerance time.Duration
+		want      health.Verdict
+	}{
+		{"inside default", 30 * time.Minute, time.Hour, health.Good},
+		{"exactly at tolerance", time.Hour, time.Hour, health.Good},
+		{"just past tolerance", time.Hour + time.Second, time.Hour, health.Bad},
+		{"custom wider tolerance", 5 * time.Hour, 6 * time.Hour, health.Good},
+		{"zero tolerance, any future", time.Second, 0, health.Bad},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := entry(config.ContentMtime)
+			cfg.FutureTolerance = config.Duration(tt.tolerance)
+			r := run(t, cfg, &fakeSource{mtime: base().Add(tt.ahead)}, freshness.NewKVState(nil), base())
+			if r.Verdict != tt.want {
+				t.Fatalf("verdict = %v, want %v (%s)", r.Verdict, tt.want, r.Text)
+			}
+		})
 	}
 }

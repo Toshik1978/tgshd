@@ -6,11 +6,17 @@
 // the Host header keep using the URL host. An optional header takes its value
 // from an environment variable, and an optional container must be healthy too.
 //
+// Redirects are not followed unless follow_redirects is set: the first
+// response is judged.
+//
 // Verdicts: an answer inside the status range is Good; a status outside it, a
-// transport failure (DNS, refused, timeout, TLS, too many redirects) or an
-// unhealthy container is Bad. A missing or placeholder secret, a failed DoH
-// resolution, a failed container lookup or a cancelled run cannot be judged:
-// the condition is omitted and CheckResult.Err says why.
+// transport failure (DNS, refused, timeout, TLS, too many redirects), a DoH
+// answer that the name does not exist or has no address, an unhealthy
+// container or one that does not exist is Bad. A missing or placeholder
+// secret, any other failed DoH resolution, a failed container lookup or a
+// cancelled run cannot be judged: the condition is omitted and CheckResult.Err
+// says why. With auth_refusal: checker_error a 401 or 403 answer is not judged
+// either; it raises the checker error http/<name>/auth.
 package httpcheck
 
 import (
@@ -37,8 +43,16 @@ const (
 	userAgent    = "tgshd-health"
 )
 
+// kindAuth is the checker-error kind of a refused credential
+// (http/<name>/auth).
+const kindAuth = "auth"
+
 // errTooManyRedirects stops a redirect chain longer than maxRedirects.
 var errTooManyRedirects = errors.New("more than 5 redirects")
+
+// ErrContainerNotFound is returned by a Containers source when the named
+// container does not exist. The check judges it down.
+var ErrContainerNotFound = errors.New("container does not exist")
 
 // Resolver resolves a host name to its addresses, A records first
 // (implemented by *doh.Resolver).
@@ -46,7 +60,8 @@ type Resolver interface {
 	Lookup(ctx context.Context, host string) ([]netip.Addr, error)
 }
 
-// Containers reports whether a container is running and healthy.
+// Containers reports whether a container is running and healthy. A container
+// that does not exist is reported with an error wrapping ErrContainerNotFound.
 type Containers interface {
 	ContainerHealthy(ctx context.Context, name string) (bool, error)
 }
@@ -81,6 +96,12 @@ type Check struct {
 	containers Containers
 	lookupEnv  func(key string) (string, bool)
 	client     *http.Client
+	// follow follows redirects (follow_redirects); otherwise the first
+	// response is judged.
+	follow bool
+	// authCheckerError turns a 401 or 403 into a checker error
+	// (auth_refusal: checker_error) instead of a Bad reading.
+	authCheckerError bool
 }
 
 // outcome is the judgement of one aspect of the condition.
@@ -132,6 +153,9 @@ func New(entry config.HTTP, opts Options) (*Check, error) {
 		container:  entry.Container,
 		containers: opts.Containers,
 		lookupEnv:  opts.LookupEnv,
+		follow:     entry.FollowRedirects,
+
+		authCheckerError: entry.AuthRefusal == config.AuthRefusalCheckerError,
 	}
 	c.client = newClient(d, opts.TLSConfig, c.checkRedirect)
 
@@ -182,6 +206,12 @@ func (c *Check) probe(ctx context.Context, header string) outcome {
 
 	_ = resp.Body.Close()
 
+	if c.authCheckerError && (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) {
+		return outcome{err: health.CheckError{
+			Kind: kindAuth, Err: fmt.Errorf("endpoint refused the credentials (%d)", resp.StatusCode),
+		}}
+	}
+
 	if lo, hi := c.status[0], c.status[1]; resp.StatusCode < lo || resp.StatusCode > hi {
 		return outcome{bad: true, text: fmt.Sprintf("status %d, expected %d-%d", resp.StatusCode, lo, hi)}
 	}
@@ -189,11 +219,16 @@ func (c *Check) probe(ctx context.Context, header string) outcome {
 	return outcome{text: fmt.Sprintf("status %d", resp.StatusCode)}
 }
 
-// failure classifies a failed request: a DoH lookup that failed or did not
-// finish, or a run cancelled by the caller, is not a judgement; anything else
-// means the endpoint is down.
+// failure classifies a failed request: a definitive negative DoH answer
+// (NXDOMAIN or NODATA) means the endpoint is down; any other DoH lookup that
+// failed or did not finish, or a run cancelled by the caller, is not a
+// judgement; anything else means the endpoint is down.
 func failure(ctx context.Context, trace *dohTrace, err error, within string) outcome {
 	if dohErr := trace.failed(within); dohErr != nil {
+		if text, ok := negativeAnswer(dohErr); ok {
+			return outcome{bad: true, text: text}
+		}
+
 		return outcome{err: dohErr}
 	}
 
@@ -225,6 +260,8 @@ func (c *Check) checkContainer(ctx context.Context) outcome {
 	healthy, err := c.containers.ContainerHealthy(ctx, c.container)
 
 	switch {
+	case errors.Is(err, ErrContainerNotFound):
+		return outcome{bad: true, text: fmt.Sprintf("container %s does not exist", c.container)}
 	case err != nil:
 		return outcome{err: fmt.Errorf("container %s: %w", c.container, err)}
 	case !healthy:
@@ -234,10 +271,15 @@ func (c *Check) checkContainer(ctx context.Context) outcome {
 	}
 }
 
-// checkRedirect follows at most maxRedirects and keeps the secret header
+// checkRedirect stops at the first response unless redirects are followed.
+// When they are, it follows at most maxRedirects and keeps the secret header
 // away from any hop whose scheme or host differs from the configured URL
 // (net/http only strips Authorization and cookies, and only across domains).
 func (c *Check) checkRedirect(req *http.Request, via []*http.Request) error {
+	if !c.follow {
+		return http.ErrUseLastResponse
+	}
+
 	if len(via) > maxRedirects {
 		return errTooManyRedirects
 	}

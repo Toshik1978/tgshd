@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"slices"
 	"sync"
 	"time"
@@ -19,11 +20,12 @@ import (
 
 const fixWindow = time.Hour
 
-// Runner executes an argv without a shell and returns its exit code. A
-// non-nil error means the command did not run to completion: it could not be
-// started, or ctx ended (the adapter returns the context error then).
+// Runner executes an argv without a shell and returns its exit code and its
+// combined stdout and stderr (capped by the adapter). A non-nil error means
+// the command did not run to completion: it could not be started, or ctx
+// ended (the adapter returns the context error then).
 type Runner interface {
-	Run(ctx context.Context, argv []string) (exitCode int, err error)
+	Run(ctx context.Context, argv []string) (exitCode int, output []byte, err error)
 }
 
 // Docker is the container side of the fix action.
@@ -50,6 +52,11 @@ type Check struct {
 	docker Docker
 	now    func() time.Time
 	log    *zap.Logger
+
+	// expect and forbid are the compiled output patterns (nil when unset);
+	// patternErr is a compile failure, reported as a checker error per run.
+	expect, forbid *regexp.Regexp
+	patternErr     error
 
 	// dryRun reports fixes without taking them (check --once).
 	dryRun bool
@@ -83,11 +90,29 @@ func New(
 		log = zap.NewNop()
 	}
 	c := &Check{cfg: cfg, runner: runner, docker: docker, now: now, log: log}
+	c.expect, c.forbid, c.patternErr = compilePatterns(cfg)
 	for _, o := range opts {
 		o(c)
 	}
 
 	return c
+}
+
+// compilePatterns compiles expect_output and forbid_output. The config loader
+// validates them, so a failure here means a hand-built config.
+func compilePatterns(cfg config.Command) (expect, forbid *regexp.Regexp, err error) {
+	if cfg.ExpectOutput != "" {
+		if expect, err = regexp.Compile(cfg.ExpectOutput); err != nil {
+			return nil, nil, fmt.Errorf("command %q: expect_output: %w", cfg.Name, err)
+		}
+	}
+	if cfg.ForbidOutput != "" {
+		if forbid, err = regexp.Compile(cfg.ForbidOutput); err != nil {
+			return nil, nil, fmt.Errorf("command %q: forbid_output: %w", cfg.Name, err)
+		}
+	}
+
+	return expect, forbid, nil
 }
 
 // TakeFixes returns and clears the fix attempts made since the last call.
@@ -135,34 +160,49 @@ func (c *Check) Restore(data []byte) error {
 
 // Run executes the probe and, when configured, the fix action.
 //
-// Exit 0 is Good, a non-zero exit is Bad, and a probe that exceeds its
-// timeout is Bad too (the guarded thing is hung). A probe that cannot be
-// started (missing binary, permission denied) is a configuration problem and
-// is returned as a checker error with no readings.
+// The verdict order is: a probe that cannot be started (missing binary,
+// permission denied) is a configuration problem and a checker error with no
+// readings; a timeout is judged per timeout_verdict (broken: Bad, the guarded
+// thing is hung; unreadable: Unknown, with the fix strike count unchanged); a
+// non-zero exit is Bad; output matching forbid_output is Bad; output not
+// matching expect_output is Bad; else Good. Texts name the pattern key, never
+// the output, which may hold secrets.
 //
 // The probe gets its timeout, but ends before the run's deadline (see
 // health.Bound): a probe that hangs past what is left of the run is judged
-// Bad too, so the run is never abandoned with its reading.
+// like a timeout, so the run is never abandoned with its reading.
 func (c *Check) Run(ctx context.Context) health.CheckResult {
+	if c.patternErr != nil {
+		return health.CheckResult{Err: c.patternErr}
+	}
 	timeout := c.cfg.Timeout.Duration()
 	pctx, cancel, limit := health.Bound(ctx, timeout)
-	code, err := c.runner.Run(pctx, c.cfg.Run)
+	code, output, err := c.runner.Run(pctx, c.cfg.Run)
 	timedOut := ctx.Err() == nil &&
 		(errors.Is(pctx.Err(), context.DeadlineExceeded) || errors.Is(err, context.DeadlineExceeded))
 	cancel()
 
 	var text string
 	switch {
-	case timedOut && limit < timeout:
-		text = "probe did not finish before the run deadline"
+	case timedOut && c.cfg.TimeoutVerdict == config.TimeoutUnreadable:
+		// No strike, no fix: the probe could not be read, not judged.
+		return c.unreadableTimeout(timeout, limit)
 	case timedOut:
-		text = fmt.Sprintf("probe timed out after %s", timeout)
+		text = timeoutText(timeout, limit)
 	case err != nil:
 		return health.CheckResult{Err: fmt.Errorf("run probe %q: %w", c.cfg.Name, err)}
 	case code != 0:
 		text = fmt.Sprintf("probe exited with status %d", code)
+	default:
+		text = c.judgeOutput(output)
 	}
 
+	return c.record(ctx, text)
+}
+
+// record turns the probe's Bad text ("" for Good) into the reading, counts
+// the strike and takes the fix when it is due.
+func (c *Check) record(ctx context.Context, text string) health.CheckResult {
 	c.mu.Lock()
 	if text == "" {
 		c.strikes = 0
@@ -179,6 +219,38 @@ func (c *Check) Run(ctx context.Context) health.CheckResult {
 	res.Err = c.maybeFix(ctx)
 
 	return res
+}
+
+// unreadableTimeout is the result of a timeout under timeout_verdict
+// unreadable: an Unknown reading plus a checker error.
+func (c *Check) unreadableTimeout(timeout, limit time.Duration) health.CheckResult {
+	text := fmt.Sprintf("command %s: %s", c.cfg.Name, timeoutText(timeout, limit))
+
+	return health.CheckResult{
+		Readings: []health.Reading{{Key: c.key(), Verdict: health.Unknown, Text: text}},
+		Err:      fmt.Errorf("%s: %w", text, context.DeadlineExceeded),
+	}
+}
+
+func timeoutText(timeout, limit time.Duration) string {
+	if limit < timeout {
+		return "probe did not finish before the run deadline"
+	}
+
+	return fmt.Sprintf("probe timed out after %s", timeout)
+}
+
+// judgeOutput returns the Bad text for output that matches forbid_output or
+// misses expect_output, or "" when the output is acceptable.
+func (c *Check) judgeOutput(output []byte) string {
+	if c.forbid != nil && c.forbid.Match(output) {
+		return "output matched forbid_output"
+	}
+	if c.expect != nil && !c.expect.Match(output) {
+		return "output did not match expect_output"
+	}
+
+	return ""
 }
 
 // key is the condition key of the probe.
@@ -323,7 +395,7 @@ func (c *Check) doFix(ctx context.Context) string {
 		}
 		return "restarted container " + fix.RestartContainer
 	}
-	code, err := c.runner.Run(fctx, fix.Run)
+	code, _, err := c.runner.Run(fctx, fix.Run)
 	switch {
 	case err != nil:
 		return fmt.Sprintf("failed to run %s: %v", fix.Run[0], err)

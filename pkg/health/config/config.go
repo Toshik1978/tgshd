@@ -53,6 +53,24 @@ const (
 	ReportAlert   Report = "alert"
 )
 
+// AuthRefusal selects the verdict for an HTTP 401 or 403 answer.
+type AuthRefusal string
+
+// HTTP auth-refusal verdicts.
+const (
+	AuthRefusalDown         AuthRefusal = "down"
+	AuthRefusalCheckerError AuthRefusal = "checker_error"
+)
+
+// TimeoutVerdict selects the verdict for a command probe that timed out.
+type TimeoutVerdict string
+
+// Command timeout verdicts.
+const (
+	TimeoutBroken     TimeoutVerdict = "broken"
+	TimeoutUnreadable TimeoutVerdict = "unreadable"
+)
+
 // EntryError describes one invalid entry (or an unreadable file when Entry is
 // empty). The entry is skipped; the rest of the configuration stays usable.
 type EntryError struct {
