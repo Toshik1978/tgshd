@@ -67,10 +67,11 @@ func configuration() fx.Option {
 		),
 		fx.Provide(
 			newTelegramBot,
+			newAccessList,
 			fx.Annotate(
 				telegram.NewConsumer,
 				fx.As(new(app.TelegramConsumer)),
-				fx.ParamTags(``, ``, `group:"command_handler"`),
+				fx.ParamTags(``, ``, ``, `group:"command_handler"`),
 			),
 			fx.Annotate(telegram.NewPublisher, fx.As(new(command.Publisher)), fx.As(new(sms.Publisher))),
 		),
@@ -181,6 +182,7 @@ type config struct {
 	AppEnv        string   `env:"APP_ENV"`
 	TelegramToken string   `env:"TELEGRAM_TOKEN"`
 	ChatID        int64    `env:"TELEGRAM_CHAT_ID"`
+	AllowedIDs    []int64  `env:"TELEGRAM_ALLOWED_IDS"    envSeparator:","`
 	UnknownScript string   `env:"TELEGRAM_UNKNOWN_SCRIPT"`
 	PingHosts     []string `env:"BOT_PING_HOSTS"          envSeparator:","`
 	NutIP         string   `env:"BOT_NUT_IP"`
@@ -201,6 +203,11 @@ func newConfig() (*config, error) {
 		return nil, fmt.Errorf("failed to parse environment: %w", err)
 	}
 	return &cfg, nil
+}
+
+// newAccessList builds the Telegram allow-list from the configuration.
+func newAccessList(cfg *config) *telegram.AccessList {
+	return telegram.NewAccessList(cfg.ChatID, cfg.AllowedIDs)
 }
 
 // newTelegramBot initializes new telegram bot.

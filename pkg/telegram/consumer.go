@@ -23,16 +23,22 @@ type Handler interface {
 type consumer struct {
 	logger   *zap.Logger
 	bot      *telebot.Bot
+	access   *AccessList
 	handlers []Handler
 }
 
 // NewConsumer initializes new consumer for telegram messages.
-func NewConsumer(logger *zap.Logger, bot *telebot.Bot, handlers []Handler) *consumer {
+func NewConsumer(logger *zap.Logger, bot *telebot.Bot, access *AccessList, handlers []Handler) *consumer {
 	logger.Info("Creation of TelegramConsumer")
+
+	if access.Empty() {
+		logger.Warn("Telegram allow-list is empty, set TELEGRAM_CHAT_ID or TELEGRAM_ALLOWED_IDS")
+	}
 
 	return &consumer{
 		logger:   logger,
 		bot:      bot,
+		access:   access,
 		handlers: handlers,
 	}
 }
@@ -82,6 +88,9 @@ func (c *consumer) Stop(ctx context.Context) error {
 }
 
 func (c *consumer) handleCommands(ctx context.Context, handlers map[string]Handler, tctx telebot.Context) error {
+	if !c.permitted(tctx) {
+		return nil
+	}
 	fields := strings.Fields(tctx.Text())
 	if len(fields) == 0 {
 		return nil
@@ -94,6 +103,9 @@ func (c *consumer) handleCommands(ctx context.Context, handlers map[string]Handl
 }
 
 func (c *consumer) handleCommand(ctx context.Context, handler Handler, tctx telebot.Context) error {
+	if !c.permitted(tctx) {
+		return nil
+	}
 	logger := c.logger.With(zap.String("command", handler.Name()))
 	message := tctx.Message()
 
@@ -126,4 +138,25 @@ func (c *consumer) handleCommand(ctx context.Context, handler Handler, tctx tele
 	}
 
 	return nil
+}
+
+// permitted reports whether the update comes from an allowed chat. Other
+// updates are dropped silently, with one warning carrying chat and sender IDs.
+func (c *consumer) permitted(tctx telebot.Context) bool {
+	chat := tctx.Chat()
+	if chat != nil && c.access.Allowed(chat.ID) {
+		return true
+	}
+
+	var chatID, senderID int64
+	if chat != nil {
+		chatID = chat.ID
+	}
+	if message := tctx.Message(); message != nil && message.Sender != nil {
+		senderID = message.Sender.ID
+	}
+	c.logger.Warn("Update from a chat that is not allowed was dropped",
+		zap.Int64("chat_id", chatID), zap.Int64("sender_id", senderID))
+
+	return false
 }

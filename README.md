@@ -49,6 +49,7 @@ Configuration is read from the environment (a local `.env` is auto-loaded; see
 | `APP_ENV` | `development` (pretty logs) or `production` |
 | `TELEGRAM_TOKEN` | Telegram bot token |
 | `TELEGRAM_CHAT_ID` | Operator chat/user ID — reply target and the only sender allowed to run `/sms` |
+| `TELEGRAM_ALLOWED_IDS` | Optional comma-separated extra chat IDs allowed to command the bot in addition to `TELEGRAM_CHAT_ID`; updates from any other chat are ignored and logged |
 | `TELEGRAM_UNKNOWN_SCRIPT` | Path to a script that lists/executes custom commands |
 | `BOT_PING_HOSTS` | Comma-separated hosts for `/ping` |
 | `BOT_NUT_IP` | NUT server address |
