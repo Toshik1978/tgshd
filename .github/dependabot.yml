@@ -9,6 +9,11 @@ updates:
     commit-message:
       prefix: build
       include: scope
+    # modernc.org/sqlite pins the exact modernc.org/libc it was generated
+    # against; a libc ahead of that pin can break the driver. libc moves only
+    # with a sqlite bump.
+    ignore:
+      - dependency-name: "modernc.org/libc"
     groups:
       gomod:
         patterns:
