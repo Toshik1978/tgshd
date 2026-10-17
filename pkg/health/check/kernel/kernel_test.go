@@ -132,6 +132,16 @@ func TestClassification(t *testing.T) {
 		{"mce: [Hardware Error]: CPU 0: Machine Check: 0 Bank 5", "kernel/machine-check"},
 		{"CPU3: Core temperature above threshold, cpu clock throttled (total events = 1)", "kernel/thermal-throttle"},
 		{"Package temperature above threshold, cpu clock throttled", "kernel/thermal-throttle"},
+		{
+			"CPU2: Package temperature is above threshold, cpu clock is throttled (total events = 4)",
+			"kernel/thermal-throttle",
+		},
+		{
+			"mce: CPU0: Core temperature above threshold, cpu clock throttled (total events = 1)",
+			"kernel/thermal-throttle",
+		},
+		{"mce: Uncorrected hardware memory error in user-access at 2f0e4c000", "kernel/machine-check"},
+		{"Memory failure: 0x2f0e4c: recovery action for dirty LRU page: Recovered", "kernel/machine-check"},
 	}
 	for _, tc := range tests {
 		t.Run(tc.msg, func(t *testing.T) {

@@ -271,10 +271,10 @@ dependencies already approved for 001, or an external tool that is optional at r
   specific to general (first match wins) and every class accepts any level:
   | Class | Added patterns (Go `regexp`, unanchored unless shown) |
   |---|---|
-  | `kernel/machine-check` | `\[Hardware Error\]` anywhere (APEI/GHES: `{1}[Hardware Error]: Hardware error from APEI Generic Hardware Error Source…`, `[Hardware Error]: event severity: …`); `Machine check events logged`; `^mce: ` lines with `Machine Check` |
+  | `kernel/machine-check` | `\[Hardware Error\]` anywhere (APEI/GHES: `{1}[Hardware Error]: Hardware error from APEI Generic Hardware Error Source…`, `[Hardware Error]: event severity: …`); `Machine check events logged`; `^mce: ` lines with `Machine Check`; `mce: Uncorrected hardware memory error…`; `Memory failure: … recovery action …` (memory poisoning) |
   | `kernel/nvme` | as 001, any level |
   | `kernel/ata` | `^ata\d+(\.\d+)?: SError: `; `^ata\d+(\.\d+)?: (hard \|soft )?resetting link`; `^ata\d+: (COMRESET failed\|link is slow to respond\|limiting SATA link speed)`; 001's `exception\|failed command\|hard resetting` — at any level (001 required warning or worse) |
-  | `kernel/thermal-throttle` | as 001 |
+  | `kernel/thermal-throttle` | as 001, also matching the Linux 5.5+ wording `temperature is above threshold` and an `mce: ` prefix |
   | `kernel/storage-io` (last) | `I/O error` anywhere, excluding records about `loop`, `sr`, `fd` and `zram` devices as the block layer and filesystems name them (`dev loop0`, `(device loop0)`, `XFS (loop0)`: `(\bdev \|\bdevice \|\()(loop\|sr\|fd\|zram)\d`) |
   `SATA link down` and `SATA link up` are deliberately not matched (empty ports at boot).
 - **Rationale**: GHES records carry `[Hardware Error]` after a `{n}` prefix, so the 001 anchor

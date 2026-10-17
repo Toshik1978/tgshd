@@ -94,6 +94,8 @@ func classTable() []class {
 			`\[Hardware Error\]`,
 			`Machine check events logged`,
 			`^mce: .*Machine Check`,
+			`^mce: Uncorrected hardware memory error`,
+			`^Memory failure: .*recovery action`,
 		)},
 		{key: "kernel/ata", label: "ATA errors", maxLevel: anyLevel, re: compile(
 			`^ata\d+(\.\d+)?: SError: `,
@@ -111,7 +113,8 @@ func classTable() []class {
 			),
 		},
 		{key: "kernel/thermal-throttle", label: "thermal throttling", maxLevel: anyLevel, re: compile(
-			`^(CPU\d+: )?(Core|Package) temperature above threshold`,
+			// "is above" since Linux 5.5; "mce: " when logged from the MCE code.
+			`^(mce: )?(CPU\d+: )?(Core|Package) temperature (is )?above threshold`,
 		)},
 		{
 			key:      "kernel/storage-io",
