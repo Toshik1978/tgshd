@@ -331,6 +331,9 @@ func newHealth(p healthParams) healthOut {
 	reports.bind(r)
 	p.Open.bind(r)
 	registerStart(p.Lifecycle, r.Load, startLoadTimeout, r.CheckerError, slices.Concat(errs, set.Errors))
+	// Before the jobs and the guard: fx stops in reverse, so it runs once they and
+	// the scheduler stopped, and before the store (appended first) is closed.
+	registerStopCheckpoint(p.Lifecycle, r.Checkpoint, p.Logger)
 	// After registerStart: the stored state is restored before a job (the
 	// kernel log reader) starts.
 	registerBackground(p.Lifecycle, set.Background, r.CheckerError, backgroundRetry)
@@ -428,6 +431,24 @@ func registerStart(
 			select {
 			case <-done:
 			case <-ctx.Done():
+			}
+
+			return nil
+		},
+	})
+}
+
+// registerStopCheckpoint writes the runner's state once more in OnStop:
+// events pushed and messages queued since the last tick (the memory guard's
+// last outcomes, checker errors raised on the way out) are otherwise lost at
+// exit. The write is bounded by the stop ctx (plus the runner's short grace
+// for a write already under way).
+func registerStopCheckpoint(lc fx.Lifecycle, checkpoint func(context.Context) error, logger *zap.Logger) {
+	lc.Append(fx.Hook{
+		OnStop: func(ctx context.Context) error {
+			if err := checkpoint(ctx); err != nil {
+				logger.Warn("Cannot save the health state on stop; what happened since the last tick is lost",
+					zap.Error(err))
 			}
 
 			return nil

@@ -21,6 +21,10 @@ const HostInterval = time.Second
 // a Loop built without it.
 const defaultActionTimeout = time.Minute
 
+// stopReportTimeout bounds the delivery of the outcomes reported after the
+// guard was told to stop; the daemon's stop is bounded on its own as well.
+const stopReportTimeout = 5 * time.Second
+
 // Buffer sizes of the channels from the loop to the reporter goroutine.
 const (
 	outcomeBuffer = 32
@@ -163,7 +167,7 @@ func (l *Loop) RestoreLate(records []Record) {
 // Run samples, decides and acts until ctx is done. With Mode off it returns at
 // once. On its way out it waits for the running action, takes in its result
 // (an action that succeeded as ctx ended is still recorded) and has the
-// reporter deliver everything still queued.
+// reporter deliver everything still queued (see deliver).
 func (l *Loop) Run(ctx context.Context) {
 	if l.cfg.Mode == ModeOff {
 		return
@@ -405,55 +409,96 @@ func offer[T any](ch chan T, v T) bool {
 }
 
 // deliver hands outcomes and state to the reporter until stopped is closed,
-// which Run does once nothing more can be queued. It then delivers what is
-// left: each queued outcome with the done ctx, so a notifier queues it for the
-// next start. State is always saved with a ctx that is never done: records
-// taken in as the guard stops must still be kept.
+// which Run does once nothing more can be queued, then delivers what is left.
+// State is always saved with a ctx that is never done: records taken in as
+// the guard stops must still be kept. An outcome reported once ctx is done
+// gets a live ctx bounded by stopReportTimeout, one budget shared by every
+// such report, so its delivery is really attempted (and queued by the
+// notifier when it fails, for the daemon's final checkpoint) without holding
+// the stop for long.
 func (l *Loop) deliver(ctx context.Context, stopped <-chan struct{}) {
-	var logged uint64
+	d := delivery{loop: l, ctx: ctx}
+	defer d.close()
 	for {
 		select {
 		case <-stopped:
-			l.drain(ctx)
+			d.drain()
 
 			return
 		case recs := <-l.states:
 			l.reporter.Save(context.WithoutCancel(ctx), recs)
 		case it := <-l.outcomes:
-			l.deliverItem(ctx, it)
+			d.item(it)
 		}
-		if n := l.dropped.Load(); n != logged {
-			l.log.Warn("memory guard dropped outcomes: the reporter fell behind", zap.Uint64("dropped", n-logged))
-			logged = n
-		}
+		d.warnDropped()
 	}
 }
 
+// delivery is the state of the deliver goroutine.
+type delivery struct {
+	loop *Loop
+	ctx  context.Context //nolint:containedctx // the deliver goroutine's ctx, held for its lifetime only
+	// logged is the dropped count already warned about.
+	logged uint64
+	// late is the ctx of the reports made once ctx is done; nil until then.
+	late       context.Context //nolint:containedctx // see ctx
+	cancelLate context.CancelFunc
+}
+
 // drain delivers the outcomes and the state still queued when the loop has
-// stopped.
-func (l *Loop) drain(ctx context.Context) {
+// stopped, and warns about outcomes dropped before.
+func (d *delivery) drain() {
+	l := d.loop
 	for {
 		select {
 		case it := <-l.outcomes:
-			l.deliverItem(ctx, it)
+			d.item(it)
 		default:
 			select {
 			case recs := <-l.states:
-				l.reporter.Save(context.WithoutCancel(ctx), recs)
+				l.reporter.Save(context.WithoutCancel(d.ctx), recs)
 			default:
 			}
+			d.warnDropped()
 
 			return
 		}
 	}
 }
 
-// deliverItem reports an outcome or logs a sampler error.
-func (l *Loop) deliverItem(ctx context.Context, it item) {
+// item reports an outcome or logs a sampler error.
+func (d *delivery) item(it item) {
+	l := d.loop
 	if it.err != nil {
 		l.log.Warn("memory guard sampler failed", zap.Error(it.err))
 
 		return
 	}
-	l.reporter.Report(ctx, it.out, l.cfg.Message(it.out))
+	l.reporter.Report(d.reportCtx(), it.out, l.cfg.Message(it.out))
+}
+
+// reportCtx is ctx while it is live, then the shared bounded stop ctx.
+func (d *delivery) reportCtx() context.Context {
+	if d.ctx.Err() == nil {
+		return d.ctx
+	}
+	if d.late == nil {
+		d.late, d.cancelLate = context.WithTimeout(context.WithoutCancel(d.ctx), stopReportTimeout)
+	}
+
+	return d.late
+}
+
+// warnDropped logs the outcomes dropped since the last warning.
+func (d *delivery) warnDropped() {
+	if n := d.loop.dropped.Load(); n != d.logged {
+		d.loop.log.Warn("memory guard dropped outcomes: the reporter fell behind", zap.Uint64("dropped", n-d.logged))
+		d.logged = n
+	}
+}
+
+func (d *delivery) close() {
+	if d.cancelLate != nil {
+		d.cancelLate()
+	}
 }

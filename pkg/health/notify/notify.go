@@ -305,7 +305,7 @@ func (n *Notifier) Flush(ctx context.Context) {
 
 		err := n.send(ctx, item.Channel, item.Text)
 		if item.Channel == ChannelTelegram {
-			n.telegramSent(err)
+			n.telegramSent(ctx, err)
 		}
 		if err != nil {
 			blocked[item.Channel] = true
@@ -407,11 +407,13 @@ func (n *Notifier) Expire(now time.Time, maxAge time.Duration) []QueuedMessage {
 	return dropped
 }
 
-// telegramSent records the outcome of a Telegram send: nil is a success, any
-// other error a failure, except a refusal past the tick's delivery deadline,
-// which says nothing about Telegram.
-func (n *Notifier) telegramSent(err error) {
-	if errors.Is(err, ErrPastDeadline) {
+// telegramSent records the outcome of a Telegram send made with ctx: nil is
+// a success, any other error a failure, except a refusal past the tick's
+// delivery deadline and a send that failed because ctx was canceled for a
+// stop, which say nothing about Telegram. A ctx ended by a deadline (the
+// tick's send stop cancels with that cause) still counts as a failure.
+func (n *Notifier) telegramSent(ctx context.Context, err error) {
+	if errors.Is(err, ErrPastDeadline) || err != nil && errors.Is(context.Cause(ctx), context.Canceled) {
 		return
 	}
 
@@ -559,7 +561,7 @@ func (n *Notifier) sendTelegram(ctx context.Context, msg Message, rich string, o
 	}
 
 	err := n.sendTelegramText(ctx, rich)
-	n.telegramSent(err)
+	n.telegramSent(ctx, err)
 	if err != nil {
 		n.enqueueTracked(msg, ChannelTelegram, rich, err)
 	}
@@ -588,7 +590,7 @@ func (n *Notifier) sendTelegramOrSMS(ctx context.Context, msg Message, plain, ri
 	var tlgErr error
 	if !offline && n.opts.Telegram != nil {
 		tlgErr = n.sendTelegramText(ctx, rich)
-		n.telegramSent(tlgErr)
+		n.telegramSent(ctx, tlgErr)
 		if tlgErr == nil {
 			return false
 		}

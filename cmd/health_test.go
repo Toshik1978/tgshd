@@ -1326,12 +1326,11 @@ type fakeGuardCgroups struct {
 	reads   int
 	killed  []string
 	killErr error
-	// unaccounted is how many service cgroups Survey finds without
-	// memory.stat.
-	unaccounted int
+	// unaccounted are the service cgroups Survey finds without memory.stat.
+	unaccounted []string
 }
 
-func (f *fakeGuardCgroups) Survey() ([]cgroupmem.Service, int, error) {
+func (f *fakeGuardCgroups) Survey() ([]cgroupmem.Service, []string, error) {
 	svcs, err := f.Services()
 
 	return svcs, f.unaccounted, err
@@ -2479,7 +2478,7 @@ func TestMemoryGuardLogsUnaccountedServiceCgroups(t *testing.T) {
 
 	core, logs := observer.New(zap.WarnLevel)
 	f := newGuardFakes(guardT0())
-	f.cgroups.unaccounted = 2
+	f.cgroups.unaccounted = []string{"system.slice/backup.service", "system.slice/apps.slice/worker.service"}
 	g := newMemoryGuard(testMemorySection(hcfg.InterveneAct), f.host(), zap.New(core))
 	lc := fxtest.NewLifecycle(t)
 	g.register(lc, &blockingRunner{release: make(chan struct{})})
@@ -2488,8 +2487,86 @@ func TestMemoryGuardLogsUnaccountedServiceCgroups(t *testing.T) {
 	lc.RequireStop()
 
 	msg := "Memory guard: 2 service cgroups without memory.stat, not guarded"
-	if n := logs.FilterMessage(msg).Len(); n != 1 {
-		t.Fatalf("logged %q %d times, want once; logs %+v", msg, n, logs.All())
+	got := logs.FilterMessage(msg).All()
+	if len(got) != 1 {
+		t.Fatalf("logged %q %d times, want once; logs %+v", msg, len(got), logs.All())
+	}
+	if names, _ := got[0].ContextMap()["cgroups"].([]any); len(names) != 2 ||
+		names[0] != "system.slice/backup.service" || names[1] != "system.slice/apps.slice/worker.service" {
+		t.Fatalf("logged cgroups %v, want the two unaccounted ones", got[0].ContextMap()["cgroups"])
+	}
+}
+
+// stallingPublisher is Telegram that hangs on the guard's restart message
+// until its ctx ends, as over a slow network, and delivers the rest.
+type stallingPublisher struct {
+	stalled chan struct{}
+	mu      sync.Mutex
+	sent    []string
+}
+
+func (p *stallingPublisher) Publish(ctx context.Context, _ int64, msg string) error {
+	if strings.Contains(msg, "memory: restarted") {
+		close(p.stalled)
+		<-ctx.Done()
+
+		return ctx.Err()
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	p.sent = append(p.sent, msg)
+
+	return nil
+}
+
+// TestStopCheckpointsAfterTheGuardStopped: what the guard pushes while it
+// stops (the not_recovered outcome still queued behind a hung send) and the
+// send the stop cut off both reach the state database. The stop's checkpoint
+// runs after the guard's stop, with no tick at all in between.
+func TestStopCheckpointsAfterTheGuardStopped(t *testing.T) {
+	t.Parallel()
+
+	st, err := store.Open(t.Context(), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = st.Close() })
+	pub := &stallingPublisher{stalled: make(chan struct{})}
+	f := newGuardFakes(guardT0())
+	lc := fxtest.NewLifecycle(t)
+	p := guardHealthParams(t, &fakePublisher{}, lc, testMemorySection(hcfg.InterveneAct), f)
+	p.Publisher = pub
+	p.Setup.Store = st
+	newHealth(p)
+	lc.RequireStart()
+	waitNamed(t, f)
+
+	f.mem.setDanger(true)
+	<-pub.stalled // the restart's push hangs in Telegram
+	// Danger holds past recovery_window: the guard queues not_recovered
+	// behind the hung push.
+	reads := f.mem.hostReads()
+	waitFor(t, "the recovery window", func() bool { return f.mem.hostReads() > reads+30 })
+	lc.RequireStop()
+
+	alerts, err := st.Alerts(t.Context(), "memory", time.Unix(0, 0), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	texts := make([]string, 0, len(alerts))
+	for _, a := range alerts {
+		texts = append(texts, a.Text)
+	}
+	if !containing(texts, "memory: restarted container web-app") || !containing(texts, "did not free memory") {
+		t.Fatalf("alert log = %q, want the restart and the not_recovered pushed on the way out", texts)
+	}
+	state, err := st.Load(t.Context())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(state.Queue) != 1 || !strings.Contains(state.Queue[0].Text, "memory: restarted") {
+		t.Fatalf("queue = %+v, want the restart whose send the stop cut off", state.Queue)
 	}
 }
 

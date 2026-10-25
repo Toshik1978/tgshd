@@ -205,6 +205,10 @@ type Runner struct {
 	// and its recovery notice is due; only touched by Do.
 	saveReported bool
 
+	// ticking is held by Do and by Checkpoint, so the stop's checkpoint never
+	// runs inside a tick.
+	ticking chan struct{}
+
 	loadMu sync.Mutex
 	loaded bool
 	// memoryOnly tells that the store holds a newer build's database: the
@@ -264,6 +268,7 @@ func New(opts Options) *Runner {
 		network: -1,
 		lastRun: make([]time.Time, len(opts.Checks)),
 		running: make([]atomic.Bool, len(opts.Checks)),
+		ticking: make(chan struct{}, 1),
 	}
 	for i := range opts.Checks {
 		if opts.Checks[i].Name == notify.CheckNetwork {
@@ -346,66 +351,31 @@ func (*Runner) Duration() time.Duration { return Tick }
 // leaves them without a window and a slow channel never delays the next
 // tick's heartbeat; what is not delivered stays queued.
 func (r *Runner) Do(ctx context.Context) error {
-	c := &cycle{now: r.opts.Now()}
-	r.writeHeartbeat(c)
+	r.ticking <- struct{}{}
+	defer func() { <-r.ticking }()
 
-	// A failure is reported as a checker error once the tick's sends begin;
-	// the tick runs from memory and does not checkpoint, so stored state is
-	// never overwritten unseen.
-	loaded := r.Load(ctx) == nil
+	return r.tick(ctx)
+}
 
-	reason := r.quietReason(c)
-	quiet := reason != ""
-	r.mu.Lock()
-	r.quiet = reason
-	r.mu.Unlock()
-
-	if loaded {
-		r.restoreSchedule()
+// Checkpoint writes the state and the pending records once more, outside a
+// tick. The daemon calls it on stop, after everything that pushes has
+// stopped: an event pushed or a message queued after the last tick (by the
+// memory guard, a background job or a checker error) is otherwise lost at
+// exit. It waits for a running tick, at most until ctx ends, and writes
+// nothing before state was loaded.
+func (r *Runner) Checkpoint(ctx context.Context) error {
+	select {
+	case r.ticking <- struct{}{}:
+	case <-ctx.Done():
+		return fmt.Errorf("checkpoint health state: %w", ctx.Err())
 	}
-	if len(r.opts.Fixes) > 0 {
-		c.before = r.engine.Conditions()
-	}
-	if !r.runChecks(ctx, c, quiet) {
-		_, endSends := r.beginSends(ctx)
-		defer endSends()
-		r.saveInterruptedFixes(ctx, c, loaded)
+	defer func() { <-r.ticking }()
 
-		return fmt.Errorf("health tick interrupted: %w", ctx.Err())
-	}
-	r.takeFixes(c)
-	// The daily job runs before the flush, so a queued message it expires is
-	// never sent. It is local store work and judges nothing, so it runs in a
-	// quiet window too: a long window never delivers a message past its
-	// maximum age.
-	if loaded {
-		r.runDaily(ctx, c)
-	}
-	// The delivery budget starts only now, when the runs have ended.
-	sendCtx, endSends := r.beginSends(ctx)
-	defer endSends()
-	// Queued messages (e.g. an outage's PROBLEMs) go before this tick's news.
-	r.notifier.Flush(sendCtx)
-	r.dispatch(sendCtx, c)
-	r.dispatchFixes(sendCtx, c)
-	// The weekly job pushes the summary after the older news; cut off by the
-	// tick deadline, it is retried next tick. It waits for a non-quiet tick.
-	if loaded && !quiet {
-		r.runWeekly(sendCtx, c)
-	}
-	r.raise(c)
-	r.noticeTelegramFailing()
-	// After this tick's RESOLVEDs went out, a key whose condition ended
-	// without one (good again after a reopen), or a stored key of such a
-	// condition, leaves the SMS-sent set before it is saved.
-	r.notifier.ForgetEnded(func(key string) bool { return !r.bad(key) })
-	err := r.checkpoint(ctx, c, loaded)
+	r.loadMu.Lock()
+	loaded := r.loaded
+	r.loadMu.Unlock()
 
-	r.mu.Lock()
-	r.lastCycle = c.now
-	r.mu.Unlock()
-
-	return err
+	return r.checkpoint(ctx, &cycle{now: r.opts.Now()}, loaded)
 }
 
 // Load restores the engine, rate marks and retry queue from the store. Once it
@@ -556,6 +526,70 @@ func (r *Runner) PushMode(ctx context.Context, check, key, text, record string, 
 // queue without them.
 func (r *Runner) ExpireQueue(now time.Time, maxAge time.Duration) []notify.QueuedMessage {
 	return r.notifier.Expire(now, maxAge)
+}
+
+// tick is Do once no Checkpoint runs.
+func (r *Runner) tick(ctx context.Context) error {
+	c := &cycle{now: r.opts.Now()}
+	r.writeHeartbeat(c)
+
+	// A failure is reported as a checker error once the tick's sends begin;
+	// the tick runs from memory and does not checkpoint, so stored state is
+	// never overwritten unseen.
+	loaded := r.Load(ctx) == nil
+
+	reason := r.quietReason(c)
+	quiet := reason != ""
+	r.mu.Lock()
+	r.quiet = reason
+	r.mu.Unlock()
+
+	if loaded {
+		r.restoreSchedule()
+	}
+	if len(r.opts.Fixes) > 0 {
+		c.before = r.engine.Conditions()
+	}
+	if !r.runChecks(ctx, c, quiet) {
+		_, endSends := r.beginSends(ctx)
+		defer endSends()
+		r.saveInterruptedFixes(ctx, c, loaded)
+
+		return fmt.Errorf("health tick interrupted: %w", ctx.Err())
+	}
+	r.takeFixes(c)
+	// The daily job runs before the flush, so a queued message it expires is
+	// never sent. It is local store work and judges nothing, so it runs in a
+	// quiet window too: a long window never delivers a message past its
+	// maximum age.
+	if loaded {
+		r.runDaily(ctx, c)
+	}
+	// The delivery budget starts only now, when the runs have ended.
+	sendCtx, endSends := r.beginSends(ctx)
+	defer endSends()
+	// Queued messages (e.g. an outage's PROBLEMs) go before this tick's news.
+	r.notifier.Flush(sendCtx)
+	r.dispatch(sendCtx, c)
+	r.dispatchFixes(sendCtx, c)
+	// The weekly job pushes the summary after the older news; cut off by the
+	// tick deadline, it is retried next tick. It waits for a non-quiet tick.
+	if loaded && !quiet {
+		r.runWeekly(sendCtx, c)
+	}
+	r.raise(c)
+	r.noticeTelegramFailing()
+	// After this tick's RESOLVEDs went out, a key whose condition ended
+	// without one (good again after a reopen), or a stored key of such a
+	// condition, leaves the SMS-sent set before it is saved.
+	r.notifier.ForgetEnded(func(key string) bool { return !r.bad(key) })
+	err := r.checkpoint(ctx, c, loaded)
+
+	r.mu.Lock()
+	r.lastCycle = c.now
+	r.mu.Unlock()
+
+	return err
 }
 
 // beginSends starts the tick's delivery budget (boundSends), then raises the

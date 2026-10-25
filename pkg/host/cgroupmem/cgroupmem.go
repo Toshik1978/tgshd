@@ -70,12 +70,12 @@ func (r *Reader) Services() ([]Service, error) {
 	return svcs, err
 }
 
-// Survey is Services that also returns how many service cgroups it skipped
-// for having no memory.stat: those exist but cannot be measured.
-func (r *Reader) Survey() ([]Service, int, error) {
+// Survey is Services that also returns the paths of the service cgroups it
+// skipped for having no memory.stat: those exist but cannot be measured.
+func (r *Reader) Survey() ([]Service, []string, error) {
 	entries, err := os.ReadDir(filepath.Join(r.root, systemSlice))
 	if err != nil {
-		return nil, 0, fmt.Errorf("read %s: %w", systemSlice, err)
+		return nil, nil, fmt.Errorf("read %s: %w", systemSlice, err)
 	}
 	w := walk{r: r}
 	for _, e := range entries {
@@ -84,18 +84,18 @@ func (r *Reader) Survey() ([]Service, int, error) {
 		}
 		if !strings.HasSuffix(e.Name(), ".slice") {
 			if err := w.service(systemSlice, e.Name()); err != nil {
-				return nil, 0, err
+				return nil, nil, err
 			}
 
 			continue
 		}
 		if err := w.nested(filepath.Join(systemSlice, e.Name())); err != nil {
-			return nil, 0, err
+			return nil, nil, err
 		}
 	}
-	if len(w.out) == 0 && w.unaccounted > 0 {
+	if len(w.out) == 0 && len(w.unaccounted) > 0 {
 		return nil, w.unaccounted, fmt.Errorf("read %s: %d service cgroups: %w",
-			systemSlice, w.unaccounted, ErrNoMemoryAccounting)
+			systemSlice, len(w.unaccounted), ErrNoMemoryAccounting)
 	}
 
 	return w.out, w.unaccounted, nil
@@ -166,9 +166,9 @@ func (r *Reader) Kill(path string) error {
 type walk struct {
 	r   *Reader
 	out []Service
-	// unaccounted counts the service cgroups that exist but have no
-	// memory.stat.
-	unaccounted int
+	// unaccounted are the paths of the service cgroups that exist but have
+	// no memory.stat.
+	unaccounted []string
 }
 
 func (w *walk) nested(slice string) error {
@@ -205,7 +205,7 @@ func (w *walk) service(parent, name string) error {
 	if isGone(err) {
 		// Gone, or there without memory accounting: tell the two apart.
 		if _, statErr := os.Stat(filepath.Join(w.r.root, svc.Path)); statErr == nil {
-			w.unaccounted++
+			w.unaccounted = append(w.unaccounted, svc.Path)
 		}
 
 		return nil

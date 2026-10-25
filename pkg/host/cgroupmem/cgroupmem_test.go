@@ -110,8 +110,10 @@ func TestSurveyCountsUnaccountedServices(t *testing.T) {
 	write(t, root, "system.slice/apps.slice/worker.service/cgroup.procs", "")
 
 	got, unaccounted, err := New(root, t.TempDir()).Survey()
-	if err != nil || len(got) != 1 || got[0].Name != "ok.service" || unaccounted != 2 {
-		t.Fatalf("Survey() = %+v, %d, %v; want ok.service and two unaccounted", got, unaccounted, err)
+	want := []string{"system.slice/apps.slice/worker.service", "system.slice/backup.service"}
+	slices.Sort(unaccounted)
+	if err != nil || len(got) != 1 || got[0].Name != "ok.service" || !slices.Equal(unaccounted, want) {
+		t.Fatalf("Survey() = %+v, %v, %v; want ok.service and unaccounted %v", got, unaccounted, err, want)
 	}
 }
 
@@ -119,8 +121,8 @@ func TestSurveyCountsUnaccountedServices(t *testing.T) {
 // is skipped without an error.
 func TestNestedSliceGoneIsSkipped(t *testing.T) {
 	w := walk{r: New(t.TempDir(), t.TempDir())}
-	if err := w.nested("system.slice/gone.slice"); err != nil || len(w.out) != 0 || w.unaccounted != 0 {
-		t.Fatalf("nested(gone) = %v, out %+v, unaccounted %d; want skipped", err, w.out, w.unaccounted)
+	if err := w.nested("system.slice/gone.slice"); err != nil || len(w.out) != 0 || len(w.unaccounted) != 0 {
+		t.Fatalf("nested(gone) = %v, out %+v, unaccounted %v; want skipped", err, w.out, w.unaccounted)
 	}
 }
 

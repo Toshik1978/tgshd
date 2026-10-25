@@ -2011,3 +2011,67 @@ func TestPushModeQueuesWhenTelegramFails(t *testing.T) {
 		t.Fatalf("telegram = %q, want the queued event delivered", got)
 	}
 }
+
+// TestCheckpointPersistsWhatWasPushedSinceTheLastTick: the checkpoint on stop
+// writes what was pushed after the last tick, the alert-log record and the
+// queued message, so the next start has them.
+func TestCheckpointPersistsWhatWasPushedSinceTheLastTick(t *testing.T) {
+	f := newFixture(t, &fakeStore{})
+	f.tick(t)
+	f.tlg.setFail(true)
+	f.r.PushMode(context.Background(), "memory", "memory/guard/web-app", "killed web-app", "kill record",
+		health.ModeTelegram)
+
+	if err := f.r.Checkpoint(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if q := f.st.state.Queue; len(q) != 1 || q[0].Key != "memory/guard/web-app" {
+		t.Fatalf("queue = %+v, want the pushed event", q)
+	}
+	if a := f.st.alerts; len(a) != 1 || a[0].Text != "kill record" {
+		t.Fatalf("alert log = %+v, want the kill record", a)
+	}
+}
+
+// TestCheckpointBeforeLoadWritesNothing: until state was loaded a checkpoint
+// would replace unseen stored state, so the stop's checkpoint writes nothing.
+func TestCheckpointBeforeLoadWritesNothing(t *testing.T) {
+	st := &fakeStore{}
+	f := newFixture(t, st)
+	f.r.PushMode(context.Background(), "memory", "memory/guard/web-app", "killed web-app", "kill record",
+		health.ModeTelegram)
+
+	if err := f.r.Checkpoint(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if st.checkpoints != 0 {
+		t.Fatalf("checkpoints = %d before load, want none", st.checkpoints)
+	}
+}
+
+// TestCheckpointWaitsForTheTick: the stop's checkpoint never runs inside a
+// tick; while one still runs it gives up when its ctx ends.
+func TestCheckpointWaitsForTheTick(t *testing.T) {
+	release := make(chan struct{})
+	started := make(chan struct{})
+	chk := health.Check{Name: "slow", Interval: time.Minute, Run: func(context.Context) health.CheckResult {
+		close(started)
+		<-release
+
+		return health.CheckResult{}
+	}}
+	f := newFixture(t, &fakeStore{}, chk)
+	done := make(chan error, 1)
+	go func() { done <- f.r.Do(context.Background()) }()
+	<-started
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := f.r.Checkpoint(ctx); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Checkpoint during a tick = %v, want the ctx error", err)
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+}

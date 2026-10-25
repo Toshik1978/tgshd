@@ -797,6 +797,38 @@ func TestTelegramRefusedPastTheDeadlineIsNotAFailure(t *testing.T) {
 	}
 }
 
+// TestTelegramFailedOnShutdownIsNotAFailure: a send that failed because the
+// daemon is stopping (its ctx canceled) says nothing about Telegram: the
+// message is queued and the channel is not marked failing; a failure with a
+// live ctx still is.
+func TestTelegramFailedOnShutdownIsNotAFailure(t *testing.T) {
+	for _, mode := range []Mode{ModeTelegram, ModeTelegramOrSMS} {
+		t.Run(string(mode), func(t *testing.T) {
+			cf := newClockFixture(mode)
+			cf.tlg.err = context.Canceled
+			cf.sms.err = context.Canceled
+			ctx, cancel := context.WithCancel(context.Background())
+			cancel()
+
+			if err := cf.n.Notify(ctx, Message{Kind: KindEvent, Text: "killed web-app"}); err != nil {
+				t.Fatal(err)
+			}
+			cf.n.Flush(ctx)
+			if h := cf.n.TelegramHealth(); h.Failing() {
+				t.Fatalf("health = %+v after a send canceled by the stop, want OK", h)
+			}
+			if q := cf.n.Export(); len(q) == 0 {
+				t.Fatal("the message canceled by the stop is not queued")
+			}
+
+			cf.n.Flush(context.Background())
+			if h := cf.n.TelegramHealth(); !h.Failing() {
+				t.Fatalf("health = %+v after a failed send with a live ctx, want failing", h)
+			}
+		})
+	}
+}
+
 // TestMarkTelegramReportedOnlyForThatFailure: the mark applies to the
 // failure the notice was about, not to a new one that began meanwhile.
 func TestMarkTelegramReportedOnlyForThatFailure(t *testing.T) {

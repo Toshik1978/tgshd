@@ -70,7 +70,7 @@ type guardMemory interface {
 // guardCgroups is what the guard uses of pkg/host/cgroupmem.
 type guardCgroups interface {
 	Services() ([]cgroupmem.Service, error)
-	Survey() ([]cgroupmem.Service, int, error)
+	Survey() ([]cgroupmem.Service, []string, error)
 	Self() (string, error)
 	Kill(cgroupPath string) error
 }
@@ -276,8 +276,9 @@ func (g *memoryGuard) run(ctx context.Context, r guardRunner) {
 
 		return
 	}
-	if unaccounted > 0 {
-		g.log.Warn(fmt.Sprintf("Memory guard: %d service cgroups without memory.stat, not guarded", unaccounted))
+	if len(unaccounted) > 0 {
+		g.log.Warn(fmt.Sprintf("Memory guard: %d service cgroups without memory.stat, not guarded", len(unaccounted)),
+			zap.Strings("cgroups", unaccounted))
 	}
 	if _, err := sampler.Host(); err != nil {
 		errs = append(errs, startError{

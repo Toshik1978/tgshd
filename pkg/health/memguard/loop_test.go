@@ -231,14 +231,15 @@ type call struct {
 }
 
 // fakeActuator runs restart and stop on the fake host. With hang set they
-// block until release is closed; err makes them fail; killErr makes Kill
-// fail.
+// block until release is closed; with gate set they signal blocked and then
+// succeed once gate is closed; err makes them fail; killErr makes Kill fail.
 type fakeActuator struct {
 	mu      sync.Mutex
 	host    *fakeHost
 	clock   *fakeClock
 	calls   []call
 	hang    bool
+	gate    chan struct{}
 	err     error
 	killErr error
 	blocked chan struct{}
@@ -262,8 +263,12 @@ func (a *fakeActuator) Stop(ctx context.Context, s Service) error {
 func (a *fakeActuator) do(ctx context.Context, verb string, s Service) error {
 	a.mu.Lock()
 	a.calls = append(a.calls, call{verb: verb, svc: s, path: s.CgroupPath, at: a.clock.Now()})
-	hang, err := a.hang, a.err
+	hang, gate, err := a.hang, a.gate, a.err
 	a.mu.Unlock()
+	if gate != nil {
+		a.blocked <- struct{}{}
+		<-gate
+	}
 	if hang {
 		a.blocked <- struct{}{}
 		select {
@@ -1241,23 +1246,21 @@ func TestRunRecordsAnActionThatEndedAtShutdown(t *testing.T) {
 		clock.Advance(time.Second)
 	}
 	host.set(3, 35, webLeak())
-	for range 60 {
+	act.mu.Lock()
+	act.gate = make(chan struct{})
+	act.mu.Unlock()
+	// Danger holds for danger_for (30 s): within 40 beats the restart is
+	// issued and parks in the actuator. Beats after it collect nothing.
+	for range 40 {
 		clock.waitTimer(t, time.Second)
-		if len(act.log()) > 0 {
-			break
-		}
 		host.grow()
 		clock.Advance(time.Second)
 	}
-	// The restart is issued and the loop waits for its next beat, which never
-	// comes: the result is still in the channel when the guard stops.
-	deadline := time.Now().Add(failsafe)
-	for len(l.results) == 0 {
-		if time.Now().After(deadline) {
-			t.Fatal("the restart never finished")
-		}
-		time.Sleep(time.Millisecond)
-	}
+	<-act.blocked
+	// Let the restart succeed and wait for its goroutine: its result is in
+	// the channel, and the loop only collects it on a beat that never comes.
+	close(act.gate)
+	l.actions.Wait()
 	cancel()
 	<-done
 
@@ -1280,25 +1283,29 @@ func TestRunRecordsAnActionThatEndedAtShutdown(t *testing.T) {
 }
 
 // ctxReporter records every outcome reported and whether its context was
-// done.
+// live and bounded.
 type ctxReporter struct {
 	mu      sync.Mutex
 	reports []string
-	done    []bool
+	live    []bool
+	bounded []bool
 }
 
 func (r *ctxReporter) Report(ctx context.Context, _ Outcome, m Message) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.reports = append(r.reports, m.Text)
-	r.done = append(r.done, ctx.Err() != nil)
+	r.live = append(r.live, ctx.Err() == nil)
+	_, ok := ctx.Deadline()
+	r.bounded = append(r.bounded, ok)
 }
 
 func (*ctxReporter) Save(context.Context, []Record) {}
 
 // TestRunReportsQueuedOutcomesOnShutdown: outcomes still queued when the
-// guard stops are handed to the reporter with the done context, so the
-// notifier queues them for the next start instead of losing them.
+// guard stops are handed to the reporter with a live context bounded by a
+// short timeout, so their delivery is really attempted instead of failing at
+// once on the done one.
 func TestRunReportsQueuedOutcomesOnShutdown(t *testing.T) {
 	clock := newFakeClock(t0())
 	host := newFakeHost(clock)
@@ -1316,9 +1323,34 @@ func TestRunReportsQueuedOutcomesOnShutdown(t *testing.T) {
 	if len(rep.reports) != 3 {
 		t.Fatalf("reported %q, want the three queued outcomes", rep.reports)
 	}
-	for i, done := range rep.done {
-		if !done {
-			t.Fatalf("outcome %d reported with a live context, want the done one", i)
+	for i := range rep.reports {
+		if !rep.live[i] || !rep.bounded[i] {
+			t.Fatalf("outcome %d reported with live=%v bounded=%v, want a live bounded context",
+				i, rep.live[i], rep.bounded[i])
+		}
+	}
+}
+
+// TestDrainWarnsAboutDroppedOutcomes: outcomes dropped in the last beats
+// before the stop are logged by the final drain too.
+func TestDrainWarnsAboutDroppedOutcomes(t *testing.T) {
+	for range 20 { // deliver's select picks its ready cases at random
+		clock := newFakeClock(t0())
+		host := newFakeHost(clock)
+		core, logs := observer.New(zap.WarnLevel)
+		l := NewLoop(loopConfig(ModeAct), clock, host, newFakeActuator(host, clock), &ctxReporter{},
+			WithLogger(zap.New(core)))
+		l.outcomes = make(chan item, 2)
+		for range 4 {
+			l.emit(Outcome{Kind: OutcomeKilled})
+		}
+		stopped := make(chan struct{})
+		close(stopped)
+		l.deliver(t.Context(), stopped)
+
+		got := logs.FilterMessage("memory guard dropped outcomes: the reporter fell behind").All()
+		if len(got) != 1 || got[0].ContextMap()["dropped"] != uint64(2) {
+			t.Fatalf("dropped-outcome warnings %+v, want one for two", got)
 		}
 	}
 }
