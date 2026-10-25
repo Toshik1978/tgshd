@@ -292,10 +292,10 @@ func checkGraph(
 	}
 }
 
-// bindStoredOpenState gives the temperatures check of a one-shot run the open
-// conditions of the read-only store, which the daemon answers from its runner.
-// Without a stored state (or a temperatures check) the open state stays
-// unbound and answers false.
+// bindStoredOpenState gives the checks of a one-shot run (temperatures and
+// the memory limit audit) the conditions of the read-only store, which the
+// daemon answers from its runner. Without a stored state (or such a check)
+// the open state stays unbound and answers closed.
 func bindStoredOpenState(p struct {
 	fx.In
 
@@ -309,37 +309,36 @@ func bindStoredOpenState(p struct {
 	p.Open.bind(&storedOpen{store: p.Setup.Store, stderr: p.Setup.Stderr})
 }
 
-// storedOpen answers IsOpen from the conditions in the stored state, loaded on
-// first use. A state that cannot be loaded leaves every condition closed.
+// storedOpen answers Problem from the conditions in the stored state, loaded
+// on first use. A state that cannot be loaded leaves every condition closed.
 type storedOpen struct {
 	store  runner.Store
 	stderr io.Writer
 	once   sync.Once
-	open   map[string]bool
+	conds  map[string]health.Condition
 }
 
-// IsOpen implements openSource.
-func (s *storedOpen) IsOpen(key string) bool {
+// Problem implements openSource.
+func (s *storedOpen) Problem(key string) (open bool, text string) {
 	s.once.Do(func() {
 		ctx, cancel := context.WithTimeout(context.Background(), checkStartTimeout)
 		defer cancel()
 		state, err := s.store.Load(ctx)
 		if err != nil {
 			if s.stderr != nil {
-				fmt.Fprintf(s.stderr, "tgshd check: temperature open state unavailable: %v\n", err)
+				fmt.Fprintf(s.stderr, "tgshd check: open state unavailable: %v\n", err)
 			}
 
 			return
 		}
-		s.open = make(map[string]bool, len(state.Conditions))
+		s.conds = make(map[string]health.Condition, len(state.Conditions))
 		for i := range state.Conditions {
-			if c := &state.Conditions[i]; c.Open {
-				s.open[c.Key] = true
-			}
+			s.conds[state.Conditions[i].Key] = state.Conditions[i]
 		}
 	})
+	c := s.conds[key]
 
-	return s.open[key]
+	return c.Open, c.LastText
 }
 
 // collectCheckSets builds the checks through the providers

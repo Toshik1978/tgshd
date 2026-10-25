@@ -173,14 +173,16 @@ func buildTempsCheck(t *hcfg.Temperatures, sensors temps.Hwmon, gpus temps.Nvidi
 	}
 }
 
-// openSource answers whether a condition is open; the runner is one.
+// openSource answers whether a condition is open and the text of the last
+// reading applied to it; the runner is one.
 type openSource interface {
-	IsOpen(key string) bool
+	Problem(key string) (open bool, text string)
 }
 
-// openState is the temps.OpenState of the temperatures check. fx builds the
-// checks before the runner, so it answers false until newHealth binds it to
-// the runner.
+// openState is the open state of the engine's conditions as the checks read
+// it: temps.OpenState of the temperatures check, and the limit audit's
+// memory.Settings.Open. fx builds the checks before the runner, so it answers
+// closed until newHealth binds it to the runner.
 type openState struct {
 	mu     sync.Mutex
 	source openSource
@@ -193,11 +195,25 @@ func newOpenState() *openState {
 
 // IsOpen implements temps.OpenState.
 func (o *openState) IsOpen(key string) bool {
+	open, _ := o.Problem(key)
+
+	return open
+}
+
+// Problem answers from the bound source, closed with no text while unbound
+// (or nil).
+func (o *openState) Problem(key string) (open bool, text string) {
+	if o == nil {
+		return false, ""
+	}
 	o.mu.Lock()
 	src := o.source
 	o.mu.Unlock()
+	if src == nil {
+		return false, ""
+	}
 
-	return src != nil && src.IsOpen(key)
+	return src.Problem(key)
 }
 
 // bind hands over the source the open state answers from. A nil open state

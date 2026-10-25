@@ -18,8 +18,11 @@ import (
 
 // memoryChecks provides the memory check when the memory section is present.
 // Each run also refreshes the container id→name map the guard reads; the
-// guard refreshes it on its own as well.
-func memoryChecks(hs *healthSetup, d *lazyDocker, names *containerNames, logger *zap.Logger) checkSet {
+// guard refreshes it on its own as well. open is the engine's condition state
+// the limit audit asks whether its PROBLEM is open.
+func memoryChecks(
+	hs *healthSetup, d *lazyDocker, names *containerNames, open *openState, logger *zap.Logger,
+) checkSet {
 	if hs.Config == nil || hs.Config.Memory == nil {
 		return checkSet{}
 	}
@@ -28,13 +31,17 @@ func memoryChecks(hs *healthSetup, d *lazyDocker, names *containerNames, logger 
 		containers: d,
 	}
 
-	return buildMemoryCheck(hs.Config.Memory, src, d, logger)
+	return buildMemoryCheck(hs.Config.Memory, src, d, open, logger)
 }
 
 // buildMemoryCheck builds the memory check over src. Its growth history is
 // persisted under memoryGrowthKey and its figures feed /status and the
-// weekly summary.
-func buildMemoryCheck(m *hcfg.Memory, src memorySource, lister containerLister, logger *zap.Logger) checkSet {
+// weekly summary. The limit audit reads open (bound to the runner, or to the
+// stored state under check --once) at run time, when it reflects the
+// previous tick.
+func buildMemoryCheck(
+	m *hcfg.Memory, src memorySource, lister containerLister, open *openState, logger *zap.Logger,
+) checkSet {
 	chk := memory.New(src, memory.Settings{
 		WarnAvailablePercent: m.WarnAvailablePercent,
 		WarnSwapPercent:      m.WarnSwapPercent,
@@ -42,8 +49,7 @@ func buildMemoryCheck(m *hcfg.Memory, src memorySource, lister containerLister, 
 		GrowthWindow:         m.GrowthWindow.Duration(),
 		GrowthWarn:           m.GrowthWarn.Bytes(),
 		AuditExclude:         m.AuditExclude,
-		Interval:             m.Interval.Duration(),
-		Threshold:            m.Threshold.Duration(),
+		Open:                 open.Problem,
 	})
 	names := &nameRefresher{names: src.sampler.names, lister: lister, log: logger, who: "Memory check"}
 	common := hcfg.Common{

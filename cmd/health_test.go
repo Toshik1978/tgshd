@@ -2645,7 +2645,7 @@ func testMemoryCheckSection() *hcfg.Memory {
 func testMemoryCheck(f *guardFakes, logger *zap.Logger) checkSet {
 	src := memorySource{sampler: guardSampler{mem: f.mem, cgroups: f.cgroups, names: f.names}}
 
-	return buildMemoryCheck(testMemoryCheckSection(), src, f.containers, logger)
+	return buildMemoryCheck(testMemoryCheckSection(), src, f.containers, newOpenState(), logger)
 }
 
 func TestMemoryChecksBuiltOnlyWithTheSection(t *testing.T) {
@@ -2653,14 +2653,14 @@ func TestMemoryChecksBuiltOnlyWithTheSection(t *testing.T) {
 
 	names := &containerNames{}
 	for name, hs := range map[string]*healthSetup{"disabled": {}, "no section": {Config: &hcfg.Config{}}} {
-		set := memoryChecks(hs, &lazyDocker{}, names, zap.NewNop())
+		set := memoryChecks(hs, &lazyDocker{}, names, newOpenState(), zap.NewNop())
 		if len(set.Checks) != 0 || len(set.Persisters) != 0 || set.Memory != nil {
 			t.Fatalf("%s: set = %+v, want empty", name, set)
 		}
 	}
 
 	set := memoryChecks(&healthSetup{Config: &hcfg.Config{Memory: testMemoryCheckSection()}}, &lazyDocker{}, names,
-		zap.NewNop())
+		newOpenState(), zap.NewNop())
 	if len(set.Checks) != 1 || set.Memory == nil || len(set.Errors) != 0 {
 		t.Fatalf("set = %+v, want the memory check", set)
 	}
@@ -2908,7 +2908,7 @@ func TestMemoryCheckAuditsContainerLimits(t *testing.T) {
 			{Name: "scratch-job", Running: true, RestartPolicy: "always"},
 		}},
 	}
-	c := buildMemoryCheck(section, src, f.containers, zap.NewNop()).Checks[0]
+	c := buildMemoryCheck(section, src, f.containers, newOpenState(), zap.NewNop()).Checks[0]
 
 	res := c.Run(t.Context())
 
@@ -2922,6 +2922,59 @@ func TestMemoryCheckAuditsContainerLimits(t *testing.T) {
 	if len(got) != 1 || got[0].Key != "memory/limit" || got[0].Verdict != health.Bad ||
 		!strings.HasPrefix(got[0].Text, want) {
 		t.Fatalf("limit readings = %+v, want one problem naming only web-app (scratch-job excluded)", got)
+	}
+}
+
+// TestMemoryCheckAsksTheOpenStateBeforeAnnouncingAJoiner: the limit audit
+// announces a joiner only while the open state (the runner's engine) has
+// memory/limit open, comparing against the run whose text it last applied.
+func TestMemoryCheckAsksTheOpenStateBeforeAnnouncingAJoiner(t *testing.T) {
+	t.Parallel()
+
+	for _, open := range []bool{false, true} {
+		t.Run(fmt.Sprintf("open=%v", open), func(t *testing.T) {
+			t.Parallel()
+
+			f := newGuardFakes(guardT0())
+			auditor := &fakeAuditor{list: []memory.Container{{Name: "web-app", Running: true, RestartPolicy: "always"}}}
+			src := memorySource{
+				sampler:    guardSampler{mem: f.mem, cgroups: f.cgroups, names: f.names},
+				containers: auditor,
+			}
+			state := newOpenState()
+			c := buildMemoryCheck(testMemoryCheckSection(), src, f.containers, state, zap.NewNop()).Checks[0]
+
+			first := c.Run(t.Context())
+			var text string
+			for _, r := range first.Readings {
+				if r.Key == "memory/limit" {
+					text = r.Text
+				}
+			}
+			applied := fakeOpenSource{}
+			if open {
+				applied["memory/limit"] = text
+			}
+			state.bind(applied)
+
+			auditor.list = append(
+				auditor.list,
+				memory.Container{Name: "queue-ok", Running: true, RestartPolicy: "always"},
+			)
+			var events []string
+			for _, r := range c.Run(t.Context()).Readings {
+				if r.Kind == health.Event && strings.HasPrefix(r.Key, "memory/limit/") {
+					events = append(events, r.Key)
+				}
+			}
+			want := []string(nil)
+			if open {
+				want = []string{"memory/limit/queue-ok"}
+			}
+			if !slices.Equal(events, want) {
+				t.Fatalf("events = %q, want %q", events, want)
+			}
+		})
 	}
 }
 

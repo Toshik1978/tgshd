@@ -478,6 +478,15 @@ func (r *Runner) IsOpen(key string) bool {
 	return ok && cond.Open
 }
 
+// Problem reports whether key has an open problem and the text of the last
+// reading the engine applied to it; an untracked key is closed with no text.
+// A check reads it during its run, when it reflects the previous tick.
+func (r *Runner) Problem(key string) (open bool, text string) {
+	cond, ok := r.engine.Condition(key)
+
+	return ok && cond.Open, cond.LastText
+}
+
 // Clear returns a tracked condition to healthy without any message and
 // records it in the alert log as cleared. It reports whether key was tracked.
 func (r *Runner) Clear(key string) bool {

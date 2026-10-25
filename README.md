@@ -314,8 +314,9 @@ there is no memory check and no guard.
   does not trigger the growth warning.
 - **The limit audit** is part of the check. It counts only running containers
   that Docker keeps running (restart policy `always` or `unless-stopped`) and
-  that have no memory limit, except those in `audit_exclude`; one-off
-  containers (`docker run` without a restart policy) are not counted. Only the
+  that have no memory limit, except those in `audit_exclude`; any other
+  policy (`no`, the default of a one-off `docker run`, or `on-failure`) is not
+  counted. Only the
   container's own Docker restart policy counts, so Swarm task containers
   (restarted by Swarm, not by their own policy) are not audited. A container
   Docker is restarting (crash-loop backoff) stays counted. One

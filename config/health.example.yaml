@@ -89,7 +89,8 @@ memory:                                     # absent => no memory check and no g
   warn_pressure_percent: 10                 # 1-100: PSI "some" avg60, share of time tasks waited for memory
   growth_window: 1h                         # 10m-24h: a service growing by growth_warn within it is a PROBLEM
   growth_warn: 4GB                          # B, KB, MB, GB, TB (powers of 1024)
-  audit_exclude: [ "scratch-job", "runner-*" ] # containers (names or globs) allowed to run without a memory limit.
+  audit_exclude: [ "scratch-job", "runner-*" ]
+                                            # containers (names or globs) allowed to run without a memory limit.
                                             # The audit counts only running containers with restart policy
                                             # always or unless-stopped: one PROBLEM names them all, largest first
   guard:                                    # the fast guard: runs on its own, not on the check interval

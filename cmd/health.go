@@ -122,8 +122,8 @@ type healthParams struct {
 	SMS    command.SmsSender `optional:"true"`
 	Uptime *sysfs.Reader
 	Sets   []checkSet `group:"health_checks"`
-	// Open is the open state the temperatures check was built with, bound
-	// here to the runner.
+	// Open is the open state the temperatures check and the memory limit
+	// audit were built with, bound here to the runner.
 	Open *openState
 	// Guard is the host the memory guard runs over; nil runs no guard.
 	Guard *guardHost

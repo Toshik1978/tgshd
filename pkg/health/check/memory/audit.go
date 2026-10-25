@@ -12,7 +12,6 @@ import (
 	"strconv"
 	"strings"
 	"sync"
-	"time"
 	"unicode/utf16"
 
 	"github.com/Toshik1978/tgshd/pkg/health"
@@ -29,65 +28,78 @@ const (
 	policyUnlessStopped = "unless-stopped"
 )
 
-// gapCapFactor mirrors the engine's: one run adds at most this many intervals
-// to the observed bad time.
-const gapCapFactor = 1.5
-
 // limitTextUnits bounds the problem text in UTF-16 code units: one Telegram
 // message (4096) less room for the "<host>: PROBLEM: " prefix and the
 // " (since …)" suffix the notifier adds.
 const limitTextUnits = 4096 - 256
 
-// audit remembers the containers counted on the previous run, so one that
-// joins an open problem is announced once, and mirrors the engine's observed
-// bad time of the current streak (badFor, last) to know whether its PROBLEM is
-// open. All of it is persisted (see AuditState), so a restart neither
-// announces the set again nor treats a young streak as open.
+// maxAuditRuns bounds the runs whose texts the audit remembers. Past that
+// many dropped runs in a row it falls back to known, the last matched set,
+// so a joiner may be announced twice but is never missed.
+const maxAuditRuns = 8
+
+// audit decides which counted containers are joiners. The engine alone says
+// whether the PROBLEM is open; the audit only matches the text the engine
+// last applied to the run that produced it, so a joiner counts as announced
+// only once a run that announced it (or a PROBLEM naming it) was applied.
 type audit struct {
-	mu     sync.Mutex
-	known  map[string]bool
-	badFor time.Duration
-	last   time.Time
-	open   bool
+	mu sync.Mutex
+	// known is the counted set of the last run the engine is known to have
+	// applied (persisted as kv memory.audit); it answers when the engine's
+	// text matches no remembered run, e.g. after a restart.
+	known map[string]bool
+	// runs are this process's latest runs that raised the problem, oldest
+	// first: each Bad text with the set it counted.
+	runs []auditRun
 }
 
-// observe adds one non-empty run at now to the streak and reports whether the
-// PROBLEM was open before it. Like the engine, a new streak starts at zero,
-// each run adds the time since the previous one (at most gapCapFactor
-// intervals), and the PROBLEM opens on the run that reaches threshold.
-func (a *audit) observe(now time.Time, interval, threshold time.Duration) bool {
-	wasOpen := a.open
-	if len(a.known) == 0 {
-		a.badFor, a.open = 0, false
-	} else if !a.last.IsZero() {
-		elapsed := now.Sub(a.last)
-		if interval > 0 {
-			elapsed = min(elapsed, time.Duration(gapCapFactor*float64(interval)))
+// auditRun is one run's problem text and the containers it counted.
+type auditRun struct {
+	text  string
+	names map[string]bool
+}
+
+// applied returns the counted set of the last run the engine applied, found
+// by the engine's text; older runs are forgotten, as the engine will never
+// go back to them. The earliest run with that text is taken, so two runs
+// with one text (possible only past the cut) announce again rather than miss.
+// Without a match it returns known.
+func (a *audit) applied(text string) map[string]bool {
+	for i, run := range a.runs {
+		if run.text == text {
+			a.runs = a.runs[i:]
+			a.known = run.names
+
+			return run.names
 		}
-		a.badFor += max(elapsed, 0)
-	}
-	a.last = now
-	if a.badFor >= threshold {
-		a.open = true
 	}
 
-	return wasOpen
+	return a.known
 }
 
-// reset ends the streak: the set is empty.
+// remember adds a run's text and counted set, keeping the latest
+// maxAuditRuns.
+func (a *audit) remember(text string, names map[string]bool) {
+	a.runs = append(a.runs, auditRun{text: text, names: names})
+	if over := len(a.runs) - maxAuditRuns; over > 0 {
+		a.runs = slices.Delete(a.runs, 0, over)
+	}
+}
+
+// reset forgets everything: the set is empty and the condition resolves.
 func (a *audit) reset() {
 	a.known = map[string]bool{}
-	a.badFor, a.last, a.open = 0, time.Time{}, false
+	a.runs = nil
 }
 
 // judgeLimits raises one problem naming every running container that Docker
 // keeps running (restart policy always or unless-stopped) and that has no
 // memory limit, largest first, except those in audit_exclude (FR-018). It
-// resolves when none is left; a container joining the set once the PROBLEM is
-// open (the set non-empty for threshold) is announced once by an event; one
-// that leaves and rejoins is a new join. Without a container runtime the
-// audit is skipped; an unreadable list is one checker error and leaves the
-// condition and the counted set as they were.
+// resolves when none is left. While the engine has the PROBLEM open, a
+// counted container the last applied run did not count is announced once by
+// an event; one that leaves and rejoins is a new join. Without a container
+// runtime the audit is skipped; an unreadable list is one checker error and
+// leaves the condition and the counted set as they were.
 func (c *Check) judgeLimits(ctx context.Context, res *health.CheckResult, top *topLookup) {
 	containers, err := c.source.Containers(ctx)
 	if errors.Is(err, ErrNoContainers) {
@@ -119,13 +131,17 @@ func (c *Check) judgeLimits(ctx context.Context, res *health.CheckResult, top *t
 	}
 
 	named := largestFirst(slices.Collect(maps.Keys(counted)), top.services())
-	suffix := top.suffix()
+	text := limitText(named, top.suffix())
 	res.Readings = append(res.Readings, health.Reading{
-		Key: keyLimit, Kind: health.State, Verdict: health.Bad, Text: limitText(named, suffix),
+		Key: keyLimit, Kind: health.State, Verdict: health.Bad, Text: text,
 	})
-	if c.audit.observe(c.settings.now(), c.settings.Interval, c.settings.Threshold) {
+	open, last := c.settings.open(keyLimit)
+	known := c.audit.applied(last)
+	// An open PROBLEM with no set to compare against (its kv entry lost)
+	// takes the set silently rather than announcing all of it.
+	if open && len(known) > 0 {
 		for _, n := range named {
-			if !c.audit.known[n.name] {
+			if !known[n.name] {
 				res.Readings = append(res.Readings, health.Reading{
 					Key: keyLimit + "/" + n.name, Kind: health.Event, Verdict: health.Bad,
 					Text: fmt.Sprintf("container %s runs without a memory limit", n.name),
@@ -133,7 +149,7 @@ func (c *Check) judgeLimits(ctx context.Context, res *health.CheckResult, top *t
 			}
 		}
 	}
-	c.audit.known = counted
+	c.audit.remember(text, counted)
 }
 
 // counts reports whether the audit counts ctr: running (or being restarted
@@ -233,31 +249,32 @@ func limitText(named []namedContainer, suffix string) string {
 // units counts s in UTF-16 code units, as Telegram does.
 func units(s string) int { return len(utf16.Encode([]rune(s))) }
 
-// AuditState returns the persistable set of containers the limit audit
-// counted on its last run (kv memory.audit), kept apart from the growth
+// AuditState returns the persistable set of containers counted by the last
+// run the engine applied (kv memory.audit), kept apart from the growth
 // history.
-func (c *Check) AuditState() *AuditState { return &AuditState{audit: &c.audit} }
+func (c *Check) AuditState() *AuditState { return &AuditState{check: c} }
 
 // AuditState exports and restores the limit audit's counted containers.
 type AuditState struct {
-	audit *audit
+	check *Check
 }
 
-// auditRecord is the persisted form of audit.
+// auditRecord is the persisted form of audit. The previous form also held a
+// mirrored streak (bad_for, last, open); those fields are ignored on restore.
 type auditRecord struct {
-	Known  []string      `json:"known"`
-	BadFor time.Duration `json:"bad_for"`
-	Last   time.Time     `json:"last"`
-	Open   bool          `json:"open"`
+	Known []string `json:"known"`
 }
 
-// Export serialises the counted container names and the streak.
+// Export serialises the set counted by the last run the engine applied. It
+// runs at the checkpoint, after the tick's runs were applied, so the engine's
+// text names the run whose set is saved.
 func (s *AuditState) Export() ([]byte, error) {
-	s.audit.mu.Lock()
-	defer s.audit.mu.Unlock()
-	data, err := json.Marshal(auditRecord{
-		Known: slices.Sorted(maps.Keys(s.audit.known)), BadFor: s.audit.badFor, Last: s.audit.last, Open: s.audit.open,
-	})
+	a := &s.check.audit
+	_, last := s.check.settings.open(keyLimit)
+	a.mu.Lock()
+	known := a.applied(last)
+	data, err := json.Marshal(auditRecord{Known: slices.Sorted(maps.Keys(known))})
+	a.mu.Unlock()
 	if err != nil {
 		return nil, fmt.Errorf("export memory audit: %w", err)
 	}
@@ -265,7 +282,8 @@ func (s *AuditState) Export() ([]byte, error) {
 	return data, nil
 }
 
-// Restore loads names written by Export. Empty data is a no-op.
+// Restore loads names written by Export (or by the previous form). Empty
+// data is a no-op.
 func (s *AuditState) Restore(data []byte) error {
 	if len(data) == 0 {
 		return nil
@@ -274,21 +292,20 @@ func (s *AuditState) Restore(data []byte) error {
 	if err := json.Unmarshal(data, &rec); err != nil {
 		return fmt.Errorf("restore memory audit: %w", err)
 	}
-	s.audit.mu.Lock()
-	defer s.audit.mu.Unlock()
-	if s.audit.known == nil {
-		s.audit.known = make(map[string]bool, len(rec.Known))
-	}
+	a := &s.check.audit
+	a.mu.Lock()
+	defer a.mu.Unlock()
 	// A union: a restore that lands after a run must not forget what that
-	// run counted. The worst case is a joiner that is not announced. The
-	// fresher streak wins; an open PROBLEM stays open.
+	// run counted. The worst case is a joiner that is not announced. A copy,
+	// as known may be a remembered run's set.
+	known := maps.Clone(a.known)
+	if known == nil {
+		known = make(map[string]bool, len(rec.Known))
+	}
 	for _, n := range rec.Known {
-		s.audit.known[n] = true
+		known[n] = true
 	}
-	if rec.Last.After(s.audit.last) {
-		s.audit.badFor, s.audit.last = rec.BadFor, rec.Last
-	}
-	s.audit.open = s.audit.open || rec.Open
+	a.known = known
 
 	return nil
 }

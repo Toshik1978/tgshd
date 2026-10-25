@@ -309,10 +309,14 @@ func TestBuildTempsCheck(t *testing.T) {
 	}
 }
 
-// fakeOpenSource answers IsOpen from a fixed set of open keys.
-type fakeOpenSource map[string]bool
+// fakeOpenSource answers from a fixed set of open keys and their texts.
+type fakeOpenSource map[string]string
 
-func (f fakeOpenSource) IsOpen(key string) bool { return f[key] }
+func (f fakeOpenSource) Problem(key string) (bool, string) {
+	text, ok := f[key]
+
+	return ok, text
+}
 
 func TestOpenStateLateBound(t *testing.T) {
 	t.Parallel()
@@ -320,12 +324,15 @@ func TestOpenStateLateBound(t *testing.T) {
 	const key = "temps/acpitz/temp1"
 	o := newOpenState()
 	var open temps.OpenState = o
-	if open.IsOpen(key) {
-		t.Fatal("an unbound open state must answer false")
+	if gotOpen, gotText := o.Problem(key); open.IsOpen(key) || gotOpen || gotText != "" {
+		t.Fatal("an unbound open state must answer closed")
 	}
-	o.bind(fakeOpenSource{key: true})
+	o.bind(fakeOpenSource{key: "acpitz 91°C"})
 	if !open.IsOpen(key) || open.IsOpen("temps/acpitz/temp2") {
 		t.Fatal("a bound open state must answer from its source")
+	}
+	if gotOpen, gotText := o.Problem(key); !gotOpen || gotText != "acpitz 91°C" {
+		t.Fatalf("Problem = %v, %q, want open with its source's text", gotOpen, gotText)
 	}
 
 	// newHealth binds the adapter the checks were built with to its runner.

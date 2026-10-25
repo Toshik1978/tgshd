@@ -33,9 +33,9 @@ Validation: percentages in range; `danger_available_percent < warn_available_per
 durations in range; sizes positive; entries in `never_touch` and `audit_exclude` are names or
 `path.Match` glob patterns (as `containers.exclude`), non-empty and valid patterns. A bare unit
 name or pattern in `never_touch` also matches its `.service` unit. The audit covers only
-containers whose restart policy is `always` or `unless-stopped`. `pause_in_quiet_windows` applies to warnings only (default `true`); the guard
-never pauses (spec edge cases). `needs_internet`, `depends_on` and `summary_group` are not
-accepted.
+containers whose restart policy is `always` or `unless-stopped`. `pause_in_quiet_windows`
+applies to warnings only (default `true`); the guard never pauses (spec edge cases).
+`needs_internet`, `depends_on` and `summary_group` are not accepted.
 
 ## systemd unit (`config/tgshd.service`)
 

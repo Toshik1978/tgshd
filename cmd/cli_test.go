@@ -951,8 +951,8 @@ func TestOneShotOpenStateReadsTheStoredConditions(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cond := health.Condition{Key: key, Check: "temps", Open: true}
-	closed := health.Condition{Key: "temps/acpitz/temp2", Check: "temps"}
+	cond := health.Condition{Key: key, Check: "temps", Open: true, LastText: "acpitz 91°C"}
+	closed := health.Condition{Key: "temps/acpitz/temp2", Check: "temps", LastText: "acpitz 80°C"}
 	state := store.State{Conditions: []health.Condition{cond, closed}}
 	if err = st.Checkpoint(t.Context(), state, nil, nil); err != nil {
 		t.Fatal(err)
@@ -991,6 +991,15 @@ func TestOneShotOpenStateReadsTheStoredConditions(t *testing.T) {
 			if open.IsOpen("temps/acpitz/temp2") || open.IsOpen("temps/none") {
 				t.Fatal("only the open stored condition may be open")
 			}
+			if !tt.want {
+				return
+			}
+			if gotOpen, gotText := open.Problem(key); !gotOpen || gotText != "acpitz 91°C" {
+				t.Fatalf("Problem(%q) = %v, %q, want open with the stored text", key, gotOpen, gotText)
+			}
+			if gotOpen, gotText := open.Problem("temps/acpitz/temp2"); gotOpen || gotText != "acpitz 80°C" {
+				t.Fatalf("Problem of a stored streak = %v, %q, want closed with its text", gotOpen, gotText)
+			}
 		})
 	}
 }
@@ -1027,7 +1036,7 @@ func TestOneShotOpenStateWarnsWhenTheStoreCannotBeLoaded(t *testing.T) {
 	if open.IsOpen("temps/acpitz/temp1") || open.IsOpen("temps/acpitz/temp2") {
 		t.Fatal("an unloadable store must leave every condition closed")
 	}
-	if got := strings.Count(stderr.String(), "temperature open state unavailable: "); got != 1 {
+	if got := strings.Count(stderr.String(), "open state unavailable: "); got != 1 {
 		t.Fatalf("warnings = %d, want 1: %q", got, &stderr)
 	}
 }

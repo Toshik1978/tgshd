@@ -56,7 +56,7 @@ with `task test` (or `task test:coverage` for the gate). Messages must match
 1. Configure `memory.guard.intervene: report`, `danger_for: 10s`, a tiny `culprit_min_growth`.
 2. Run a throwaway container with `--restart unless-stopped` that allocates memory steadily
    (e.g. a loop appending to a buffer) without a memory limit; watch the `would restart` report
-   and the limit-audit PROBLEM (a container without a restart policy is not audited).
+   and the limit-audit PROBLEM (a container with any other restart policy, `no` or `on-failure`, is not audited).
 3. Switch to `act`; repeat; the container is restarted within 60 s of danger and one Telegram
    message arrives. Repeat once more inside 6 h: it is stopped and an SMS arrives.
 4. While the host is in danger, confirm `grep VmLck /proc/$(pidof tgshd)/status` is non-zero and

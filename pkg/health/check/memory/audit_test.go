@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -22,15 +23,79 @@ func auditSettings(exclude ...string) memory.Settings {
 	return s
 }
 
-// thresholdSettings is auditSettings with the default 5m threshold over a 1m
-// interval, on clock c.
-func thresholdSettings(c *clock) memory.Settings {
-	s := auditSettings()
-	s.Interval = time.Minute
-	s.Threshold = 5 * time.Minute
-	s.Now = c.Now
+// rigInterval is the check interval of a rig.
+const rigInterval = time.Minute
 
-	return s
+// rig runs the check as the runner does: a run's readings are applied to a
+// real engine at the tick time, and Settings.Open answers from that engine.
+type rig struct {
+	eng       *health.Engine
+	src       *fakeSource
+	chk       *memory.Check
+	now       time.Time
+	threshold time.Duration
+}
+
+// newRig is a rig over src with the given threshold, starting at start0.
+func newRig(src *fakeSource, threshold time.Duration) *rig {
+	r := &rig{eng: health.NewEngine(), src: src, now: start0(), threshold: threshold}
+	r.chk = r.check()
+
+	return r
+}
+
+// check builds a check that answers Open from the rig's engine; a restarted
+// tgshd is a new check over the same (restored) engine.
+func (r *rig) check() *memory.Check {
+	s := auditSettings()
+	s.Open = func(key string) (bool, string) {
+		c, ok := r.eng.Condition(key)
+
+		return ok && c.Open, c.LastText
+	}
+
+	return memory.New(r.src, s)
+}
+
+// run runs and applies one tick and returns the keys of the joiner events
+// the engine emitted.
+func (r *rig) run(t *testing.T) []string {
+	t.Helper()
+	res := r.chk.Run(context.Background())
+	var keys []string
+	for _, a := range r.eng.Apply(r.now, "memory", rigInterval, r.threshold, res.Readings) {
+		if a.Kind == health.AlertEvent && strings.HasPrefix(a.Key, keyLimit+"/") {
+			keys = append(keys, a.Key)
+		}
+	}
+	r.now = r.now.Add(rigInterval)
+
+	return keys
+}
+
+// drop runs one tick whose run overran: the runner drops its readings.
+func (r *rig) drop() {
+	r.chk.Run(context.Background())
+	r.now = r.now.Add(rigInterval)
+}
+
+// open reports whether the engine has the limit PROBLEM open.
+func (r *rig) open() bool {
+	c, ok := r.eng.Condition(keyLimit)
+
+	return ok && c.Open
+}
+
+// wantEvents fails unless got names exactly the joiners, in order.
+func wantEvents(t *testing.T, what string, got []string, joiners ...string) {
+	t.Helper()
+	want := make([]string, len(joiners))
+	for i, n := range joiners {
+		want[i] = keyLimit + "/" + n
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("%s: events = %q, want %q", what, got, want)
+	}
 }
 
 // kept is a running container Docker keeps running, without a memory limit.
@@ -187,81 +252,6 @@ func TestAuditCountsOnlyContainersDockerKeepsRunning(t *testing.T) {
 	}
 }
 
-// US3-5: a joiner is announced once; the open problem is not repeated.
-func TestAuditAnnouncesAContainerJoiningAnOpenProblemOnce(t *testing.T) {
-	src := &fakeSource{host: healthy(), containers: []memory.Container{kept("web-app")}}
-	c := memory.New(src, auditSettings())
-	c.Run(context.Background())
-
-	src.containers = []memory.Container{kept("web-app"), kept("queue-ok")}
-	res := c.Run(context.Background())
-
-	ev := limitEvents(res)
-	if len(ev) != 1 || ev[0].Key != keyLimit+"/queue-ok" || ev[0].Mode != health.ModeDefault ||
-		ev[0].Text != "container queue-ok runs without a memory limit" {
-		t.Fatalf("events = %+v, want one for queue-ok", ev)
-	}
-	if r := find(t, res, keyLimit); r.Verdict != health.Bad ||
-		r.Text != "2 containers run without a memory limit: queue-ok, web-app" {
-		t.Fatalf("problem = %+v", r)
-	}
-
-	if ev := limitEvents(c.Run(context.Background())); len(ev) != 0 {
-		t.Fatalf("announced again: %+v", ev)
-	}
-}
-
-func TestAuditDoesNotAnnounceALeaver(t *testing.T) {
-	src := &fakeSource{host: healthy(), containers: []memory.Container{kept("web-app"), kept("worker")}}
-	c := memory.New(src, auditSettings())
-	c.Run(context.Background())
-
-	src.containers = []memory.Container{kept("web-app")}
-	res := c.Run(context.Background())
-
-	if ev := limitEvents(res); len(ev) != 0 {
-		t.Fatalf("events = %+v, want none", ev)
-	}
-	if r := find(t, res, keyLimit); r.Text != "1 container runs without a memory limit: web-app" {
-		t.Fatalf("problem = %+v", r)
-	}
-}
-
-func TestAuditDoesNotAnnounceWhenTheProblemReopens(t *testing.T) {
-	src := &fakeSource{host: healthy(), containers: []memory.Container{kept("web-app")}}
-	c := memory.New(src, auditSettings())
-	c.Run(context.Background())
-	src.containers = nil
-	c.Run(context.Background())
-
-	src.containers = []memory.Container{kept("worker")}
-	if ev := limitEvents(c.Run(context.Background())); len(ev) != 0 {
-		t.Fatalf("events = %+v, want none: the problem opens anew", ev)
-	}
-}
-
-func TestAuditDoesNotReAnnounceAfterARestart(t *testing.T) {
-	src := &fakeSource{host: healthy(), containers: []memory.Container{kept("web-app"), kept("worker")}}
-	before := memory.New(src, auditSettings())
-	before.Run(context.Background())
-	saved, err := before.AuditState().Export()
-	if err != nil {
-		t.Fatalf("export: %v", err)
-	}
-
-	// tgshd restarts; queue-ok joined meanwhile.
-	src.containers = append(src.containers, kept("queue-ok"))
-	after := memory.New(src, auditSettings())
-	if err := after.AuditState().Restore(saved); err != nil {
-		t.Fatalf("restore: %v", err)
-	}
-
-	ev := limitEvents(after.Run(context.Background()))
-	if len(ev) != 1 || ev[0].Key != keyLimit+"/queue-ok" {
-		t.Fatalf("events = %+v, want only queue-ok", ev)
-	}
-}
-
 func TestAuditCutsTheListOnlyPastOneMessage(t *testing.T) {
 	const units = 4096
 
@@ -294,27 +284,6 @@ func TestAuditCutsTheListOnlyPastOneMessage(t *testing.T) {
 	}
 }
 
-func TestAuditReadFailureIsACheckerErrorAndKeepsTheSet(t *testing.T) {
-	src := &fakeSource{host: healthy(), containers: []memory.Container{kept("web-app")}}
-	c := memory.New(src, auditSettings())
-	c.Run(context.Background())
-
-	src.ctrErr = errors.New("docker down")
-	res := c.Run(context.Background())
-	var ce health.CheckError
-	if !errors.As(res.Err, &ce) || ce.Subject != "containers" {
-		t.Fatalf("err = %v, want a containers CheckError", res.Err)
-	}
-	find(t, res, "memory/available")
-	noLimitReading(t, res)
-
-	src.ctrErr = nil
-	src.containers = append(src.containers, kept("queue-ok"))
-	if ev := limitEvents(c.Run(context.Background())); len(ev) != 1 || ev[0].Key != keyLimit+"/queue-ok" {
-		t.Fatalf("events = %+v, want only queue-ok once the list is readable", ev)
-	}
-}
-
 func TestAuditIsSilentWithoutAContainerRuntime(t *testing.T) {
 	src := &fakeSource{host: healthy(), ctrErr: memory.ErrNoContainers}
 
@@ -336,156 +305,6 @@ func TestAuditRestoreRejectsGarbage(t *testing.T) {
 	}
 }
 
-func TestAuditRestoreAfterARunKeepsTheFresherSet(t *testing.T) {
-	src := &fakeSource{host: healthy(), containers: []memory.Container{kept("worker")}}
-	chk := memory.New(src, auditSettings())
-	chk.Run(context.Background())
-
-	// A late restore carries an older set; it must not forget worker.
-	if err := chk.AuditState().Restore([]byte(`{"known":["db"]}`)); err != nil {
-		t.Fatalf("restore: %v", err)
-	}
-
-	src.containers = []memory.Container{kept("worker"), kept("db")}
-	if ev := limitEvents(chk.Run(context.Background())); len(ev) != 0 {
-		t.Fatalf("events = %+v, want none", ev)
-	}
-}
-
-// The PROBLEM opens only after threshold: a joiner before that (or on the
-// opening run, whose PROBLEM names it) is not announced.
-func TestAuditAnnouncesJoinersOnlyOnceTheProblemIsOpen(t *testing.T) {
-	c := &clock{now: start0()}
-	src := &fakeSource{host: healthy(), containers: []memory.Container{kept("web-app")}}
-	chk := memory.New(src, thresholdSettings(c))
-
-	// 10:00 opens the streak; 10:01 queue-ok joins; 10:05 reaches 5m and
-	// worker joins on that run, named by the PROBLEM itself.
-	joins := map[int]string{1: "queue-ok", 5: "worker"}
-	for i := range 6 {
-		c.now = start0().Add(time.Duration(i) * time.Minute)
-		if name, ok := joins[i]; ok {
-			src.containers = append(src.containers, kept(name))
-		}
-		if ev := limitEvents(chk.Run(context.Background())); len(ev) != 0 {
-			t.Fatalf("run at +%dm: events = %+v, want none before the PROBLEM", i, ev)
-		}
-	}
-
-	c.now = start0().Add(6 * time.Minute)
-	src.containers = append(src.containers, kept("cache"))
-	if ev := limitEvents(chk.Run(context.Background())); len(ev) != 1 || ev[0].Key != keyLimit+"/cache" {
-		t.Fatalf("events = %+v, want cache once the PROBLEM is open", ev)
-	}
-}
-
-func TestAuditSendsNoEventForAProblemThatNeverOpened(t *testing.T) {
-	c := &clock{now: start0()}
-	src := &fakeSource{host: healthy(), containers: []memory.Container{kept("web-app")}}
-	chk := memory.New(src, thresholdSettings(c))
-	chk.Run(context.Background())
-
-	c.now = c.now.Add(time.Minute)
-	src.containers = append(src.containers, kept("queue-ok"))
-	chk.Run(context.Background())
-	c.now = c.now.Add(time.Minute)
-	src.containers = nil
-	chk.Run(context.Background())
-
-	// A new streak starts from zero.
-	for i := range 3 {
-		c.now = c.now.Add(time.Minute)
-		src.containers = append(src.containers, kept(fmt.Sprintf("worker-%d", i)))
-		if ev := limitEvents(chk.Run(context.Background())); len(ev) != 0 {
-			t.Fatalf("events = %+v, want none: the new streak is under the threshold", ev)
-		}
-	}
-}
-
-// A restart keeps the open state: a joiner after it is announced.
-func TestAuditKeepsTheOpenStateAcrossARestart(t *testing.T) {
-	c := &clock{now: start0()}
-	src := &fakeSource{host: healthy(), containers: []memory.Container{kept("web-app")}}
-	before := memory.New(src, thresholdSettings(c))
-	for i := range 6 {
-		c.now = start0().Add(time.Duration(i) * time.Minute)
-		before.Run(context.Background())
-	}
-	saved, err := before.AuditState().Export()
-	if err != nil {
-		t.Fatalf("export: %v", err)
-	}
-
-	after := memory.New(src, thresholdSettings(c))
-	if err := after.AuditState().Restore(saved); err != nil {
-		t.Fatalf("restore: %v", err)
-	}
-	c.now = start0().Add(8 * time.Minute)
-	src.containers = append(src.containers, kept("queue-ok"))
-	if ev := limitEvents(after.Run(context.Background())); len(ev) != 1 || ev[0].Key != keyLimit+"/queue-ok" {
-		t.Fatalf("events = %+v, want queue-ok", ev)
-	}
-}
-
-// Downtime adds at most 1.5 intervals to the streak, as in the engine: a
-// streak 1m old before an hour's outage is not open after it.
-func TestAuditCountsOnlyObservedTimeAcrossARestart(t *testing.T) {
-	c := &clock{now: start0()}
-	src := &fakeSource{host: healthy(), containers: []memory.Container{kept("web-app")}}
-	before := memory.New(src, thresholdSettings(c))
-	before.Run(context.Background())
-	c.now = c.now.Add(time.Minute)
-	before.Run(context.Background())
-	saved, _ := before.AuditState().Export()
-
-	after := memory.New(src, thresholdSettings(c))
-	if err := after.AuditState().Restore(saved); err != nil {
-		t.Fatalf("restore: %v", err)
-	}
-	c.now = c.now.Add(time.Hour)
-	after.Run(context.Background()) // 1m + 1.5m observed
-	c.now = c.now.Add(time.Minute)  // 3.5m observed
-	src.containers = append(src.containers, kept("queue-ok"))
-	if ev := limitEvents(after.Run(context.Background())); len(ev) != 0 {
-		t.Fatalf("events = %+v, want none: only 3.5m observed", ev)
-	}
-}
-
-// Minor 3: leaving and rejoining an open problem is a new join.
-func TestAuditAnnouncesARejoinAsANewJoin(t *testing.T) {
-	src := &fakeSource{host: healthy(), containers: []memory.Container{kept("web-app"), kept("worker")}}
-	chk := memory.New(src, auditSettings())
-	chk.Run(context.Background())
-	src.containers = []memory.Container{kept("web-app")}
-	chk.Run(context.Background())
-
-	src.containers = []memory.Container{kept("web-app"), kept("worker")}
-	if ev := limitEvents(chk.Run(context.Background())); len(ev) != 1 || ev[0].Key != keyLimit+"/worker" {
-		t.Fatalf("events = %+v, want worker announced again", ev)
-	}
-}
-
-// A container Docker is restarting (crash-loop backoff) stays counted, so
-// it does not flap out of the set and back in as a joiner.
-func TestAuditCountsAContainerDockerIsRestarting(t *testing.T) {
-	looping := kept("worker")
-	src := &fakeSource{host: healthy(), containers: []memory.Container{kept("web-app"), looping}}
-	chk := memory.New(src, auditSettings())
-	chk.Run(context.Background())
-
-	looping.Running, looping.Restarting = false, true
-	src.containers = []memory.Container{kept("web-app"), looping}
-	res := chk.Run(context.Background())
-	if r := find(t, res, keyLimit); r.Text != "2 containers run without a memory limit: web-app, worker" {
-		t.Fatalf("problem = %+v, want worker still counted", r)
-	}
-
-	src.containers = []memory.Container{kept("web-app"), kept("worker")}
-	if ev := limitEvents(chk.Run(context.Background())); len(ev) != 0 {
-		t.Fatalf("events = %+v, want none", ev)
-	}
-}
-
 func TestAuditCutsEveryNameWhenNoneFits(t *testing.T) {
 	src := &fakeSource{host: healthy(), containers: []memory.Container{
 		kept(strings.Repeat("x", 5000)), kept(strings.Repeat("y", 5000)),
@@ -496,4 +315,291 @@ func TestAuditCutsEveryNameWhenNoneFits(t *testing.T) {
 	if want := "2 containers run without a memory limit: … and 2 more"; r.Text != want {
 		t.Fatalf("text = %.120q, want %q", r.Text, want)
 	}
+}
+
+// US3-5: a joiner is announced once; the open problem is not repeated.
+func TestAuditAnnouncesAContainerJoiningAnOpenProblemOnce(t *testing.T) {
+	src := &fakeSource{host: healthy(), containers: []memory.Container{kept("web-app")}}
+	r := newRig(src, 0)
+	wantEvents(t, "opening run", r.run(t))
+
+	src.containers = []memory.Container{kept("web-app"), kept("queue-ok")}
+	res := r.chk.Run(context.Background())
+	ev := limitEvents(res)
+	if len(ev) != 1 || ev[0].Key != keyLimit+"/queue-ok" || ev[0].Mode != health.ModeDefault ||
+		ev[0].Text != "container queue-ok runs without a memory limit" {
+		t.Fatalf("events = %+v, want one for queue-ok", ev)
+	}
+	if rd := find(t, res, keyLimit); rd.Verdict != health.Bad ||
+		rd.Text != "2 containers run without a memory limit: queue-ok, web-app" {
+		t.Fatalf("problem = %+v", rd)
+	}
+	r.eng.Apply(r.now, "memory", rigInterval, 0, res.Readings)
+
+	wantEvents(t, "next run", r.run(t))
+}
+
+func TestAuditDoesNotAnnounceALeaver(t *testing.T) {
+	src := &fakeSource{host: healthy(), containers: []memory.Container{kept("web-app"), kept("worker")}}
+	r := newRig(src, 0)
+	r.run(t)
+
+	src.containers = []memory.Container{kept("web-app")}
+	res := r.chk.Run(context.Background())
+	if ev := limitEvents(res); len(ev) != 0 {
+		t.Fatalf("events = %+v, want none", ev)
+	}
+	if rd := find(t, res, keyLimit); rd.Text != "1 container runs without a memory limit: web-app" {
+		t.Fatalf("problem = %+v", rd)
+	}
+}
+
+func TestAuditDoesNotAnnounceWhenTheProblemReopens(t *testing.T) {
+	src := &fakeSource{host: healthy(), containers: []memory.Container{kept("web-app")}}
+	r := newRig(src, 0)
+	r.run(t)
+	src.containers = nil
+	r.run(t)
+
+	src.containers = []memory.Container{kept("worker")}
+	wantEvents(t, "the problem opens anew", r.run(t))
+}
+
+// Leaving and rejoining an open problem is a new join.
+func TestAuditAnnouncesARejoinAsANewJoin(t *testing.T) {
+	src := &fakeSource{host: healthy(), containers: []memory.Container{kept("web-app"), kept("worker")}}
+	r := newRig(src, 0)
+	r.run(t)
+	src.containers = []memory.Container{kept("web-app")}
+	r.run(t)
+
+	src.containers = []memory.Container{kept("web-app"), kept("worker")}
+	wantEvents(t, "rejoin", r.run(t), "worker")
+}
+
+// A container Docker is restarting (crash-loop backoff) stays counted, so
+// it does not flap out of the set and back in as a joiner.
+func TestAuditCountsAContainerDockerIsRestarting(t *testing.T) {
+	looping := kept("worker")
+	src := &fakeSource{host: healthy(), containers: []memory.Container{kept("web-app"), looping}}
+	r := newRig(src, 0)
+	r.run(t)
+
+	looping.Running, looping.Restarting = false, true
+	src.containers = []memory.Container{kept("web-app"), looping}
+	res := r.chk.Run(context.Background())
+	if rd := find(t, res, keyLimit); rd.Text != "2 containers run without a memory limit: web-app, worker" {
+		t.Fatalf("problem = %+v, want worker still counted", rd)
+	}
+	r.eng.Apply(r.now, "memory", rigInterval, 0, res.Readings)
+
+	src.containers = []memory.Container{kept("web-app"), kept("worker")}
+	wantEvents(t, "back to running", r.run(t))
+}
+
+func TestAuditReadFailureIsACheckerErrorAndKeepsTheSet(t *testing.T) {
+	src := &fakeSource{host: healthy(), containers: []memory.Container{kept("web-app")}}
+	r := newRig(src, 0)
+	r.run(t)
+
+	src.ctrErr = errors.New("docker down")
+	res := r.chk.Run(context.Background())
+	var ce health.CheckError
+	if !errors.As(res.Err, &ce) || ce.Subject != "containers" {
+		t.Fatalf("err = %v, want a containers CheckError", res.Err)
+	}
+	find(t, res, "memory/available")
+	noLimitReading(t, res)
+	r.eng.Apply(r.now, "memory", rigInterval, 0, res.Readings)
+
+	src.ctrErr = nil
+	src.containers = append(src.containers, kept("queue-ok"))
+	wantEvents(t, "readable again", r.run(t), "queue-ok")
+}
+
+// The engine opens the PROBLEM after threshold: a joiner before that (or on
+// the opening run, whose PROBLEM names it) is not announced.
+func TestAuditAnnouncesJoinersOnlyOnceTheProblemIsOpen(t *testing.T) {
+	src := &fakeSource{host: healthy(), containers: []memory.Container{kept("web-app")}}
+	r := newRig(src, 5*time.Minute)
+
+	// 10:00 opens the streak; 10:01 queue-ok joins; 10:05 reaches 5m and
+	// worker joins on that run, named by the PROBLEM itself.
+	joins := map[int]string{1: "queue-ok", 5: "worker"}
+	for i := range 6 {
+		if name, ok := joins[i]; ok {
+			src.containers = append(src.containers, kept(name))
+		}
+		wantEvents(t, fmt.Sprintf("run at +%dm", i), r.run(t))
+	}
+	if !r.open() {
+		t.Fatal("the engine has not opened the PROBLEM at +5m")
+	}
+
+	src.containers = append(src.containers, kept("cache"))
+	wantEvents(t, "once open", r.run(t), "cache")
+}
+
+// The audit asks the engine, so its own clock cannot make it
+// disagree on the opening run. Here the check's clock lags the tick on the
+// first run (a slow Docker read), so a mirror built on it would stay closed
+// one run longer than the engine.
+func TestAuditFollowsTheEngineOnTheOpeningRun(t *testing.T) {
+	src := &fakeSource{host: healthy(), containers: []memory.Container{kept("web-app")}}
+	r := newRig(src, 5*time.Minute)
+	s := auditSettings()
+	s.Open = func(key string) (bool, string) {
+		c, ok := r.eng.Condition(key)
+
+		return ok && c.Open, c.LastText
+	}
+	lag := 300 * time.Millisecond
+	s.Now = func() time.Time { return r.now.Add(lag) }
+	r.chk = memory.New(src, s)
+
+	for range 6 {
+		r.run(t)
+		lag = 0
+	}
+	if !r.open() {
+		t.Fatal("the engine has not opened the PROBLEM at +5m")
+	}
+
+	src.containers = append(src.containers, kept("queue-ok"))
+	wantEvents(t, "first run after the engine opened", r.run(t), "queue-ok")
+}
+
+// A run the runner drops (an overrun) emitted nothing, so its joiner
+// is announced by the next applied run, also after more dropped runs in a
+// row than the audit remembers.
+func TestAuditAnnouncesAJoinerSeenOnlyByADroppedRun(t *testing.T) {
+	for _, drops := range []int{1, 2, 12} {
+		t.Run(fmt.Sprintf("%d dropped", drops), func(t *testing.T) {
+			src := &fakeSource{host: healthy(), containers: []memory.Container{kept("web-app")}}
+			r := newRig(src, 0)
+			r.run(t)
+
+			src.containers = append(src.containers, kept("queue-ok"))
+			for range drops {
+				r.drop()
+			}
+			wantEvents(t, "first applied run", r.run(t), "queue-ok")
+			wantEvents(t, "next run", r.run(t))
+		})
+	}
+}
+
+// /clear ends the engine's condition; no joiner is announced until
+// the PROBLEM opens again, and the re-raised PROBLEM names the joiners.
+func TestAuditSendsNoJoinerEventAfterAClear(t *testing.T) {
+	src := &fakeSource{host: healthy(), containers: []memory.Container{kept("web-app")}}
+	r := newRig(src, 5*time.Minute)
+	for range 6 {
+		r.run(t)
+	}
+	if !r.open() || !r.eng.Clear(keyLimit) {
+		t.Fatal("want an open PROBLEM to clear")
+	}
+
+	for i := range 6 {
+		src.containers = append(src.containers, kept(fmt.Sprintf("worker-%d", i)))
+		wantEvents(t, fmt.Sprintf("run %d after the clear", i), r.run(t))
+	}
+	if !r.open() {
+		t.Fatal("the PROBLEM has not opened again")
+	}
+	src.containers = append(src.containers, kept("cache"))
+	wantEvents(t, "once open again", r.run(t), "cache")
+}
+
+func TestAuditSendsNoEventForAProblemThatNeverOpened(t *testing.T) {
+	src := &fakeSource{host: healthy(), containers: []memory.Container{kept("web-app")}}
+	r := newRig(src, 5*time.Minute)
+	r.run(t)
+	src.containers = append(src.containers, kept("queue-ok"))
+	r.run(t)
+	src.containers = nil
+	r.run(t)
+
+	// A new streak starts from zero.
+	for i := range 3 {
+		src.containers = append(src.containers, kept(fmt.Sprintf("worker-%d", i)))
+		wantEvents(t, "the new streak is under the threshold", r.run(t))
+	}
+}
+
+// A restart (a new check over the restored engine and kv memory.audit)
+// neither announces the set again nor misses a joiner after it, even one
+// announced by the last run before the stop.
+func TestAuditDoesNotReAnnounceAfterARestart(t *testing.T) {
+	src := &fakeSource{host: healthy(), containers: []memory.Container{kept("web-app")}}
+	r := newRig(src, 0)
+	r.run(t)
+	src.containers = append(src.containers, kept("worker"))
+	wantEvents(t, "before the stop", r.run(t), "worker")
+	saved, err := r.chk.AuditState().Export()
+	if err != nil {
+		t.Fatalf("export: %v", err)
+	}
+
+	r.chk = r.check()
+	if err := r.chk.AuditState().Restore(saved); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	src.containers = append(src.containers, kept("queue-ok"))
+	wantEvents(t, "after the restart", r.run(t), "queue-ok")
+}
+
+// The previous kv memory.audit carried a mirrored streak; only its known set
+// is read.
+func TestAuditRestoresThePreviousFormat(t *testing.T) {
+	src := &fakeSource{host: healthy(), containers: []memory.Container{kept("web-app"), kept("worker")}}
+	r := newRig(src, 0)
+	r.run(t)
+
+	r.chk = r.check()
+	old := `{"known":["web-app","worker"],"bad_for":300000000000,"last":"2026-01-02T10:00:00Z","open":true}`
+	if err := r.chk.AuditState().Restore([]byte(old)); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	src.containers = append(src.containers, kept("queue-ok"))
+	wantEvents(t, "after the restart", r.run(t), "queue-ok")
+}
+
+// With an open PROBLEM but nothing to compare against (its kv entry was
+// lost), the counted set is taken silently rather than announced whole.
+func TestAuditDoesNotAnnounceTheWholeSetWithoutAKnownSet(t *testing.T) {
+	src := &fakeSource{host: healthy(), containers: []memory.Container{kept("web-app"), kept("worker")}}
+	r := newRig(src, 0)
+	r.run(t)
+
+	r.chk = r.check()
+	wantEvents(t, "first run without memory.audit", r.run(t))
+	src.containers = append(src.containers, kept("queue-ok"))
+	wantEvents(t, "a later joiner", r.run(t), "queue-ok")
+}
+
+// A store that loads late (unreadable at start) restores kv memory.audit and
+// merges the stored conditions after runs were applied; the engine keeps its
+// own young streak, and the audit follows the engine: nothing is
+// announced before that streak opens, and the PROBLEM then names everyone.
+func TestAuditFollowsTheEngineAfterALateLoad(t *testing.T) {
+	src := &fakeSource{host: healthy(), containers: []memory.Container{kept("worker")}}
+	r := newRig(src, 5*time.Minute)
+	r.run(t)
+
+	if err := r.chk.AuditState().Restore([]byte(`{"known":["db"]}`)); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	r.eng.Merge([]health.Condition{{Key: keyLimit, Check: "memory", Open: true, LastText: "stored text"}})
+
+	src.containers = []memory.Container{kept("worker"), kept("db"), kept("queue-ok")}
+	for i := range 5 {
+		wantEvents(t, fmt.Sprintf("run %d after the late load", i), r.run(t))
+	}
+	if !r.open() {
+		t.Fatal("the PROBLEM has not opened")
+	}
+	src.containers = append(src.containers, kept("cache"))
+	wantEvents(t, "once open", r.run(t), "cache")
 }

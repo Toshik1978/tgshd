@@ -65,14 +65,17 @@ no_culprit, action_failed}`. `restarted` and `would_*` use `mode`; the rest use 
 
 ## Limit audit known set (persisted, kv `memory.audit`)
 
-`{known []string, bad_for, last, open}` — the container names the audit counted on its last run
-(running or restarting, restart policy `always` or `unless-stopped`, no memory limit, not in
-`audit_exclude`), and the current streak's observed bad time, mirrored from the engine (a run adds
-the time since the previous one, at most 1.5 intervals), with whether it has reached `threshold`
-(the PROBLEM is open). Only while it is open is a counted container missing from `known`
-announced, once. A container that leaves the set and rejoins while the problem stays open is a new
-join and is announced again. Persisting it means a tgshd restart neither announces the open
-problem's containers again nor treats a streak younger than `threshold` as open.
+`{known []string}` — the container names counted by the last run whose readings the engine
+applied (running or restarting, restart policy `always` or `unless-stopped`, no memory limit, not
+in `audit_exclude`). Whether the `memory/limit` PROBLEM is open is never kept here: the audit asks
+the engine's condition at run time (it reflects the previous tick), so `/clear` and a run the
+runner drops (an overrun) are seen as the engine sees them. Only while it is open is a counted
+container the last applied run did not count announced, once; the audit finds that run by the text
+the engine last applied, so a joiner seen only by a dropped run is announced by the next applied
+one. A container that leaves the set and rejoins while the problem stays open is a new join and is
+announced again. Persisting the set means a tgshd restart does not announce the open problem's
+containers again; an open problem with no stored set takes the counted set silently. The previous
+form also held a mirrored streak (`bad_for`, `last`, `open`); those fields are ignored when read.
 
 ## Conditions and samples (existing engine and store)
 

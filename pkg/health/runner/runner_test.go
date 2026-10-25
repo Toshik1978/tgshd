@@ -1229,6 +1229,34 @@ func TestIsOpen(t *testing.T) {
 	}
 }
 
+// Problem answers from the engine: open or not, with the text of the last
+// reading applied to the condition (a streak has one too).
+func TestProblem(t *testing.T) {
+	open := newFakeCheck(nil, "ups", reading("ups/main", health.Bad, "on battery"))
+	streak := newFakeCheck(nil, "temps", reading("temps/board", health.Bad, "hot"))
+	streakCheck := checkOf(streak)
+	streakCheck.Threshold = 10 * time.Minute // bad, but not yet open
+	f := newFixture(t, &fakeStore{}, checkOf(open), streakCheck)
+	f.tick(t)
+
+	type answer struct {
+		open bool
+		text string
+	}
+	want := map[string]answer{"ups/main": {true, "on battery"}, "temps/board": {false, "hot"}, "http/none": {}}
+	for key, w := range want {
+		if gotOpen, gotText := f.r.Problem(key); gotOpen != w.open || gotText != w.text {
+			t.Errorf("Problem(%q) = %v, %q, want %v, %q", key, gotOpen, gotText, w.open, w.text)
+		}
+	}
+	if !f.r.Clear("ups/main") {
+		t.Fatal("clear ups/main")
+	}
+	if gotOpen, gotText := f.r.Problem("ups/main"); gotOpen || gotText != "" {
+		t.Errorf("cleared: Problem = %v, %q, want closed with no text", gotOpen, gotText)
+	}
+}
+
 func TestConcurrencyBound(t *testing.T) {
 	const limit = 2
 

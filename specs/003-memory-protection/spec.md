@@ -31,9 +31,6 @@ advance, and it must keep working while the host is starving.
 
 - Q: Should the automatic intervention also restart leaking host services that run outside Docker (systemd units), or only containers? → A: Containers and systemd services, both restarted by the same rules; stray processes outside any service are only reported.
 - Q: When the memory section is first added, should tgshd begin in report-only mode until switched to act? → A: Yes. One intervention setting with three values — `off`, `report`, `act` — defaulting to `report` when the memory section is present.
-
-### Session 2026-10-26
-
 - Q: Which containers does the memory-limit audit cover, and how is it reported on a host where most containers have no limit yet? → A: Only containers Docker keeps running (restart policy `always` or `unless-stopped`, the set the containers check watches), minus the audit exclusions; one rolled-up problem lists every such container, largest first, and resolves when none is left; a container that joins the set later is announced once.
 - Q: Do the audit exclusions and the never-touch list accept patterns? → A: Yes, the same glob patterns the containers check's exclude list accepts.
 

@@ -102,14 +102,22 @@ type Settings struct {
 	// without a memory limit.
 	AuditExclude []string
 
-	// Interval and Threshold are the check's own: the limit audit mirrors the
-	// engine's observed bad time to know when its PROBLEM is open, and only
-	// then announces joiners.
-	Interval  time.Duration
-	Threshold time.Duration
+	// Open answers from the engine for a condition key: whether its PROBLEM
+	// is open and the text of the last reading the engine applied to it.
+	// Nil answers closed.
+	Open func(key string) (open bool, text string)
 
 	// Now is the clock; time.Now when nil.
 	Now func() time.Time
+}
+
+// open answers Open, closed when it is nil.
+func (s Settings) open(key string) (bool, string) {
+	if s.Open == nil {
+		return false, ""
+	}
+
+	return s.Open(key)
 }
 
 func (s Settings) now() time.Time {
