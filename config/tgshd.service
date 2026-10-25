@@ -8,6 +8,8 @@ EnvironmentFile=/usr/local/etc/tgshd.conf
 TimeoutSec=30
 Restart=on-failure
 RestartSec=30
+OOMScoreAdjust=-1000
+LimitMEMLOCK=infinity
 
 [Install]
 WantedBy=multi-user.target

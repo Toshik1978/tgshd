@@ -121,6 +121,8 @@ type healthParams struct {
 	// Open is the open state the temperatures check was built with, bound
 	// here to the runner.
 	Open *openState
+	// Guard is the host the memory guard runs over; nil runs no guard.
+	Guard *guardHost
 }
 
 // healthOut registers the runner and its commands; both are empty while
@@ -138,6 +140,7 @@ func healthProviders() fx.Option {
 		fx.Provide(
 			newHealthSetup,
 			newHealth,
+			newGuardHost,
 		),
 		healthCheckProviders(),
 	)
@@ -283,8 +286,8 @@ func closeState(st *store.Deferred, inst *lockfile.Instance) error {
 
 // newHealth builds the runner, its daily and weekly jobs and its /status,
 // /clear, /retire, /history, /temp and /disks commands, and runs the checks'
-// background jobs. When the configuration could not be parsed it only reports
-// that as a checker error.
+// background jobs and the memory guard. When the configuration could not be
+// parsed it only reports that as a checker error.
 func newHealth(p healthParams) healthOut {
 	d := newDelivery(p.Config, p.Publisher, p.SMS)
 	errs := slices.Concat(p.Setup.Errors, d.errors)
@@ -305,6 +308,10 @@ func newHealth(p healthParams) healthOut {
 	}
 
 	set := mergeCheckSets(p.Sets)
+	guard := newMemoryGuard(p.Setup.Config.Memory, p.Guard, p.Logger)
+	if guard != nil {
+		set.Persisters = append(set.Persisters, guard.persister())
+	}
 	reports := newHealthReports(p.Setup, set, p.Uptime, p.Logger)
 	opts := runnerOptions(p.Setup, d, set, p.Uptime, p.Logger)
 	reports.hook(&opts)
@@ -315,6 +322,10 @@ func newHealth(p healthParams) healthOut {
 	// After registerStart: the stored state is restored before a job (the
 	// kernel log reader) starts.
 	registerBackground(p.Lifecycle, set.Background, r.CheckerError, backgroundRetry)
+	// After registerStart too: the guard starts from the restored records.
+	if guard != nil {
+		guard.register(p.Lifecycle, r)
+	}
 
 	var retire telegram.Handler = noDrivesCommand{logger: p.Logger, publisher: p.Publisher}
 	if set.Drives != nil {

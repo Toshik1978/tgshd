@@ -42,6 +42,7 @@ type fakeDocker struct {
 	containers map[string]docker.Container
 	err        error
 	restarted  []string
+	stopped    []string
 	closed     bool
 }
 
@@ -74,6 +75,15 @@ func (f *fakeDocker) Restart(_ context.Context, name string) error {
 	defer f.mu.Unlock()
 
 	f.restarted = append(f.restarted, name)
+
+	return f.err
+}
+
+func (f *fakeDocker) Stop(_ context.Context, name string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.stopped = append(f.stopped, name)
 
 	return f.err
 }
@@ -1011,5 +1021,37 @@ func TestCommandCheckJudgesItsOutputThroughTheRunner(t *testing.T) {
 	res := set.Checks[0].Run(t.Context())
 	if !hasKey(res.Readings, "command/queue", health.Bad) || !strings.Contains(res.Readings[0].Text, "expect_output") {
 		t.Fatalf("result = %+v, want Bad on the unmatched expect_output", res)
+	}
+}
+
+func TestLazyDockerForTheMemoryGuard(t *testing.T) {
+	t.Parallel()
+
+	api := &fakeDocker{containers: map[string]docker.Container{
+		"web-app": {ID: "aaaa", Name: "web-app"}, "db": {ID: "bbbb", Name: "db"},
+	}}
+	d := lazyOver(api, nil)
+	names, err := d.ContainerNames(t.Context())
+	if err != nil || !maps.Equal(names, map[string]string{"aaaa": "web-app", "bbbb": "db"}) {
+		t.Fatalf("ContainerNames() = %v, %v", names, err)
+	}
+	if err := d.Stop(t.Context(), "web-app"); err != nil || !slices.Equal(api.stopped, []string{"web-app"}) {
+		t.Fatalf("Stop() = %v, stopped %v", err, api.stopped)
+	}
+
+	api.err = errors.New("engine error")
+	if _, err := d.ContainerNames(t.Context()); !errors.Is(err, api.err) {
+		t.Fatalf("failed list: err = %v", err)
+	}
+	if err := d.Stop(t.Context(), "web-app"); !errors.Is(err, api.err) {
+		t.Fatalf("failed stop: err = %v", err)
+	}
+
+	broken := lazyOver(nil, errors.New("bad DOCKER_HOST"))
+	if _, err := broken.ContainerNames(t.Context()); !errors.Is(err, errDockerUnavailable) {
+		t.Fatalf("no client: err = %v, want errDockerUnavailable", err)
+	}
+	if err := broken.Stop(t.Context(), "web-app"); !errors.Is(err, errDockerUnavailable) {
+		t.Fatalf("no client: err = %v, want errDockerUnavailable", err)
 	}
 }

@@ -434,6 +434,7 @@ type dockerAPI interface {
 	List(ctx context.Context) ([]docker.Container, error)
 	Inspect(ctx context.Context, name string) (docker.Container, error)
 	Restart(ctx context.Context, name string) error
+	Stop(ctx context.Context, name string) error
 	Close() error
 }
 
@@ -529,6 +530,38 @@ func (d *lazyDocker) Restart(ctx context.Context, name string) error {
 	return nil
 }
 
+// Stop stops the named container (the memory guard's repeat rule).
+func (d *lazyDocker) Stop(ctx context.Context, name string) error {
+	api, err := d.client()
+	if err != nil {
+		return err
+	}
+	if err := api.Stop(ctx, name); err != nil {
+		return fmt.Errorf("docker: %w", err)
+	}
+
+	return nil
+}
+
+// ContainerNames maps the id of every container, running or not, to its
+// name, for the memory guard's docker-<id>.scope cgroups.
+func (d *lazyDocker) ContainerNames(ctx context.Context) (map[string]string, error) {
+	api, err := d.client()
+	if err != nil {
+		return nil, err
+	}
+	list, err := api.List(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("docker: %w", err)
+	}
+	names := make(map[string]string, len(list))
+	for i := range list {
+		names[list[i].ID] = list[i].Name
+	}
+
+	return names, nil
+}
+
 // Close closes the client when it was built.
 func (d *lazyDocker) Close() error {
 	d.mu.Lock()
@@ -556,7 +589,7 @@ func (d *lazyDocker) client() (dockerAPI, error) {
 	if d.api == nil {
 		api, err := d.newClient()
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("%w: %w", errDockerUnavailable, err)
 		}
 		d.api = api
 	}

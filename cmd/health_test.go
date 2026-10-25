@@ -4,15 +4,20 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"maps"
 	"net/netip"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
+	dockerclient "github.com/moby/moby/client"
 	"go.uber.org/fx"
 	"go.uber.org/fx/fxtest"
 	"go.uber.org/zap"
@@ -21,10 +26,13 @@ import (
 	"github.com/Toshik1978/tgshd/pkg/health"
 	"github.com/Toshik1978/tgshd/pkg/health/check/network"
 	hcfg "github.com/Toshik1978/tgshd/pkg/health/config"
+	"github.com/Toshik1978/tgshd/pkg/health/memguard"
 	"github.com/Toshik1978/tgshd/pkg/health/notify"
 	"github.com/Toshik1978/tgshd/pkg/health/runner"
 	"github.com/Toshik1978/tgshd/pkg/health/store"
+	"github.com/Toshik1978/tgshd/pkg/host/cgroupmem"
 	"github.com/Toshik1978/tgshd/pkg/host/lockfile"
+	"github.com/Toshik1978/tgshd/pkg/host/procmem"
 	"github.com/Toshik1978/tgshd/pkg/host/sysfs"
 	"github.com/Toshik1978/tgshd/pkg/mail"
 	"github.com/Toshik1978/tgshd/pkg/power"
@@ -1205,4 +1213,885 @@ func TestStoreOpenRetriesUseTheShortBound(t *testing.T) {
 			t.Fatalf("limits = %v, want every retry bounded by %v", limits, storeRetryTimeout)
 		}
 	}
+}
+
+// Memory guard wiring (T012).
+
+// webAppID is the container id of web-app, as in its docker-<id>.scope.
+const webAppID = "abababababababababababababababababababababababababababababababab"
+
+// guardT0 is the start of the guard tests' virtual time.
+func guardT0() time.Time { return time.Date(2026, 3, 1, 1, 0, 0, 0, time.UTC) }
+
+// stepClock is the guard's clock in virtual time: each wait of one
+// memguard.HostInterval advances it at once (after a short real pause, so the
+// loop does not spin), every other wait (an action timeout) never fires.
+type stepClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func (c *stepClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return c.now
+}
+
+func (c *stepClock) After(d time.Duration) <-chan time.Time {
+	ch := make(chan time.Time, 1)
+	if d != memguard.HostInterval {
+		return ch
+	}
+	time.Sleep(100 * time.Microsecond)
+	c.mu.Lock()
+
+	c.now = c.now.Add(d)
+	ch <- c.now
+	c.mu.Unlock()
+
+	return ch
+}
+
+// fakeGuardMemory is /proc as the guard reads it: in danger or healthy.
+type fakeGuardMemory struct {
+	mu     sync.Mutex
+	danger bool
+	psiErr error
+	reads  int
+	topN   []int
+}
+
+func (f *fakeGuardMemory) setDanger(on bool) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.danger = on
+}
+
+func (f *fakeGuardMemory) ReadMemInfo() (procmem.MemInfo, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.reads++
+	avail := uint64(50 << 30)
+	if f.danger {
+		avail = 2 << 30
+	}
+
+	return procmem.MemInfo{Total: 100 << 30, Available: avail}, nil
+}
+
+func (f *fakeGuardMemory) ReadPressure() (procmem.Pressure, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if f.psiErr != nil {
+		return procmem.Pressure{}, f.psiErr
+	}
+	if f.danger {
+		return procmem.Pressure{FullAvg10: 50, SomeAvg10: 60}, nil
+	}
+
+	return procmem.Pressure{}, nil
+}
+
+func (f *fakeGuardMemory) TopProcesses(n int) ([]procmem.Process, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.topN = append(f.topN, n)
+
+	return []procmem.Process{{PID: 4242, Name: "python3", RSS: 40 << 30, Cgroup: "/user.slice"}}, nil
+}
+
+func (f *fakeGuardMemory) hostReads() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return f.reads
+}
+
+// fakeGuardCgroups is cgroup v2 with web-app's container growing 2 GB per
+// read, a flat backup.service and a container Docker does not know yet.
+type fakeGuardCgroups struct {
+	mu      sync.Mutex
+	svcErr  error
+	self    string
+	selfErr error
+	anon    uint64
+	reads   int
+	killed  []string
+	killErr error
+}
+
+func (f *fakeGuardCgroups) Services() ([]cgroupmem.Service, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	if f.svcErr != nil {
+		return nil, f.svcErr
+	}
+	f.reads++
+	f.anon += 2 << 30
+
+	return []cgroupmem.Service{
+		{
+			Kind:    cgroupmem.KindUnit,
+			Name:    "backup.service",
+			Path:    "system.slice/backup.service",
+			Anon:    1 << 30,
+			Current: 1 << 30,
+		},
+		{
+			Kind:    cgroupmem.KindContainer,
+			Name:    webAppID,
+			Path:    "system.slice/docker-" + webAppID + ".scope",
+			Anon:    f.anon,
+			Current: f.anon,
+		},
+		{
+			Kind: cgroupmem.KindContainer, Name: strings.Repeat("cd", 32),
+			Path: "system.slice/docker-" + strings.Repeat("cd", 32) + ".scope", Anon: 1 << 20,
+		},
+	}, nil
+}
+
+func (f *fakeGuardCgroups) serviceReads() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return f.reads
+}
+
+func (f *fakeGuardCgroups) Self() (string, error) {
+	return f.self, f.selfErr
+}
+
+func (f *fakeGuardCgroups) Kill(path string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.killed = append(f.killed, path)
+
+	return f.killErr
+}
+
+// fakeGuardContainers is Docker: the names it lists and the actions it took.
+type fakeGuardContainers struct {
+	mu      sync.Mutex
+	names   map[string]string
+	listErr error
+	lists   int
+	err     error
+	calls   []string
+}
+
+func (f *fakeGuardContainers) ContainerNames(context.Context) (map[string]string, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.lists++
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+
+	return maps.Clone(f.names), nil
+}
+
+func (f *fakeGuardContainers) Restart(_ context.Context, name string) error {
+	return f.do("restart " + name)
+}
+
+func (f *fakeGuardContainers) Stop(_ context.Context, name string) error {
+	return f.do("stop " + name)
+}
+
+func (f *fakeGuardContainers) do(call string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.calls = append(f.calls, call)
+
+	return f.err
+}
+
+func (f *fakeGuardContainers) actions() []string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return slices.Clone(f.calls)
+}
+
+func (f *fakeGuardContainers) listed() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return f.lists
+}
+
+// fakeGuardUnits is systemctl.
+type fakeGuardUnits struct {
+	mu    sync.Mutex
+	err   error
+	calls []string
+}
+
+func (f *fakeGuardUnits) Restart(_ context.Context, unit string) error {
+	return f.do("restart " + unit)
+}
+
+func (f *fakeGuardUnits) Stop(_ context.Context, unit string) error { return f.do("stop " + unit) }
+
+func (f *fakeGuardUnits) do(call string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.calls = append(f.calls, call)
+
+	return f.err
+}
+
+// fakeShield counts its applications.
+type fakeShield struct {
+	mu      sync.Mutex
+	err     error
+	applied int
+}
+
+func (f *fakeShield) Apply() error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	f.applied++
+
+	return f.err
+}
+
+func (f *fakeShield) count() int {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+
+	return f.applied
+}
+
+// guardFakes are the fake host adapters of one guard.
+type guardFakes struct {
+	mem        *fakeGuardMemory
+	cgroups    *fakeGuardCgroups
+	containers *fakeGuardContainers
+	units      *fakeGuardUnits
+	shield     *fakeShield
+	clock      *stepClock
+}
+
+func newGuardFakes(start time.Time) *guardFakes {
+	return &guardFakes{
+		mem:        &fakeGuardMemory{},
+		cgroups:    &fakeGuardCgroups{self: "system.slice/tgshd.service"},
+		containers: &fakeGuardContainers{names: map[string]string{webAppID: "web-app"}},
+		units:      &fakeGuardUnits{},
+		shield:     &fakeShield{},
+		clock:      &stepClock{now: start},
+	}
+}
+
+func (f *guardFakes) host() *guardHost {
+	return &guardHost{
+		mem: f.mem, cgroups: f.cgroups, containers: f.containers, units: f.units, shield: f.shield, clock: f.clock,
+	}
+}
+
+// testMemorySection is a memory section whose messages all go to Telegram.
+func testMemorySection(intervene hcfg.Intervene) *hcfg.Memory {
+	return &hcfg.Memory{
+		Mode: hcfg.ModeTLG,
+		Guard: hcfg.Guard{
+			Intervene: intervene, NeverTouch: []string{"db"},
+			DangerAvailablePercent: 5, DangerPressurePercent: 20, DangerFor: hcfg.Duration(30 * time.Second),
+			CulpritWindow: hcfg.Duration(time.Minute), CulpritMinGrowth: 1 << 30,
+			RepeatWindow: hcfg.Duration(6 * time.Hour), RecoveryWindow: hcfg.Duration(10 * time.Second),
+			ActionTimeout: hcfg.Duration(time.Minute), FailedMode: hcfg.ModeTLG,
+		},
+	}
+}
+
+// waitFor fails the test unless cond turns true within a few seconds.
+func waitFor(t *testing.T, what string, cond func() bool) {
+	t.Helper()
+
+	deadline := time.Now().Add(5 * time.Second)
+	for !cond() {
+		if time.Now().After(deadline) {
+			t.Fatalf("timed out waiting for %s", what)
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// waitNamed waits until Docker named the containers and the guard has read
+// the services a few times since, so web-app has a history before danger.
+func waitNamed(t *testing.T, f *guardFakes) {
+	t.Helper()
+
+	waitFor(t, "the container names", func() bool { return f.containers.listed() > 0 })
+	reads := f.cgroups.serviceReads()
+	waitFor(t, "the named services", func() bool { return f.cgroups.serviceReads() >= reads+3 })
+}
+
+// containing reports whether one of msgs contains sub.
+func containing(msgs []string, sub string) bool {
+	return slices.ContainsFunc(msgs, func(m string) bool { return strings.Contains(m, sub) })
+}
+
+// guardHealthParams are enabled health params with the memory section mem
+// and the guard over fakes.
+func guardHealthParams(
+	t *testing.T,
+	pub *fakePublisher,
+	lc fx.Lifecycle,
+	mem *hcfg.Memory,
+	f *guardFakes,
+) healthParams {
+	t.Helper()
+
+	p := enabledHealthParams(t, pub, lc)
+	p.Setup.Config.Memory = mem
+	p.Guard = f.host()
+
+	return p
+}
+
+func TestNewMemoryGuardFollowsTheConfig(t *testing.T) {
+	t.Parallel()
+
+	host := newGuardFakes(guardT0()).host()
+	if g := newMemoryGuard(nil, host, zap.NewNop()); g != nil {
+		t.Fatal("no memory section: want no guard")
+	}
+	if g := newMemoryGuard(testMemorySection(hcfg.InterveneOff), host, zap.NewNop()); g != nil {
+		t.Fatal("intervene off: want no guard")
+	}
+	if g := newMemoryGuard(testMemorySection(hcfg.InterveneAct), nil, zap.NewNop()); g != nil {
+		t.Fatal("no host adapters: want no guard")
+	}
+
+	g := newMemoryGuard(testMemorySection(hcfg.InterveneAct), host, zap.NewNop())
+	if g == nil {
+		t.Fatal("intervene act: want a guard")
+	}
+	want := memguard.Config{
+		CulpritWindow: time.Minute, CulpritMinGrowth: 1 << 30, NeverTouch: []string{"db"},
+		Mode: memguard.ModeAct, DangerAvailablePercent: 5, DangerPressurePercent: 20, DangerFor: 30 * time.Second,
+		RepeatWindow: 6 * time.Hour, RecoveryWindow: 10 * time.Second, ActionTimeout: time.Minute,
+		Channel: health.Mode(hcfg.ModeTLG), FailedChannel: health.Mode(hcfg.ModeTLG),
+	}
+	if !reflect.DeepEqual(g.cfg, want) {
+		t.Fatalf("cfg = %+v, want %+v", g.cfg, want)
+	}
+	if g := newMemoryGuard(testMemorySection(hcfg.InterveneReport), host, zap.NewNop()); g == nil ||
+		g.cfg.Mode != memguard.ModeReport {
+		t.Fatalf("intervene report: guard = %+v", g)
+	}
+}
+
+func TestNewHealthStartsTheGuardOnlyWithTheSectionAndIntervene(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name  string
+		mem   *hcfg.Memory
+		start bool
+	}{
+		{"no section", nil, false},
+		{"intervene off", testMemorySection(hcfg.InterveneOff), false},
+		{"intervene report", testMemorySection(hcfg.InterveneReport), true},
+		{"intervene act", testMemorySection(hcfg.InterveneAct), true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			f := newGuardFakes(guardT0())
+			lc := fxtest.NewLifecycle(t)
+			newHealth(guardHealthParams(t, &fakePublisher{}, lc, tt.mem, f))
+			lc.RequireStart()
+			if tt.start {
+				waitFor(t, "the guard loop", func() bool { return f.mem.hostReads() > 1 })
+			} else {
+				time.Sleep(20 * time.Millisecond)
+			}
+			lc.RequireStop()
+
+			if started := f.shield.count() == 1 && f.mem.hostReads() > 0; started != tt.start {
+				t.Fatalf("shield applied %d, host reads %d; want started = %v",
+					f.shield.count(), f.mem.hostReads(), tt.start)
+			}
+		})
+	}
+}
+
+func TestGuardSamplerMapsContainerIDsToNames(t *testing.T) {
+	t.Parallel()
+
+	f := newGuardFakes(guardT0())
+	names := &containerNames{}
+	s := guardSampler{mem: f.mem, cgroups: f.cgroups, names: names}
+
+	got, err := s.Services(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Name != "backup.service" || got[0].Kind != memguard.KindUnit {
+		t.Fatalf("before a refresh: samples = %+v, want only the unit (containers wait for their name)", got)
+	}
+
+	if err = names.refresh(t.Context(), f.containers); err != nil {
+		t.Fatal(err)
+	}
+	got, err = s.Services(got[:0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []memguard.Sample{
+		{
+			Kind:       memguard.KindUnit,
+			Name:       "backup.service",
+			CgroupPath: "system.slice/backup.service",
+			Anon:       1 << 30,
+			Current:    1 << 30,
+		},
+		{
+			Kind: memguard.KindContainer, Name: "web-app", CgroupPath: "system.slice/docker-" + webAppID + ".scope",
+			Anon: 4 << 30, Current: 4 << 30,
+		},
+	}
+	if !slices.Equal(got, want) {
+		t.Fatalf("samples = %+v, want %+v (the unknown container skipped)", got, want)
+	}
+
+	f.containers.listErr = errors.New("docker down")
+	if err := names.refresh(t.Context(), f.containers); err == nil {
+		t.Fatal("a failed list must be returned")
+	}
+	if name, ok := names.name(webAppID); !ok || name != "web-app" {
+		t.Fatalf("after a failed refresh: name = %q, %v; want the last known map kept", name, ok)
+	}
+
+	f.cgroups.svcErr = errors.New("no system.slice")
+	if _, err := s.Services(nil); err == nil {
+		t.Fatal("a failed cgroup read must be returned")
+	}
+}
+
+func TestGuardSamplerHostAndTopProcess(t *testing.T) {
+	t.Parallel()
+
+	f := newGuardFakes(guardT0())
+	f.mem.setDanger(true)
+	s := guardSampler{mem: f.mem, cgroups: f.cgroups, names: &containerNames{}}
+
+	h, err := s.Host()
+	if err != nil || h.AvailablePct != 2 || h.FullAvg10 != 50 {
+		t.Fatalf("Host() = %+v, %v; want 2%% available, 50%% stalled", h, err)
+	}
+	top, err := s.TopProcess()
+	want := memguard.Top{Name: "python3", PID: 4242, Size: 40 << 30, Slice: "/user.slice"}
+	if err != nil || top != want {
+		t.Fatalf("TopProcess() = %+v, %v; want %+v", top, err, want)
+	}
+	if !slices.Equal(f.mem.topN, []int{1}) {
+		t.Fatalf("top processes asked for %v, want just the largest one", f.mem.topN)
+	}
+
+	f.mem.psiErr = procmem.ErrNoPressure
+	if _, err := s.Host(); !errors.Is(err, procmem.ErrNoPressure) {
+		t.Fatalf("no PSI: err = %v", err)
+	}
+}
+
+func TestGuardActuatorRoutesByKindAndMapsUnreachable(t *testing.T) {
+	t.Parallel()
+
+	f := newGuardFakes(guardT0())
+	a := guardActuator{containers: f.containers, units: f.units, cgroups: f.cgroups}
+	ctr := memguard.Service{Kind: memguard.KindContainer, Name: "web-app"}
+	unit := memguard.Service{Kind: memguard.KindUnit, Name: "backup.service"}
+
+	for _, err := range []error{
+		a.Restart(t.Context(), ctr), a.Stop(t.Context(), ctr), a.Restart(t.Context(), unit), a.Stop(t.Context(), unit),
+	} {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if got := f.containers.actions(); !slices.Equal(got, []string{"restart web-app", "stop web-app"}) {
+		t.Fatalf("docker calls = %v", got)
+	}
+	if got := f.units.calls; !slices.Equal(got, []string{"restart backup.service", "stop backup.service"}) {
+		t.Fatalf("systemctl calls = %v", got)
+	}
+
+	for _, tt := range []struct {
+		name        string
+		ctrErr      error
+		unitErr     error
+		unreachable bool
+	}{
+		{"docker client unavailable", fmt.Errorf("docker: %w", errDockerUnavailable), nil, true},
+		{"docker connection failed", fmt.Errorf("docker: %w", noDockerDaemon(t)), nil, true},
+		{"container error", errors.New("no such container"), nil, false},
+		{"no systemctl", nil, fmt.Errorf("systemctl restart backup.service: %w", exec.ErrNotFound), true},
+		{"no system bus", nil, errors.New("systemctl restart backup.service: exit status 1: Failed to connect to bus: No such file or directory"), true},
+		{"unit failed", nil, errors.New("systemctl restart backup.service: exit status 1: Job failed"), false},
+	} {
+		f.containers.err, f.units.err = tt.ctrErr, tt.unitErr
+		s, want := ctr, tt.ctrErr
+		if tt.unitErr != nil {
+			s, want = unit, tt.unitErr
+		}
+		err := a.Restart(t.Context(), s)
+		if !errors.Is(err, want) || errors.Is(err, memguard.ErrUnreachable) != tt.unreachable {
+			t.Errorf("%s: err = %v, want it wrapped, unreachable = %v", tt.name, err, tt.unreachable)
+		}
+	}
+}
+
+// noDockerDaemon is the error of the Engine API client when nothing listens
+// on its socket.
+func noDockerDaemon(t *testing.T) error {
+	t.Helper()
+
+	c, err := dockerclient.New(dockerclient.WithHost("unix://" + filepath.Join(t.TempDir(), "docker.sock")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	_, err = c.ContainerRestart(t.Context(), "web-app", dockerclient.ContainerRestartOptions{})
+	if !dockerclient.IsErrConnectionFailed(err) {
+		t.Fatalf("restart without a daemon: err = %v, want a connection failure", err)
+	}
+
+	return err
+}
+
+func TestGuardActuatorKillsOnlyServicesAndScopes(t *testing.T) {
+	t.Parallel()
+
+	f := newGuardFakes(guardT0())
+	a := guardActuator{containers: f.containers, units: f.units, cgroups: f.cgroups}
+	for _, p := range []string{"system.slice", "system.slice/app.slice", "", "system.slice/backup.service/..", "user.slice"} {
+		if err := a.Kill(p); err == nil {
+			t.Errorf("Kill(%q) must be refused", p)
+		}
+	}
+	for _, p := range []string{"system.slice/backup.service", "system.slice/docker-" + webAppID + ".scope"} {
+		if err := a.Kill(p); err != nil {
+			t.Errorf("Kill(%q) = %v", p, err)
+		}
+	}
+	want := []string{"system.slice/backup.service", "system.slice/docker-" + webAppID + ".scope"}
+	if !slices.Equal(f.cgroups.killed, want) {
+		t.Fatalf("killed %v, want only %v", f.cgroups.killed, want)
+	}
+}
+
+// kvStore is a runner.Store that keeps only the kv.
+type kvStore struct {
+	mu sync.Mutex
+	kv map[string]string
+}
+
+func (s *kvStore) Load(context.Context) (store.State, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return store.State{KV: maps.Clone(s.kv)}, nil
+}
+
+func (s *kvStore) Checkpoint(_ context.Context, dirty store.State, _ []store.Alert, _ []store.SampleRow) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if s.kv == nil {
+		s.kv = map[string]string{}
+	}
+	maps.Copy(s.kv, dirty.KV)
+
+	return nil
+}
+
+func (*kvStore) Degraded() bool { return false }
+
+func (s *kvStore) value(key string) string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	return s.kv[key]
+}
+
+// guardDaemon runs one daemon's runner and guard over st and f until stopped.
+func guardDaemon(t *testing.T, st runner.Store, f *guardFakes) (*runner.Runner, *fxtest.Lifecycle) {
+	t.Helper()
+
+	g := newMemoryGuard(testMemorySection(hcfg.InterveneAct), f.host(), zap.NewNop())
+	r := runner.New(runner.Options{
+		Store: st, Persisters: []runner.Persister{g.persister()}, Concurrency: 1,
+		Telegram: &recordingSender{}, Mode: notify.ModeTelegram, Logger: zap.NewNop(),
+	})
+	lc := fxtest.NewLifecycle(t)
+	registerStart(lc, r.Load, startLoadTimeout, r.CheckerError, nil)
+	g.register(lc, r)
+	lc.RequireStart()
+	// Danger only once Docker named the containers, so web-app is watched.
+	waitNamed(t, f)
+	f.mem.setDanger(true)
+
+	return r, lc
+}
+
+func TestGuardStateRoundTripsThroughTheStore(t *testing.T) {
+	t.Parallel()
+
+	st := &kvStore{}
+	first := newGuardFakes(guardT0())
+	r, lc := guardDaemon(t, st, first)
+	waitFor(t, "the restart", func() bool { return len(first.containers.actions()) > 0 })
+	waitFor(t, "the checkpoint of the record", func() bool {
+		if err := r.Do(t.Context()); err != nil {
+			t.Fatal(err)
+		}
+
+		return strings.Contains(st.value(memoryGuardKey), `"name":"web-app"`)
+	})
+	lc.RequireStop()
+	if got := first.containers.actions(); !slices.Equal(got, []string{"restart web-app"}) {
+		t.Fatalf("first daemon: docker calls = %v", got)
+	}
+
+	// The restarted daemon remembers the restart: the same runaway within
+	// repeat_window is stopped, not restarted again.
+	second := newGuardFakes(guardT0().Add(3 * time.Hour))
+	_, lc = guardDaemon(t, st, second)
+	waitFor(t, "the second action", func() bool { return len(second.containers.actions()) > 0 })
+	lc.RequireStop()
+	if got := second.containers.actions(); !slices.Equal(got, []string{"stop web-app"}) {
+		t.Fatalf("second daemon: docker calls = %v, want the restored record to make it a stop", got)
+	}
+}
+
+func TestGuardStateKV(t *testing.T) {
+	t.Parallel()
+
+	s := &guardState{log: zap.NewNop()}
+	if err := s.Restore(""); err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.Export(); err != nil || got != "[]" {
+		t.Fatalf("empty Export() = %q, %v", got, err)
+	}
+	rec := []memguard.Record{{
+		ServiceID: "container:web-app", Name: "web-app", Action: memguard.ActionRestart, At: guardT0(), Before: 1 << 30,
+		Mode: memguard.ModeAct,
+	}}
+	s.Save(t.Context(), rec)
+	data, err := s.Export()
+	if err != nil {
+		t.Fatal(err)
+	}
+	other := &guardState{log: zap.NewNop()}
+	if err := other.Restore(data); err != nil {
+		t.Fatal(err)
+	}
+	if got := other.restored(); !reflect.DeepEqual(got, rec) {
+		t.Fatalf("restored %+v, want %+v", got, rec)
+	}
+	if err := other.Restore("{"); err == nil {
+		t.Fatal("a corrupt value must fail the restore")
+	}
+}
+
+func TestMemoryGuardActsWhileMaintenanceIsHeld(t *testing.T) {
+	t.Parallel()
+
+	pub := &fakePublisher{}
+	f := newGuardFakes(guardT0())
+	lc := fxtest.NewLifecycle(t)
+	p := guardHealthParams(t, pub, lc, testMemorySection(hcfg.InterveneAct), f)
+	lock := filepath.Join(t.TempDir(), "maintenance.lock")
+	p.Setup.Config.General.MaintenanceLock = lock
+	held, err := os.Create(lock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer held.Close()
+	if err := syscall.Flock(int(held.Fd()), syscall.LOCK_EX); err != nil {
+		t.Fatal(err)
+	}
+
+	out := newHealth(p)
+	r, ok := out.Workers[0].(*runner.Runner)
+	if !ok {
+		t.Fatalf("worker = %T", out.Workers[0])
+	}
+	lc.RequireStart()
+	if err := r.Do(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if r.Snapshot().Quiet == "" {
+		t.Fatal("the maintenance lock is held: want a quiet window")
+	}
+	waitNamed(t, f)
+	f.mem.setDanger(true)
+	waitFor(t, "the restart", func() bool { return len(f.containers.actions()) > 0 })
+	waitFor(t, "the restart message", func() bool {
+		return containing(pub.messages(), "memory: restarted container web-app")
+	})
+	lc.RequireStop()
+}
+
+func TestMemoryGuardFallsBackToReportWithoutItsOwnCgroup(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name    string
+		self    string
+		selfErr error
+	}{
+		{"root cgroup", "", nil},
+		{"unreadable", "", errors.New("read self cgroup: permission denied")},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			pub := &fakePublisher{}
+			f := newGuardFakes(guardT0())
+			f.cgroups.self, f.cgroups.selfErr = tt.self, tt.selfErr
+			lc := fxtest.NewLifecycle(t)
+			newHealth(guardHealthParams(t, pub, lc, testMemorySection(hcfg.InterveneAct), f))
+			lc.RequireStart()
+			waitNamed(t, f)
+			f.mem.setDanger(true)
+			waitFor(t, "the preview", func() bool {
+				return containing(pub.messages(), "memory: would restart container web-app")
+			})
+			lc.RequireStop()
+
+			if got := f.containers.actions(); len(got) != 0 {
+				t.Fatalf("docker calls = %v, want none in report mode", got)
+			}
+			if !containing(pub.messages(), "CHECKER ERROR: memory: cannot tell tgshd") ||
+				!containing(pub.messages(), "own cgroup") ||
+				!containing(pub.messages(), "intervene is report") {
+				t.Fatalf("messages = %v, want the fallback announced", pub.messages())
+			}
+		})
+	}
+}
+
+func TestMemoryGuardWithoutCgroupV2RaisesAndDoesNotStart(t *testing.T) {
+	t.Parallel()
+
+	pub := &fakePublisher{}
+	f := newGuardFakes(guardT0())
+	f.cgroups.svcErr = errors.New("read system.slice: no such file or directory")
+	lc := fxtest.NewLifecycle(t)
+	newHealth(guardHealthParams(t, pub, lc, testMemorySection(hcfg.InterveneAct), f))
+	lc.RequireStart()
+	waitFor(t, "the checker error", func() bool { return containing(pub.messages(), "cgroup v2") })
+	lc.RequireStop()
+
+	if n := f.mem.hostReads(); n != 0 {
+		t.Fatalf("host reads = %d, want no guard loop", n)
+	}
+}
+
+func TestMemoryGuardWithoutPressureRaisesAndDoesNotStart(t *testing.T) {
+	t.Parallel()
+
+	pub := &fakePublisher{}
+	f := newGuardFakes(guardT0())
+	f.mem.psiErr = procmem.ErrNoPressure
+	lc := fxtest.NewLifecycle(t)
+	newHealth(guardHealthParams(t, pub, lc, testMemorySection(hcfg.InterveneAct), f))
+	lc.RequireStart()
+	waitFor(t, "the checker error", func() bool { return containing(pub.messages(), "CHECKER ERROR: memory: ") })
+	time.Sleep(20 * time.Millisecond)
+	lc.RequireStop()
+
+	if n := f.mem.hostReads(); n != 1 {
+		t.Fatalf("host reads = %d, want only the start probe", n)
+	}
+}
+
+func TestMemoryGuardRaisesEachShieldFailure(t *testing.T) {
+	t.Parallel()
+
+	pub := &fakePublisher{}
+	f := newGuardFakes(guardT0())
+	f.shield.err = errors.Join(
+		errors.New("set oom_score_adj: permission denied"),
+		errors.New("mlockall: operation not permitted"),
+	)
+	lc := fxtest.NewLifecycle(t)
+	newHealth(guardHealthParams(t, pub, lc, testMemorySection(hcfg.InterveneAct), f))
+	lc.RequireStart()
+	waitFor(t, "both checker errors", func() bool {
+		msgs := pub.messages()
+
+		return containing(msgs, "oom_score_adj") && containing(msgs, "mlockall")
+	})
+	waitFor(t, "the guard loop", func() bool { return f.mem.hostReads() > 1 })
+	lc.RequireStop()
+	for _, m := range pub.messages() {
+		if strings.Contains(m, "oom_score_adj") && strings.Contains(m, "mlockall") {
+			t.Fatalf("message %q: want one checker error per failure", m)
+		}
+	}
+}
+
+// blockingRunner is a guardRunner whose checker errors hang until released,
+// as over a network that is down.
+type blockingRunner struct {
+	release chan struct{}
+	mu      sync.Mutex
+	raised  []string
+}
+
+func (b *blockingRunner) PushMode(context.Context, string, string, string, string, health.Mode) {}
+
+func (b *blockingRunner) CheckerError(key, _ string) {
+	<-b.release
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	b.raised = append(b.raised, key)
+}
+
+func (b *blockingRunner) keys() []string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	return slices.Clone(b.raised)
+}
+
+func TestMemoryGuardStartsWhileCheckerErrorsHang(t *testing.T) {
+	t.Parallel()
+
+	f := newGuardFakes(guardT0())
+	f.shield.err = errors.Join(
+		errors.New("set oom_score_adj: permission denied"),
+		errors.New("mlockall: operation not permitted"),
+	)
+	f.cgroups.self = ""
+	g := newMemoryGuard(testMemorySection(hcfg.InterveneAct), f.host(), zap.NewNop())
+	r := &blockingRunner{release: make(chan struct{})}
+	lc := fxtest.NewLifecycle(t)
+	g.register(lc, r)
+	lc.RequireStart()
+
+	waitFor(t, "the guard loop while the checker errors hang", func() bool { return f.mem.hostReads() > 3 })
+	close(r.release)
+	want := []string{guardShieldKey + "/1", guardShieldKey + "/2", guardSelfKey}
+	waitFor(t, "the checker errors", func() bool { return slices.Equal(r.keys(), want) })
+	lc.RequireStop()
 }
