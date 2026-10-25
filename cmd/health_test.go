@@ -1096,7 +1096,7 @@ kernel:
 	probeSet, _ := buildModemProbeCheck(testModemProbeConfig(), nil, lookupPhone, time.Now)
 	paused := map[string]bool{}
 	for _, set := range []checkSet{
-		networkChecks(hs, sysfs.NewDefault(), logger), disksChecks(hs, logger), tempsChecks(hs, newOpenState()), kernelChecks(hs, logger),
+		networkChecks(hs, sysfs.NewDefault(), logger), disksChecks(hs, logger), tempsChecks(hs, newOpenState()), kernelChecks(hs, newContainerNames(), logger),
 		probeSet,
 	} {
 		for _, c := range set.Checks {

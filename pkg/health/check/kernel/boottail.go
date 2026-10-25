@@ -104,9 +104,18 @@ func tailAfter(recs []Record, cur Cursor) []Record {
 
 // tailReadings reports every class the kernel records match, one Event per class.
 func (c *Check) tailReadings(recs []Record) []health.Reading {
-	var found []entry
+	var (
+		found []entry
+		kills []oomKill
+		pair  oomPairer
+	)
 	for _, r := range recs {
 		if r.Facility != 0 {
+			continue
+		}
+		if kill, paired := pair.feed(r.Message); paired {
+			kills = append(kills, kill)
+
 			continue
 		}
 		if key, ok := classify(c.classes, r); ok {
@@ -123,5 +132,5 @@ func (c *Check) tailReadings(recs []Record) []health.Reading {
 		}
 	}
 
-	return out
+	return append(out, oomReadings(c.services, kills, "Kernel (previous boot)")...)
 }

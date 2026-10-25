@@ -86,7 +86,7 @@ independently. No new dependency may be added (plan Technical Context).
 
 **Independent Test**: quickstart.md "Kernel" table.
 
-- [ ] T017 [US4] Kernel `kernel/oom` class in pkg/health/check/kernel/kernel.go (and a new pkg/health/check/kernel/oom.go): pair the `oom-kill:constraint=…,task_memcg=…,task=…,pid=…` record with the following `Out of memory: Killed process` / `Memory cgroup out of memory: Killed process` record; one event per kill with the texts of contracts/messages.md "Kernel" (`CONSTRAINT_MEMCG` ⇒ "hit its memory limit"); service resolved through a `ServiceResolver` interface; at most 5 per run then "… and N more"; previous-boot records prefixed as in 002; resolver adapter over the Docker name map in cmd/health_hardware.go (tests in pkg/health/check/kernel/oom_test.go with synthetic kmsg and journal lines: US4-1, US4-2, US4-3, unpaired lines, burst cap; SC-007) (FR-019, R13)
+- [x] T017 [US4] Kernel `kernel/oom` class in pkg/health/check/kernel/kernel.go (and a new pkg/health/check/kernel/oom.go): pair the `oom-kill:constraint=…,task_memcg=…,task=…,pid=…` record with the following `Out of memory: Killed process` / `Memory cgroup out of memory: Killed process` record; one event per kill with the texts of contracts/messages.md "Kernel" (`CONSTRAINT_MEMCG` ⇒ "hit its memory limit"); service resolved through a `ServiceResolver` interface; at most 5 per run then "… and N more"; previous-boot records prefixed as in 002; resolver adapter over the Docker name map in cmd/health_hardware.go (tests in pkg/health/check/kernel/oom_test.go with synthetic kmsg and journal lines: US4-1, US4-2, US4-3, unpaired lines, burst cap; SC-007) (FR-019, R13)
 
 ---
 

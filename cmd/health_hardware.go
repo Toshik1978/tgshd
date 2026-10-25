@@ -264,18 +264,20 @@ func (s nvidiaSource) GPUs(ctx context.Context) ([]temps.GPU, error) {
 }
 
 // kernelChecks provides the kernel check (/dev/kmsg and EDAC) when its
-// section is present. Only the daemon check reads the previous boot's journal tail.
-func kernelChecks(hs *healthSetup, logger *zap.Logger) checkSet {
+// section is present. Out-of-memory victims are named through names, the container
+// id→name map the memory check refreshes; it stays empty when that section is not
+// configured, and containers then show by their short id. Only the daemon check reads the previous boot's journal tail.
+func kernelChecks(hs *healthSetup, names *containerNames, logger *zap.Logger) checkSet {
 	if hs.Config == nil || hs.Config.Kernel == nil {
 		return checkSet{}
 	}
 
 	if hs.OneShot {
-		return buildKernelOneShot(hs.Config.Kernel, kmsg.NewDefault(), edac.NewDefault(), time.Now)
+		return buildKernelOneShot(hs.Config.Kernel, kmsg.NewDefault(), edac.NewDefault(), time.Now, names.name)
 	}
 
 	return buildKernelCheck(hs.Config.Kernel, kmsg.NewDefault(), edac.NewDefault(), time.Now,
-		journal.NewDefault(), logger)
+		journal.NewDefault(), logger, names.name)
 }
 
 // kmsgSnapshotter reads the kernel buffer once, without waiting for more.
@@ -290,8 +292,11 @@ type kmsgSnapshotter interface {
 // EDAC is judged against the stored counters. Nothing is saved and no
 // background reader runs. An unreadable /dev/kmsg is reported as the run's
 // error next to the EDAC readings.
-func buildKernelOneShot(k *hcfg.Kernel, log kmsgSnapshotter, counters edacReader, now func() time.Time) checkSet {
-	chk := kernel.New(log, edacSource{reader: counters}, health.NewRateMarks(), now, kernel.WithReplay())
+func buildKernelOneShot(
+	k *hcfg.Kernel, log kmsgSnapshotter, counters edacReader, now func() time.Time, names kernel.ContainerLookup,
+) checkSet {
+	chk := kernel.New(log, edacSource{reader: counters}, health.NewRateMarks(), now,
+		kernel.WithReplay(), kernel.WithServices(kernel.CgroupResolver(names)))
 	gate := &kernelGate{persister: runner.KVPersister{Key: kernelStateKey, State: chk}}
 	run := func(ctx context.Context) health.CheckResult {
 		readErr := log.Snapshot(ctx, func(r kmsg.Record) { chk.Consume(kernelRecord(r)) })
@@ -328,12 +333,12 @@ type edacReader interface {
 // journal tail; a missing journalctl is reported by the check, not fatal.
 func buildKernelCheck(
 	k *hcfg.Kernel, log kmsgReader, counters edacReader, now func() time.Time,
-	jr journalReader, logger *zap.Logger,
+	jr journalReader, logger *zap.Logger, names kernel.ContainerLookup,
 ) checkSet {
 	// The check's own marks only back up Episode.LastStillAt, which is
 	// persisted in kernel.state and already spaces "still happening" messages
 	// across restarts; the runner's stored marks are not needed.
-	opts := []kernel.Option{kernel.WithLogger(logger)}
+	opts := []kernel.Option{kernel.WithLogger(logger), kernel.WithServices(kernel.CgroupResolver(names))}
 	if jr != nil {
 		opts = append(opts, kernel.WithJournal(journalSource{reader: jr}))
 	}

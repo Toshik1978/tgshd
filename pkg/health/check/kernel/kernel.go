@@ -168,6 +168,7 @@ type entry struct {
 	seq uint64
 	key string
 	msg string
+	oom *oomKill // set for an out-of-memory kill, which is reported on its own
 }
 
 type pending struct {
@@ -184,7 +185,8 @@ type Check struct {
 	marks   *health.RateMarks
 	now     func() time.Time
 
-	classes []class
+	classes  []class
+	services ServiceResolver
 
 	timeout time.Duration
 	replay  bool
@@ -192,10 +194,11 @@ type Check struct {
 	mu      sync.Mutex
 	st      state
 	inbox   []entry // matching records consumed since the last Run
-	hasSeen bool    // any record consumed in this process
-	maxSeq  uint64  // highest Seq consumed, not yet committed to st.Cursor
-	maxUsec uint64  // time since boot of the record at maxSeq, in microseconds
-	maxMsg  string  // message of the record at maxSeq
+	oomPair oomPairer
+	hasSeen bool   // any record consumed in this process
+	maxSeq  uint64 // highest Seq consumed, not yet committed to st.Cursor
+	maxUsec uint64 // time since boot of the record at maxSeq, in microseconds
+	maxMsg  string // message of the record at maxSeq
 	// firstSeq is the Seq of the first record consumed in this process; firstPending
 	// is true until Run has compared it with the stored cursor.
 	firstSeq     uint64
@@ -228,6 +231,16 @@ func WithJournal(j JournalSource) Option {
 	return func(c *Check) { c.journal = j }
 }
 
+// WithServices sets the resolver that names the service an out-of-memory victim ran in
+// (default: CgroupResolver without container names). A nil resolver keeps the default.
+func WithServices(r ServiceResolver) Option {
+	return func(c *Check) {
+		if r != nil {
+			c.services = r
+		}
+	}
+}
+
 // WithLogger sets the logger (default: no logging). A nil logger keeps the default.
 func WithLogger(log *zap.Logger) Option {
 	return func(c *Check) {
@@ -243,14 +256,15 @@ func New(
 	boot BootSource, edac EDACSource, marks *health.RateMarks, now func() time.Time, opts ...Option,
 ) *Check {
 	c := &Check{
-		boot:    boot,
-		edac:    edac,
-		marks:   marks,
-		now:     now,
-		classes: classTable(),
-		timeout: sourceTimeout,
-		log:     zap.NewNop(),
-		st:      newState(),
+		boot:     boot,
+		edac:     edac,
+		marks:    marks,
+		now:      now,
+		classes:  classTable(),
+		services: CgroupResolver(nil),
+		timeout:  sourceTimeout,
+		log:      zap.NewNop(),
+		st:       newState(),
 	}
 	for _, o := range opts {
 		o(c)
@@ -287,11 +301,20 @@ func (c *Check) Consume(r Record) {
 		return
 	}
 
-	key, ok := classify(c.classes, r)
+	var (
+		key string
+		ok  bool
+		oom *oomKill
+	)
+	if kill, paired := c.oomPair.feed(r.Message); paired {
+		key, ok, oom = oomKey, true, &kill
+	} else {
+		key, ok = classify(c.classes, r)
+	}
 	switch {
 	case !ok:
 	case len(c.inbox) < maxInbox:
-		c.inbox = append(c.inbox, entry{seq: r.Seq, key: key, msg: r.Message})
+		c.inbox = append(c.inbox, entry{seq: r.Seq, key: key, msg: r.Message, oom: oom})
 	default:
 		c.lost++
 	}
@@ -456,9 +479,15 @@ func (c *Check) kernelReadings(now time.Time) []health.Reading {
 
 	cur := c.st.Cursor
 	c.countLostWhileDown(cur)
+	var kills []oomKill
 	agg := make(map[string]*pending)
 	for _, e := range inbox {
 		if cur.Seen && e.seq <= cur.Seq {
+			continue
+		}
+		if e.oom != nil {
+			kills = append(kills, *e.oom)
+
 			continue
 		}
 		p := agg[e.key]
@@ -471,7 +500,7 @@ func (c *Check) kernelReadings(now time.Time) []health.Reading {
 	}
 	c.advanceCursor(cur)
 
-	return c.drainRecords(now, agg)
+	return append(c.drainRecords(now, agg), oomReadings(c.services, kills, "Kernel")...)
 }
 
 // advanceCursor moves the stored cursor of this boot to the highest record consumed, unless
@@ -526,7 +555,18 @@ func aggregate(entries []entry) map[string]*pending {
 // replayReadings reports every class the records match, once each, leaving the
 // cursor and the episodes alone.
 func (c *Check) replayReadings(inbox []entry) []health.Reading {
-	agg := aggregate(inbox)
+	var (
+		kills []oomKill
+		rest  []entry
+	)
+	for _, e := range inbox {
+		if e.oom != nil {
+			kills = append(kills, *e.oom)
+		} else {
+			rest = append(rest, e)
+		}
+	}
+	agg := aggregate(rest)
 
 	var out []health.Reading
 	for _, cl := range c.classes {
@@ -536,7 +576,7 @@ func (c *Check) replayReadings(inbox []entry) []health.Reading {
 		}
 	}
 
-	return out
+	return append(out, oomReadings(c.services, kills, "Kernel")...)
 }
 
 func (c *Check) drainRecords(now time.Time, agg map[string]*pending) []health.Reading {

@@ -88,7 +88,7 @@ func TestHardwareChecksFollowTheConfig(t *testing.T) {
 
 	for _, hs := range []*healthSetup{{}, {Config: &hcfg.Config{}}} {
 		for name, set := range map[string]checkSet{
-			"disks": disksChecks(hs, zap.NewNop()), "temps": tempsChecks(hs, newOpenState()), "kernel": kernelChecks(hs, zap.NewNop()),
+			"disks": disksChecks(hs, zap.NewNop()), "temps": tempsChecks(hs, newOpenState()), "kernel": kernelChecks(hs, newContainerNames(), zap.NewNop()),
 		} {
 			if len(set.Checks)+len(set.Errors)+len(set.Persisters)+len(set.Background) != 0 || set.Drives != nil {
 				t.Fatalf("%s without a section: %+v", name, set)
@@ -107,7 +107,8 @@ func TestHardwareChecksFollowTheConfig(t *testing.T) {
 		len(set.Persisters) != 1 {
 		t.Fatalf("temperatures section: %+v", set)
 	}
-	if set := kernelChecks(hs, zap.NewNop()); len(set.Checks) != 1 || set.Checks[0].Name != kernelCheckName ||
+	set := kernelChecks(hs, newContainerNames(), zap.NewNop())
+	if len(set.Checks) != 1 || set.Checks[0].Name != kernelCheckName ||
 		len(set.Persisters) != 1 || len(set.Background) != 1 {
 		t.Fatalf("kernel section: %+v", set)
 	}
@@ -404,6 +405,47 @@ func (f *fakeKmsg) Run(ctx context.Context, fn func(kmsg.Record)) error {
 	return nil
 }
 
+func TestBuildKernelCheckNamesOOMVictims(t *testing.T) {
+	t.Parallel()
+
+	const id = "0123456789abcdef0123456789abcdef"
+	names := newContainerNames()
+	m := map[string]string{id: "web-app"}
+	names.ids.Store(&m)
+
+	log := &fakeKmsg{records: []kmsg.Record{
+		{Level: 6, Seq: 7, Message: "oom-kill:constraint=CONSTRAINT_NONE,nodemask=(null),cpuset=/,mems_allowed=0," +
+			"global_oom,task_memcg=/system.slice/docker-" + id + ".scope,task=python3,pid=4242,uid=0"},
+		{Level: 3, Seq: 8, Message: "Out of memory: Killed process 4242 (python3) total-vm:2000kB, " +
+			"anon-rss:2097152kB, file-rss:0kB, shmem-rss:0kB, UID:0 pgtables:8kB oom_score_adj:0"},
+	}}
+	now := func() time.Time { return time.Date(2026, 1, 2, 3, 0, 0, 0, time.UTC) }
+	set := buildKernelCheck(&hcfg.Kernel{}, log, fakeEDAC{}, now, nil, zap.NewNop(), names.name)
+
+	stored := `{"cursor":{"boot_id":"00000000-0000-4000-8000-000000000001","seq":6,"seen":true}}`
+	if err := set.Persisters[0].Restore(store.State{KV: map[string]string{kernelStateKey: stored}}); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan error, 1)
+	go func() { done <- set.Background[0].Run(ctx) }()
+
+	var res health.CheckResult
+	for range 100 {
+		if res = set.Checks[0].Run(t.Context()); len(res.Readings) > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	cancel()
+	<-done
+
+	want := "Kernel: out of memory, killed python3 (pid 4242) in container web-app, 2 GB"
+	if len(res.Readings) != 1 || res.Readings[0].Text != want {
+		t.Fatalf("readings = %+v, want %q", res.Readings, want)
+	}
+}
+
 func TestBuildKernelCheck(t *testing.T) {
 	t.Parallel()
 
@@ -412,7 +454,7 @@ func TestBuildKernelCheck(t *testing.T) {
 		records: []kmsg.Record{{Level: 3, Seq: 7, Message: "Buffer I/O error on dev sda, logical block 0"}},
 	}
 	now := func() time.Time { return time.Date(2026, 1, 2, 3, 0, 0, 0, time.UTC) }
-	set := buildKernelCheck(k, log, fakeEDAC{}, now, nil, zap.NewNop())
+	set := buildKernelCheck(k, log, fakeEDAC{}, now, nil, zap.NewNop(), nil)
 	chk := set.Checks[0]
 	if chk.Name != "kernel" || chk.Interval != time.Minute || len(set.Background) != 1 ||
 		set.Background[0].Key != "kernel/kmsg/read" {
@@ -538,7 +580,7 @@ func TestKernelCheckWaitsForItsStoredState(t *testing.T) {
 		delivered: make(chan struct{}),
 	}
 	now := func() time.Time { return time.Date(2026, 1, 2, 3, 0, 0, 0, time.UTC) }
-	set := buildKernelCheck(k, log, fakeEDAC{}, now, nil, zap.NewNop())
+	set := buildKernelCheck(k, log, fakeEDAC{}, now, nil, zap.NewNop(), nil)
 	chk := set.Checks[0]
 
 	// The reader may start before the stored state is restored (a slow store
@@ -568,7 +610,7 @@ func TestKernelCheckWaitsForItsStoredState(t *testing.T) {
 func TestKernelCheckRunsAfterAFailedRestore(t *testing.T) {
 	t.Parallel()
 
-	set := buildKernelCheck(&hcfg.Kernel{}, &fakeKmsg{}, fakeEDAC{}, time.Now, nil, zap.NewNop())
+	set := buildKernelCheck(&hcfg.Kernel{}, &fakeKmsg{}, fakeEDAC{}, time.Now, nil, zap.NewNop(), nil)
 	err := set.Persisters[0].Restore(store.State{KV: map[string]string{kernelStateKey: "{not json"}})
 	if err == nil {
 		t.Fatal("a malformed stored state must be reported")
@@ -599,7 +641,7 @@ func TestBuildKernelOneShotPrintsTheCurrentMatchesWithoutBackgroundOrSaving(t *t
 	log := &fakeSnapshot{
 		records: []kmsg.Record{{Level: 3, Seq: 7, Message: "Buffer I/O error on dev sda, logical block 0"}},
 	}
-	set := buildKernelOneShot(&hcfg.Kernel{}, log, fakeEDAC{}, time.Now)
+	set := buildKernelOneShot(&hcfg.Kernel{}, log, fakeEDAC{}, time.Now, nil)
 	if len(set.Background) != 0 || len(set.Checks) != 1 {
 		t.Fatalf("set = %+v", set)
 	}
@@ -617,7 +659,7 @@ func TestBuildKernelOneShotUnreadableKmsgReportsTheError(t *testing.T) {
 	t.Parallel()
 
 	denied := errors.New("open kmsg: permission denied")
-	set := buildKernelOneShot(&hcfg.Kernel{}, &fakeSnapshot{snapErr: denied}, fakeEDAC{}, time.Now)
+	set := buildKernelOneShot(&hcfg.Kernel{}, &fakeSnapshot{snapErr: denied}, fakeEDAC{}, time.Now, nil)
 	if err := set.Persisters[0].Restore(store.State{}); err != nil {
 		t.Fatal(err)
 	}
@@ -630,7 +672,7 @@ func TestKernelChecksOneShotHasNoBackgroundReader(t *testing.T) {
 	t.Parallel()
 
 	hs := &healthSetup{Config: &hcfg.Config{Kernel: &hcfg.Kernel{}}, OneShot: true}
-	if set := kernelChecks(hs, zap.NewNop()); len(set.Checks) != 1 || len(set.Background) != 0 {
+	if set := kernelChecks(hs, newContainerNames(), zap.NewNop()); len(set.Checks) != 1 || len(set.Background) != 0 {
 		t.Fatalf("one-shot kernel set: %+v", set)
 	}
 }
@@ -763,7 +805,7 @@ func TestKernelCheckJournalWiring(t *testing.T) {
 			t.Parallel()
 
 			fj := &fakeJournal{}
-			set := buildKernelCheck(&hcfg.Kernel{}, &fakeKmsg{}, fakeEDAC{}, time.Now, tt.reader(fj), zap.NewNop())
+			set := buildKernelCheck(&hcfg.Kernel{}, &fakeKmsg{}, fakeEDAC{}, time.Now, tt.reader(fj), zap.NewNop(), nil)
 			state := store.State{KV: map[string]string{kernelStateKey: stored}}
 			if err := set.Persisters[0].Restore(state); err != nil {
 				t.Fatal(err)
