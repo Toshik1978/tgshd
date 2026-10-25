@@ -84,9 +84,11 @@ group, gated behind an env-var check in `main()`.
 | `pkg/health/notify` | Alert and checker-error delivery (Telegram, SMS, email) |
 | `pkg/health/runner` | 30 s tick: heartbeat, scheduling, bounded runs, fix actions, persistence, drive retire |
 | `pkg/health/report` | Telegram reply and weekly-summary text (`/status`, `/history`, `/temp`, `/disks`, summary) |
+| `pkg/health/memguard` | Pure memory-guard decision loop: danger detection, culprit choice, restart/stop/kill actions, episode state (no I/O; actuator, reporter and clock are interfaces) |
+| `pkg/health/check/memory` | `memory` check: available/swap/pressure, per-service growth, container memory-limit audit |
 | `pkg/health/store` | SQLite state and history store that survives restarts |
-| `pkg/health/check/*` | One pure package per check type (`network`, `ups`, `disks`, `temps`, `kernel`, `containers`, `httpcheck`, `freshness`, `command`, `modemprobe`); I/O behind small source interfaces |
-| `pkg/host/*` | Thin host adapters behind the check sources: `smartctl`, `nvidia`, `hwmon`, `edac`, `kmsg`, `sysfs`, `docker`, `execprobe`, `journal` (`journalctl`, previous-boot kernel tail), `httpstamp` (freshness stamp over HTTP), `lockfile` (heartbeat and state lock) |
+| `pkg/health/check/*` | One pure package per check type (`network`, `ups`, `disks`, `temps`, `kernel`, `memory`, `containers`, `httpcheck`, `freshness`, `command`, `modemprobe`); I/O behind small source interfaces |
+| `pkg/host/*` | Thin host adapters behind the check sources: `smartctl`, `nvidia`, `hwmon`, `edac`, `kmsg`, `sysfs`, `docker`, `execprobe`, `journal` (`journalctl`, previous-boot kernel tail), `procmem` (`/proc` memory, pressure, per-process RSS), `cgroupmem` (cgroup v2 service memory, `cgroup.kill`), `systemctl` (restart/stop units), `httpstamp` (freshness stamp over HTTP), `lockfile` (heartbeat and state lock) |
 | `pkg/mail` | Plain-text email through an SMTP relay |
 | `pkg/doh` | Minimal RFC 8484 DNS-over-HTTPS resolver (used by the `http` check) |
 

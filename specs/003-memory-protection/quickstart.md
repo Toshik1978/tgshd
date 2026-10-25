@@ -58,3 +58,18 @@ with `task test` (or `task test:coverage` for the gate). Messages must match
    message arrives. Repeat once more inside 6 h: it is stopped and an SMS arrives.
 4. While the host is in danger, confirm `grep VmLck /proc/$(pidof tgshd)/status` is non-zero and
    `cat /proc/$(pidof tgshd)/oom_score_adj` is `-1000`.
+
+## Validation record (T020, 2026-10-25)
+
+Automated gates, run on `main` at the end of the feature:
+
+| Gate | Command | Result |
+|---|---|---|
+| Lint | `task lint` | 0 issues |
+| Tests and coverage | `task test:coverage` | all packages pass under the race detector; measured total over the gate scope 97.3 % (floor 80 %) |
+| Static build | `CGO_ENABLED=0 task build` | succeeds, `bin/tgshd` produced |
+| Private-data scan | `git diff e9d10e3..HEAD` (excluding `.beads/` and `go.sum`) searched for IPv4 addresses, the operator's private host and service names (list kept outside the repo), personal names and email addresses | no hits; the only match of the author handle is the public module path `github.com/Toshik1978/tgshd` |
+
+Host validation (SC-001, SC-002): **pending, left to the operator.** It must be run by hand on a
+test host (never production) following the steps above; it was deliberately not run during
+implementation because it drives real memory pressure.

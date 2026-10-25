@@ -1031,3 +1031,42 @@ func TestOneShotOpenStateWarnsWhenTheStoreCannotBeLoaded(t *testing.T) {
 		t.Fatalf("warnings = %d, want 1: %q", got, &stderr)
 	}
 }
+
+// TestRunCheckOnceReportsTheGuardMode: with a memory section, check --once
+// prints the configured guard mode before the summary; it only reports it and
+// has no guard to start. Without the section there is no guard line.
+func TestRunCheckOnceReportsTheGuardMode(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		body string
+		want string
+	}{
+		{"act", "memory:\n  guard:\n    intervene: act\n", "GUARD memory/guard: act\n"},
+		{"report by default", "memory: {}\n", "GUARD memory/guard: report\n"},
+		{"off", "memory:\n  guard:\n    intervene: off\n", "GUARD memory/guard: off\n"},
+		{"no memory section", "", ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			path, _ := writeHealthConfig(t, tt.body)
+			cio, stdout, stderr := testIO(nil, time.Unix(0, 0))
+			cio.checkProviders = fakeCheckProviders(health.Check{
+				Name: "fake", Interval: time.Minute,
+				Run: func(context.Context) health.CheckResult { return health.CheckResult{} },
+			})
+
+			if code := runCheckOnce(t.Context(), &config{HealthConfig: path}, cio); code != exitOK {
+				t.Fatalf("code %d, stderr %q", code, stderr)
+			}
+			want := tt.want +
+				"SUMMARY 1 checks, 0 readings (0 good, 0 bad, 0 unknown), 0 samples, 0 errors\n"
+			if got := stdout.String(); got != want {
+				t.Fatalf("stdout:\n%s\nwant:\n%s", got, want)
+			}
+		})
+	}
+}

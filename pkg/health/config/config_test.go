@@ -3,6 +3,7 @@ package config_test
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -1193,5 +1194,31 @@ func TestMemoryErrors(t *testing.T) {
 	cfg, errs := config.Parse([]byte("memory: {bogus: 1}\nups:\n"), "health.yaml")
 	if len(errs) != 1 || cfg.UPS == nil {
 		t.Errorf("an invalid memory section must not disable the others: %+v", errs)
+	}
+}
+
+// TestExampleConfigDocumentsMemory: the sample carries an active memory
+// section whose values are the shipped defaults, so a copy of it behaves like
+// an absent section except that it is visible and tunable.
+func TestExampleConfigDocumentsMemory(t *testing.T) {
+	cfg, errs := config.Load(filepath.Join("..", "..", "..", "config", "health.example.yaml"))
+	if len(errs) != 0 {
+		t.Fatalf("unexpected errors: %+v", errs)
+	}
+
+	m := cfg.Memory
+	if m == nil {
+		t.Fatal("example config has no memory section")
+	}
+
+	want := mustParse(t, "memory:\n").Memory
+	if m.Guard.Intervene != config.InterveneReport {
+		t.Errorf("example intervene = %q, want report", m.Guard.Intervene)
+	}
+
+	m.AuditExclude, m.Guard.NeverTouch = nil, nil
+	want.AuditExclude, want.Guard.NeverTouch = nil, nil
+	if !reflect.DeepEqual(m, want) {
+		t.Errorf("example memory values differ from the defaults:\n got %+v\nwant %+v", m, want)
 	}
 }

@@ -166,6 +166,7 @@ is set.
 | `disks` | SMART health of NVMe, SATA and SAS drives (smartmontools) | `15m` / `0` | `wear_percent` (`80`), `selftest_max_age` (`40d` since a passed self-test was last seen), `spare_floor_percent` (`20`, NVMe), `force_read_after` (`24h`, at least `1h`), `include_serials` (USB and other hot-pluggable drives are skipped unless listed), `exclude_serials`, `extra_counters` and `extra_counters_by_serial` (extra ATA attribute ids, 1–255) |
 | `temperatures` | One package sensor per CPU, GPUs (nvidia-smi), listed board sensors; drive limits are judged by `disks` | `15m` / `0` | `limits` in °C, a PROBLEM at or above: `cpu: 90`, `drive_nvme: 60`, `drive_sata: 60` (also SAS), `gpu: 85`, `board: 75`; `limits_by_serial` (per drive); `board_sensors` (`{chip, label, limit}`, `*` globs; only listed board sensors are judged) |
 | `kernel` | EDAC memory error counters and the kernel log (read continuously) | `15m` / `0` | — |
+| `memory` | Available memory, swap, memory pressure, service growth and containers without a memory limit; its `guard` restarts a runaway service (see [Memory protection](#memory-protection)) | `1m` / `5m` | `warn_available_percent` (`15`), `warn_swap_percent` (`80`), `warn_pressure_percent` (`10`), `growth_window` (`1h`), `growth_warn` (`4GB`), `audit_exclude`, `guard` |
 | `containers` | Docker container health | `5m` / `15m` | `exclude` (globs on the container name) |
 | `http` (list) | One endpoint per entry | `10m` / `10m` | `name`, `url`, `timeout` (`15s`, at most `20s`), `status` (`[200, 399]`), `connect_to` or `doh`, `header`, `follow_redirects` (`false`: a redirect is judged by its own status), `auth_refusal` (`down` or `checker_error`: what a 401/403 means), `depends_on`, `container` (also require this container healthy) |
 | `freshness` (list) | Age of a status stamp: a file's mtime or a Unix time in a file or at a URL | `15m` / `0` | `name`, `path` or `url` (exactly one), `content` (`epoch` or `mtime`), `max_age`, `future_tolerance` (`1h`), and for `url`: `timeout` (`15s`, at most `20s`) and `header` |
@@ -295,6 +296,93 @@ writes the current time as `ts`.
 Run tgshd as root on the host itself (not in the distroless container) so it
 can read host state; the state database and instance lock live in
 `general.state_dir` (default `/var/lib/tgshd`).
+
+### Memory protection
+
+A runaway service can starve the whole host: the kernel starts thrashing, even
+SSH stalls, and the OOM killer arrives too late or picks the wrong victim.
+The `memory` section adds two independent parts. It is optional; without it
+there is no memory check and no guard.
+
+- **The check** (every `interval`) warns early, in `mode`: available memory
+  below `warn_available_percent`, swap above `warn_swap_percent`, pressure
+  above `warn_pressure_percent`, a service that grew by `growth_warn` within
+  `growth_window`, and a container running without a memory limit (except
+  those in `audit_exclude`). Messages name the biggest consumer, for example
+  `PROBLEM: memory: 9% available (5.6 of 62 GB); top: web-app 31 GB`. A
+  service that is big but flat (a database) or a cache that swings up and down
+  does not trigger the growth warning.
+- **The guard** reads the kernel directly, about once a second, and does not
+  wait for the check's schedule. When available memory is below
+  `danger_available_percent` **and** the full-stall pressure is at or above
+  `danger_pressure_percent` for `danger_for`, it picks the service that grew
+  most within `culprit_window` (at least `culprit_min_growth`) and restarts it
+  (`docker restart`, or `systemctl restart` for a systemd unit). If the
+  restart does not finish within `action_timeout`, it kills the service's
+  cgroup through the kernel and reports that. If the same service runs away
+  again within `repeat_window`, it is **stopped** instead of restarted, and
+  you are told by `failed_mode` (SMS by default). If memory does not recover
+  within `recovery_window`, it says so once and does not act a second time in
+  the same episode. It never touches the services in `never_touch` (container
+  names or systemd unit names such as `db` or `backup.service`), nor tgshd's
+  own service; when the culprit is protected, or no service is growing, it
+  only reports (with the top process).
+
+The guard never pauses in quiet windows (`pause_in_quiet_windows` applies to
+the warnings only). Its reports are queued and retried like other alerts and
+may arrive after the action.
+
+**Roll out in `report` first.** `guard.intervene` is `off`, `report` (the
+default) or `act`. In `report` the guard runs the same logic but only sends
+`would restart ...` messages. Leave it there for a while, check that those
+messages name the service you would have chosen (adjust `never_touch` if
+not), and only then set `act`.
+
+```yaml
+memory:
+  guard:
+    intervene: act
+    never_touch: [ "db", "backup.service" ]
+```
+
+`tgshd check --once` runs the memory check like the others and prints its
+readings (`memory/available`, `memory/swap`, `memory/pressure`, per-service
+growth and the container limits), then a `GUARD memory/guard: <mode>` line
+with the configured `intervene` mode. It never starts the guard, acts or locks
+memory.
+
+**Host requirements**
+
+- cgroup v2 (the unified hierarchy). Without it the guard does not start and a
+  checker error says so. Killing a service's cgroup as a last resort needs
+  Linux 5.14 or newer.
+- Memory pressure information (PSI): `/proc/pressure/memory` must exist. If
+  your kernel was started with `psi=0`, enable PSI; the check reports a
+  checker error otherwise.
+- tgshd runs as root on the host (see above), so it can read other processes
+  and restart containers and units.
+- Shield tgshd from starvation: the shipped
+  [`config/tgshd.service`](config/tgshd.service) sets `OOMScoreAdjust=-1000`
+  and `LimitMEMLOCK=infinity`, and the guard locks its own memory so it keeps
+  running while the host thrashes. Add the same two lines to your own unit
+  file if you do not use the shipped one. A failure to lock memory is a
+  checker error, not fatal.
+
+**Things to know**
+
+- If tgshd cannot determine its own cgroup (or runs in the root cgroup), it
+  cannot be sure it will not restart itself. The guard then falls back to
+  `report` even though `act` is configured, and says so in a checker error.
+- A new container is unguarded for up to about 30 s, until its name is
+  known (names are refreshed every 30 s tick).
+- Kernel out-of-memory kills are reported by the `kernel` check, with the
+  process, the container or service and the size, e.g. `Kernel: out of
+  memory, killed python3 (pid 4242) in container web-app, 54 GB`, including
+  kills found in the previous boot's log. A kill in a container that no longer
+  exists, and any kill seen under `tgshd check --once` (which cannot look
+  containers up), shows the container's short id instead of its name.
+- `/status` shows a memory block (available, swap, stall, top consumers and
+  the guard mode with its last action).
 
 ## Incoming SMS through gammu
 

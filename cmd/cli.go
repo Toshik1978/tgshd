@@ -172,7 +172,7 @@ func runCheckOnce(ctx context.Context, cfg *config, cio cliIO) int {
 	}
 	interrupted := runChecks(ctx, cio.stdout, set.Checks, set.Fixes, &t, runner.MaxRunTime)
 	if !interrupted {
-		writeAsleep(cio.stdout, set.Drives, cio.now())
+		writeFooter(cio.stdout, set.Drives, hc.Memory, cio.now())
 	}
 	fmt.Fprintln(cio.stdout, t)
 
@@ -468,6 +468,23 @@ func writeAsleep(w io.Writer, book runner.DriveBook, now time.Time) {
 		}
 		fmt.Fprintf(w, "ASLEEP %s/%s: %s\n", disksCheckName, d.Serial, lastRead)
 	}
+}
+
+// writeFooter prints what follows the checks' results: the drives asleep and
+// the memory guard's mode.
+func writeFooter(w io.Writer, book runner.DriveBook, m *hcfg.Memory, now time.Time) {
+	writeAsleep(w, book, now)
+	writeGuardMode(w, m)
+}
+
+// writeGuardMode prints the memory guard's configured mode. A one-shot run
+// never starts the guard, acts or locks memory: it only says what the daemon
+// would run. Nothing is printed without the memory section.
+func writeGuardMode(w io.Writer, m *hcfg.Memory) {
+	if m == nil {
+		return
+	}
+	fmt.Fprintf(w, "GUARD %s/guard: %s\n", memoryCheckName, m.Guard.Intervene)
 }
 
 // writeError prints one checker or setup error.

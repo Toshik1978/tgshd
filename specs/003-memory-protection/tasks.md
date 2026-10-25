@@ -92,9 +92,9 @@ independently. No new dependency may be added (plan Technical Context).
 
 ## Phase 6: Polish & Cross-Cutting Concerns
 
-- [ ] T018 [P] Document the feature: `memory` section in config/health.example.yaml (anonymised names), a "Memory protection" section in README.md (report → act rollout, never-touch list, unit-file lines, cgroup v2/PSI requirements), package-map rows for `pkg/health/memguard`, `pkg/health/check/memory`, `pkg/host/procmem`, `pkg/host/cgroupmem`, `pkg/host/systemctl` in .claude/CLAUDE.md (tests: pkg/health/config/config_test.go loads config/health.example.yaml) (FR-020)
-- [ ] T019 `check --once` prints the memory readings and the guard mode in cmd/cli.go (tests in cmd/cli_test.go) (FR-016)
-- [ ] T020 Run the quickstart.md validation: `task lint`, `task test:coverage` (80 % floor), `CGO_ENABLED=0 task build`, the private-data scan of the diff, and record the manual host run's outcome in specs/003-memory-protection/quickstart.md (SC-001, SC-002)
+- [x] T018 [P] Document the feature: `memory` section in config/health.example.yaml (anonymised names), a "Memory protection" section in README.md (report → act rollout, never-touch list, unit-file lines, cgroup v2/PSI requirements), package-map rows for `pkg/health/memguard`, `pkg/health/check/memory`, `pkg/host/procmem`, `pkg/host/cgroupmem`, `pkg/host/systemctl` in .claude/CLAUDE.md (tests: pkg/health/config/config_test.go loads config/health.example.yaml) (FR-020)
+- [x] T019 `check --once` prints the memory readings and the guard mode in cmd/cli.go (tests in cmd/cli_test.go) (FR-016)
+- [x] T020 Run the quickstart.md validation: `task lint`, `task test:coverage` (80 % floor), `CGO_ENABLED=0 task build`, the private-data scan of the diff, and record the manual host run's outcome in specs/003-memory-protection/quickstart.md (SC-001, SC-002)
 
 ---
 
