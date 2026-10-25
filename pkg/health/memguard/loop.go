@@ -21,9 +21,10 @@ const HostInterval = time.Second
 // a Loop built without it.
 const defaultActionTimeout = time.Minute
 
-// stopReportTimeout bounds the delivery of the outcomes reported after the
-// guard was told to stop; the daemon's stop is bounded on its own as well.
-const stopReportTimeout = 5 * time.Second
+// StopReportTimeout bounds the delivery of the outcomes reported after the
+// guard was told to stop, all of them together; the daemon's stop timeout
+// accounts for it.
+const StopReportTimeout = 5 * time.Second
 
 // Buffer sizes of the channels from the loop to the reporter goroutine.
 const (
@@ -412,7 +413,7 @@ func offer[T any](ch chan T, v T) bool {
 // which Run does once nothing more can be queued, then delivers what is left.
 // State is always saved with a ctx that is never done: records taken in as
 // the guard stops must still be kept. An outcome reported once ctx is done
-// gets a live ctx bounded by stopReportTimeout, one budget shared by every
+// gets a live ctx bounded by StopReportTimeout, one budget shared by every
 // such report, so its delivery is really attempted (and queued by the
 // notifier when it fails, for the daemon's final checkpoint) without holding
 // the stop for long.
@@ -483,7 +484,7 @@ func (d *delivery) reportCtx() context.Context {
 		return d.ctx
 	}
 	if d.late == nil {
-		d.late, d.cancelLate = context.WithTimeout(context.WithoutCancel(d.ctx), stopReportTimeout)
+		d.late, d.cancelLate = context.WithTimeout(context.WithoutCancel(d.ctx), StopReportTimeout)
 	}
 
 	return d.late

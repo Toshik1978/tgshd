@@ -5,7 +5,10 @@ After=network-online.target
 [Service]
 ExecStart=/usr/local/bin/tgshd
 EnvironmentFile=/usr/local/etc/tgshd.conf
-TimeoutSec=30
+TimeoutStartSec=30
+# Above the daemon's 40 s stop budget (README, "Stopping"), so systemd never
+# kills it while it writes its last state.
+TimeoutStopSec=50
 Restart=on-failure
 RestartSec=30
 OOMScoreAdjust=-1000

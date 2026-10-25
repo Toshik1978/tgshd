@@ -11,9 +11,10 @@ import (
 	"github.com/Toshik1978/tgshd/pkg/health/store"
 )
 
-// interruptedSaveTimeout bounds a checkpoint once shutdown has cancelled the
-// tick: the one of a tick cut short (its fixes) and the tick's final one.
-const interruptedSaveTimeout = 5 * time.Second
+// InterruptedSaveTimeout bounds a checkpoint once shutdown has cancelled the
+// tick: the one of a tick cut short (its fixes), the tick's final one and the
+// stop's (Checkpoint). The daemon's stop timeout accounts for it.
+const InterruptedSaveTimeout = 5 * time.Second
 
 // Fix is one fix action a check took (e.g. the command check restarting a
 // container). Every fix is recorded in the alert log as kind "fix"; it is
@@ -79,7 +80,7 @@ func (r *Runner) saveInterruptedFixes(ctx context.Context, c *cycle, loaded bool
 	}
 	alerts, samples := r.takePending()
 
-	saveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), interruptedSaveTimeout)
+	saveCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), InterruptedSaveTimeout)
 	defer cancel()
 
 	st := store.State{Conditions: c.before, RateMarks: r.marks.Export(), Queue: r.notifier.Export()}

@@ -3,12 +3,18 @@ package app
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/go-co-op/gocron/v2"
 	"go.uber.org/fx"
 	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
+
+// SchedulerStopTimeout bounds how long stopping the scheduler waits for a
+// running worker (a health tick) to end; the daemon's stop timeout accounts
+// for it.
+const SchedulerStopTimeout = 10 * time.Second
 
 // ApplicationParams declare parameters to run application.
 type ApplicationParams struct {
@@ -75,7 +81,7 @@ func (a *Application) OnStop(ctx context.Context, cancel context.CancelFunc) err
 }
 
 func (a *Application) onStart(ctx context.Context) error {
-	scheduler, err := gocron.NewScheduler()
+	scheduler, err := gocron.NewScheduler(gocron.WithStopTimeout(SchedulerStopTimeout))
 	if err != nil {
 		return fmt.Errorf("failed to start scheduler: %w", err)
 	}

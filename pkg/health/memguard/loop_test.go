@@ -1257,8 +1257,12 @@ func TestRunRecordsAnActionThatEndedAtShutdown(t *testing.T) {
 		clock.Advance(time.Second)
 	}
 	<-act.blocked
+	// The last Advance fired one more beat: wait until it is over and the
+	// loop is parked on its next tick, so no beat can collect the result.
+	clock.waitTimer(t, time.Second)
 	// Let the restart succeed and wait for its goroutine: its result is in
-	// the channel, and the loop only collects it on a beat that never comes.
+	// the channel, and the loop only collects it on a beat that never comes,
+	// so Run's shutdown path takes it in.
 	close(act.gate)
 	l.actions.Wait()
 	cancel()

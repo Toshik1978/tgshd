@@ -2075,3 +2075,22 @@ func TestCheckpointWaitsForTheTick(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// TestCheckpointWithDoneCtxStillWrites: a stop whose ctx already ended still
+// takes a free slot and writes, within the runner's grace for an interrupted
+// save; it gives up only while a tick holds the slot.
+func TestCheckpointWithDoneCtxStillWrites(t *testing.T) {
+	for range 20 { // a select between the free slot and ctx.Done would pick at random
+		st := &fakeStore{}
+		f := newFixture(t, st)
+		f.tick(t)
+		before := st.checkpoints
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+
+		_ = f.r.Checkpoint(ctx)
+		if st.checkpoints != before+1 {
+			t.Fatalf("checkpoints = %d after a stop with a done ctx, want %d", st.checkpoints, before+1)
+		}
+	}
+}

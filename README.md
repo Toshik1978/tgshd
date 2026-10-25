@@ -476,8 +476,13 @@ so privileged ICMP ping works without running as root.
 
 ```bash
 docker build -t tgshd:latest .
-docker run --rm --env-file .env tgshd:latest
+docker run --rm --stop-timeout 50 --env-file .env tgshd:latest
 ```
+
+Give the container more than the daemon's 40 s stop budget (see
+[Stopping](#stopping)): Docker's default grace is 10 s before it sends
+`SIGKILL`. Use `--stop-timeout 50` with `docker run`, or
+`stop_grace_period: 50s` in a compose file.
 
 `NET_RAW` is in Docker's default capability set, so no extra `--cap-add` is
 required for `/ping`.
@@ -495,6 +500,19 @@ sudo install -m 0644 config/tgshd.service /etc/systemd/system/tgshd.service
 sudo systemctl daemon-reload
 sudo systemctl enable --now tgshd
 ```
+
+The unit sets `TimeoutStopSec=50`, above the daemon's stop budget (see
+[Stopping](#stopping)); keep it above 40 s if you change it.
+
+## Stopping
+
+On `SIGTERM` the daemon stops within 40 s (its fx stop timeout). In that time
+it lets a running health tick end (up to 10 s), has the memory guard deliver
+its last outcomes (up to 5 s) and write its intervention records (up to 5 s),
+and writes the health state one final time, so events and queued messages
+since the last tick reach the next start. Whatever supervises it must allow
+more than 40 s before killing it: `TimeoutStopSec=50` in the systemd unit,
+`--stop-timeout 50` or `stop_grace_period: 50s` for a container.
 
 ## Development
 

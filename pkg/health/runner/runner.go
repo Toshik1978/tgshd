@@ -362,12 +362,18 @@ func (r *Runner) Do(ctx context.Context) error {
 // stopped: an event pushed or a message queued after the last tick (by the
 // memory guard, a background job or a checker error) is otherwise lost at
 // exit. It waits for a running tick, at most until ctx ends, and writes
-// nothing before state was loaded.
+// nothing before state was loaded. With no tick running it always writes,
+// even when ctx has already ended: the write then gets the grace of an
+// interrupted save (saveContext).
 func (r *Runner) Checkpoint(ctx context.Context) error {
 	select {
 	case r.ticking <- struct{}{}:
-	case <-ctx.Done():
-		return fmt.Errorf("checkpoint health state: %w", ctx.Err())
+	default:
+		select {
+		case r.ticking <- struct{}{}:
+		case <-ctx.Done():
+			return fmt.Errorf("checkpoint health state: %w", ctx.Err())
+		}
 	}
 	defer func() { <-r.ticking }()
 
@@ -945,7 +951,7 @@ func (r *Runner) raise(c *cycle) {
 // from memory; the first write that succeeds afterwards sends the recovery
 // notice (saveRecovered). The tick's results have been dispatched, so a
 // shutdown arriving now must not lose them: the write outlives the
-// cancellation of ctx by up to interruptedSaveTimeout, and only a write cut
+// cancellation of ctx by up to InterruptedSaveTimeout, and only a write cut
 // off by that is returned.
 func (r *Runner) checkpoint(ctx context.Context, c *cycle, loaded bool) error {
 	r.addPending(r.records(c), c.samples)
@@ -990,11 +996,11 @@ func (r *Runner) persistent() bool {
 }
 
 // saveContext returns the context of a checkpoint: it is not cancelled with
-// ctx, but once ctx is done it ends after interruptedSaveTimeout, so a
+// ctx, but once ctx is done it ends after InterruptedSaveTimeout, so a
 // shutdown neither cuts the write off nor waits on a hung store for long.
 func saveContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	saveCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
-	stop := context.AfterFunc(ctx, func() { time.AfterFunc(interruptedSaveTimeout, cancel) })
+	stop := context.AfterFunc(ctx, func() { time.AfterFunc(InterruptedSaveTimeout, cancel) })
 
 	return saveCtx, func() {
 		stop()

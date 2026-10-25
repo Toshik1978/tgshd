@@ -24,6 +24,7 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
 
+	"github.com/Toshik1978/tgshd/cmd/app"
 	"github.com/Toshik1978/tgshd/pkg/health"
 	"github.com/Toshik1978/tgshd/pkg/health/check/memory"
 	"github.com/Toshik1978/tgshd/pkg/health/check/network"
@@ -907,6 +908,24 @@ func TestAppOptionsGraphIsComplete(t *testing.T) {
 				t.Fatalf("fx graph: %v", err)
 			}
 		})
+	}
+}
+
+// TestDaemonStopTimeoutCoversTheStopBudget: fx runs every OnStop under one
+// stop timeout; the daemon's must cover the scheduler waiting for a tick, the
+// memory guard's last reports and records write and the final checkpoint's
+// grace, with room to spare, or the last outcomes are cut off.
+func TestDaemonStopTimeoutCoversTheStopBudget(t *testing.T) {
+	t.Parallel()
+
+	budget := app.SchedulerStopTimeout + memguard.StopReportTimeout + guardWriteTimeout + runner.InterruptedSaveTimeout
+	if daemonStopTimeout < budget+5*time.Second {
+		t.Fatalf("daemonStopTimeout = %v, want at least the %v stop budget plus 5s", daemonStopTimeout, budget)
+	}
+	a := fx.New(append(appOptions(func(string) string { return "" }), fx.NopLogger,
+		fx.Decorate(func(*zap.Logger) *zap.Logger { return zap.NewNop() }))...)
+	if got := a.StopTimeout(); got != daemonStopTimeout {
+		t.Fatalf("fx stop timeout = %v, want %v", got, daemonStopTimeout)
 	}
 }
 
@@ -2565,8 +2584,15 @@ func TestStopCheckpointsAfterTheGuardStopped(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(state.Queue) != 1 || !strings.Contains(state.Queue[0].Text, "memory: restarted") {
-		t.Fatalf("queue = %+v, want the restart whose send the stop cut off", state.Queue)
+	// The cut-off restart is queued; not_recovered may be queued behind it
+	// unsent, as the notifier keeps a channel's messages in order.
+	if len(state.Queue) == 0 || !strings.Contains(state.Queue[0].Text, "memory: restarted") {
+		t.Fatalf("queue = %+v, want the restart whose send the stop cut off first", state.Queue)
+	}
+	for _, q := range state.Queue[1:] {
+		if !strings.Contains(q.Text, "did not free memory") {
+			t.Fatalf("queue = %+v, want only the restart and not_recovered", state.Queue)
+		}
 	}
 }
 

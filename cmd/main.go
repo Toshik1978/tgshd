@@ -42,6 +42,15 @@ var (
 // telegramTimeout bounds one Telegram Bot API request (telebot's default).
 const telegramTimeout = time.Minute
 
+// daemonStopTimeout bounds the daemon's whole stop: fx runs every OnStop hook
+// under it. In stop order it covers the scheduler waiting for a running tick
+// (app.SchedulerStopTimeout), the memory guard's last outcome reports
+// (memguard.StopReportTimeout) and records write (guardWriteTimeout), and the
+// final health checkpoint (up to runner.InterruptedSaveTimeout of grace), with
+// room to spare. The systemd unit's TimeoutStopSec and a container's stop
+// grace period must exceed it (README, "Stopping").
+const daemonStopTimeout = 40 * time.Second
+
 func main() {
 	// A subcommand (contracts/cli.md) runs instead of the daemon.
 	cio := cliIO{
@@ -65,6 +74,7 @@ func appOptions(getenv func(string) string) []fx.Option {
 		// Force construction of *Application so its lifecycle hook registers.
 		fx.Invoke(func(*app.Application) {}),
 		fx.ErrorHook(&errorHandler{}),
+		fx.StopTimeout(daemonStopTimeout),
 		fx.WithLogger(func(logger *zap.Logger) fxevent.Logger {
 			return &fxevent.ZapLogger{Logger: logger}
 		}),
