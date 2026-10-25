@@ -62,6 +62,8 @@ func TestMessage(t *testing.T) {
 	cfg := Config{Channel: health.ModeTelegram, FailedChannel: health.ModeSMS}
 	web := culpritOf(KindContainer, "web-app", 12*gb, 31*gb)
 	worker := Top{Name: "worker", Size: 20 * gb}
+	lastAction := time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC)
+	ranAway := time.Date(2026, 1, 1, 12, 10, 0, 0, time.UTC)
 	tests := []struct {
 		name string
 		out  Outcome
@@ -88,17 +90,8 @@ func TestMessage(t *testing.T) {
 				Kind:         OutcomeStopped,
 				Culprit:      culpritOf(KindContainer, "web-app", 3*gb, 22*gb),
 				AvailablePct: 4,
-				At: time.Date(
-					2026,
-					1,
-					1,
-					12,
-					10,
-					0,
-					0,
-					time.UTC,
-				),
-				LastAction: time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC),
+				At:           ranAway,
+				LastAction:   lastAction,
 			},
 			"memory/guard/web-app",
 			health.ModeSMS,
@@ -111,17 +104,8 @@ func TestMessage(t *testing.T) {
 				Culprit:      culpritOf(KindContainer, "web-app", 3*gb, 22*gb),
 				AvailablePct: 4,
 				FullAvg10:    35,
-				At: time.Date(
-					2026,
-					1,
-					1,
-					12,
-					10,
-					0,
-					0,
-					time.UTC,
-				),
-				LastAction: time.Date(2026, 1, 1, 10, 0, 0, 0, time.UTC),
+				At:           ranAway,
+				LastAction:   lastAction,
 			},
 			"memory/guard/web-app",
 			health.ModeTelegram,

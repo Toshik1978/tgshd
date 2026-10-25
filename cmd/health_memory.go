@@ -70,6 +70,7 @@ type guardMemory interface {
 // guardCgroups is what the guard uses of pkg/host/cgroupmem.
 type guardCgroups interface {
 	Services() ([]cgroupmem.Service, error)
+	Survey() ([]cgroupmem.Service, int, error)
 	Self() (string, error)
 	Kill(cgroupPath string) error
 }
@@ -250,6 +251,7 @@ func (g *memoryGuard) register(lc fx.Lifecycle, r guardRunner) {
 			select {
 			case <-done:
 			case <-stopCtx.Done():
+				g.log.Warn("Memory guard did not stop in time")
 			}
 
 			return nil
@@ -266,19 +268,23 @@ func (g *memoryGuard) run(ctx context.Context, r guardRunner) {
 	errs := g.applyShield()
 
 	sampler := guardSampler{mem: g.host.mem, cgroups: g.host.cgroups, names: g.host.names}
-	if text := serviceCgroupsError(g.host.cgroups); text != "" {
+	svcs, unaccounted, err := g.host.cgroups.Survey()
+	if text := serviceCgroupsError(svcs, err); text != "" {
 		errs = append(errs, startError{guardCgroupKey, text})
 		g.setMode(guardNotRunning)
-		raiseAll(r, errs)
+		raiseAll(ctx, r, errs)
 
 		return
+	}
+	if unaccounted > 0 {
+		g.log.Warn(fmt.Sprintf("Memory guard: %d service cgroups without memory.stat, not guarded", unaccounted))
 	}
 	if _, err := sampler.Host(); err != nil {
 		errs = append(errs, startError{
 			guardHostKey, "cannot read host memory, the memory guard is not started: " + err.Error(),
 		})
 		g.setMode(guardNotRunning)
-		raiseAll(r, errs)
+		raiseAll(ctx, r, errs)
 
 		return
 	}
@@ -290,7 +296,7 @@ func (g *memoryGuard) run(ctx context.Context, r guardRunner) {
 
 	var wg sync.WaitGroup
 	defer wg.Wait()
-	wg.Go(func() { raiseAll(r, errs) })
+	wg.Go(func() { raiseAll(ctx, r, errs) })
 	wg.Go(func() { g.refreshNames(ctx) })
 
 	loop := memguard.NewLoop(cfg, g.host.clock, sampler,
@@ -308,13 +314,13 @@ func (g *memoryGuard) run(ctx context.Context, r guardRunner) {
 	g.write(context.WithoutCancel(ctx))
 }
 
-// serviceCgroupsError says why the guard cannot measure the services, or ""
-// when it can. Without cgroup v2, or without memory accounting on the
-// services, no service could ever be blamed: the guard would only report, in
-// act too, so it is not started and the operator is told.
-func serviceCgroupsError(cgroups guardCgroups) string {
+// serviceCgroupsError says why the guard cannot measure the services svcs
+// and err of a survey, or "" when it can. Without cgroup v2, or without memory
+// accounting on the services, no service could ever be blamed: the guard
+// would only report, in act too, so it is not started and the operator is
+// told.
+func serviceCgroupsError(svcs []cgroupmem.Service, err error) string {
 	const notStarted = ", the memory guard is not started"
-	svcs, err := cgroups.Services()
 	switch {
 	case errors.Is(err, cgroupmem.ErrNoMemoryAccounting):
 		return "memory accounting is off for the system.slice services" + notStarted +
@@ -383,9 +389,14 @@ func (g *memoryGuard) write(ctx context.Context) bool {
 	return true
 }
 
-// raiseAll raises errs as checker errors, in order.
-func raiseAll(r guardRunner, errs []startError) {
+// raiseAll raises errs as checker errors, in order, until ctx is done: a
+// checker error can hang on a dead network, and a stopped guard must not wait
+// for each of the rest.
+func raiseAll(ctx context.Context, r guardRunner, errs []startError) {
 	for _, e := range errs {
+		if ctx.Err() != nil {
+			return
+		}
 		r.CheckerError(e.Key, e.Text)
 	}
 }
@@ -720,7 +731,7 @@ func (s *guardState) Save(_ context.Context, records []memguard.Record) {
 		now := s.clock.Now()
 		var late []memguard.Record
 		for _, r := range s.late {
-			if now.Sub(r.At) <= s.window && !slices.ContainsFunc(records, r.Equal) {
+			if r.Within(s.window, now) && !slices.ContainsFunc(records, r.Equal) {
 				late = append(late, r)
 			}
 		}
@@ -847,14 +858,6 @@ func (s *guardState) start(handoff func([]memguard.Record)) []memguard.Record {
 	defer s.mu.Unlock()
 
 	s.started, s.handoff = true, handoff
-
-	return s.records
-}
-
-// restoredRecords returns the records held now.
-func (s *guardState) restoredRecords() []memguard.Record {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	return s.records
 }

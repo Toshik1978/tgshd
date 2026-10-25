@@ -1326,6 +1326,15 @@ type fakeGuardCgroups struct {
 	reads   int
 	killed  []string
 	killErr error
+	// unaccounted is how many service cgroups Survey finds without
+	// memory.stat.
+	unaccounted int
+}
+
+func (f *fakeGuardCgroups) Survey() ([]cgroupmem.Service, int, error) {
+	svcs, err := f.Services()
+
+	return svcs, f.unaccounted, err
 }
 
 func (f *fakeGuardCgroups) Services() ([]cgroupmem.Service, error) {
@@ -1639,9 +1648,9 @@ func TestNewHealthStartsTheGuardOnlyWithTheSectionAndIntervene(t *testing.T) {
 			lc.RequireStart()
 			if tt.start {
 				waitFor(t, "the guard loop", func() bool { return f.mem.hostReads() > 1 })
-			} else {
-				time.Sleep(20 * time.Millisecond)
 			}
+			// RequireStop joins the guard's goroutine, and without a guard none
+			// was started: the counts are final after it.
 			lc.RequireStop()
 
 			if started := f.shield.count() == 1 && f.mem.hostReads() > 0; started != tt.start {
@@ -2163,7 +2172,7 @@ func TestGuardStateKV(t *testing.T) {
 	if err := other.Restore(data); err != nil {
 		t.Fatal(err)
 	}
-	if got := other.restoredRecords(); !reflect.DeepEqual(got, rec) {
+	if got := exportedRecords(t, other); len(got) != 1 || !got[0].Equal(rec[0]) {
 		t.Fatalf("restored %+v, want %+v", got, rec)
 	}
 	if err := other.Restore("{"); err == nil {
@@ -2316,8 +2325,7 @@ func TestMemoryGuardWithoutPressureRaisesAndDoesNotStart(t *testing.T) {
 	newHealth(guardHealthParams(t, pub, lc, testMemorySection(hcfg.InterveneAct), f))
 	lc.RequireStart()
 	waitFor(t, "the checker error", func() bool { return containing(pub.messages(), "CHECKER ERROR: memory: ") })
-	time.Sleep(20 * time.Millisecond)
-	lc.RequireStop()
+	lc.RequireStop() // joins the guard's run, which ended after the start probe
 
 	if n := f.mem.hostReads(); n != 1 {
 		t.Fatalf("host reads = %d, want only the start probe", n)
@@ -2395,6 +2403,94 @@ func TestMemoryGuardStartsWhileCheckerErrorsHang(t *testing.T) {
 	want := []string{guardShieldKey + "/1", guardShieldKey + "/2", guardSelfKey}
 	waitFor(t, "the checker errors", func() bool { return slices.Equal(r.keys(), want) })
 	lc.RequireStop()
+}
+
+// cancellingRunner is a guardRunner that stops the guard on the first checker
+// error it raises.
+type cancellingRunner struct {
+	cancel context.CancelFunc
+	mu     sync.Mutex
+	raised []string
+}
+
+func (c *cancellingRunner) PushMode(context.Context, string, string, string, string, health.Mode) {}
+
+func (c *cancellingRunner) CheckerError(key, _ string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.raised = append(c.raised, key)
+	c.cancel()
+}
+
+// TestMemoryGuardSkipsCheckerErrorsAfterStop: once the guard is stopped, the
+// start errors not raised yet are skipped, so a dead network holds the stop
+// for one checker error at most.
+func TestMemoryGuardSkipsCheckerErrorsAfterStop(t *testing.T) {
+	t.Parallel()
+
+	f := newGuardFakes(guardT0())
+	f.shield.err = errors.Join(
+		errors.New("set oom_score_adj: permission denied"),
+		errors.New("mlockall: operation not permitted"),
+	)
+	f.cgroups.self = ""
+	g := newMemoryGuard(testMemorySection(hcfg.InterveneAct), f.host(), zap.NewNop())
+	ctx, cancel := context.WithCancel(t.Context())
+	r := &cancellingRunner{cancel: cancel}
+	g.run(ctx, r)
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if want := []string{guardShieldKey + "/1"}; !slices.Equal(r.raised, want) {
+		t.Fatalf("raised %v after the stop, want only %v", r.raised, want)
+	}
+}
+
+// TestMemoryGuardWarnsWhenItDoesNotStopInTime: a stop that times out while
+// the guard still runs is logged, not silent.
+func TestMemoryGuardWarnsWhenItDoesNotStopInTime(t *testing.T) {
+	t.Parallel()
+
+	core, logs := observer.New(zap.WarnLevel)
+	f := newGuardFakes(guardT0())
+	f.shield.err = errors.New("set oom_score_adj: permission denied")
+	g := newMemoryGuard(testMemorySection(hcfg.InterveneAct), f.host(), zap.New(core))
+	r := &blockingRunner{release: make(chan struct{})}
+	t.Cleanup(func() { close(r.release) })
+	lc := fxtest.NewLifecycle(t)
+	g.register(lc, r)
+	lc.RequireStart()
+	waitFor(t, "the guard loop", func() bool { return f.mem.hostReads() > 1 })
+
+	// The checker error hangs, so run cannot end before stopCtx does.
+	stopCtx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
+	defer cancel()
+	_ = lc.Stop(stopCtx)
+	if n := logs.FilterMessage("Memory guard did not stop in time").Len(); n != 1 {
+		t.Fatalf("logged %d stop timeouts, want one", n)
+	}
+}
+
+// TestMemoryGuardLogsUnaccountedServiceCgroups: service cgroups without
+// memory.stat beside accounted ones are not guarded; the start says so once.
+func TestMemoryGuardLogsUnaccountedServiceCgroups(t *testing.T) {
+	t.Parallel()
+
+	core, logs := observer.New(zap.WarnLevel)
+	f := newGuardFakes(guardT0())
+	f.cgroups.unaccounted = 2
+	g := newMemoryGuard(testMemorySection(hcfg.InterveneAct), f.host(), zap.New(core))
+	lc := fxtest.NewLifecycle(t)
+	g.register(lc, &blockingRunner{release: make(chan struct{})})
+	lc.RequireStart()
+	waitFor(t, "the guard loop", func() bool { return f.mem.hostReads() > 3 })
+	lc.RequireStop()
+
+	msg := "Memory guard: 2 service cgroups without memory.stat, not guarded"
+	if n := logs.FilterMessage(msg).Len(); n != 1 {
+		t.Fatalf("logged %q %d times, want once; logs %+v", msg, n, logs.All())
+	}
 }
 
 // testMemoryCheckSection is a memory section with its warning levels.

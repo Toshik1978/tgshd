@@ -16,6 +16,11 @@ import (
 // HostInterval is how often the loop reads the host's memory and pressure.
 const HostInterval = time.Second
 
+// defaultActionTimeout bounds an action when the configuration gives no
+// positive action_timeout; config validation refuses one, so this only guards
+// a Loop built without it.
+const defaultActionTimeout = time.Minute
+
 // Buffer sizes of the channels from the loop to the reporter goroutine.
 const (
 	outcomeBuffer = 32
@@ -102,7 +107,6 @@ type Loop struct {
 	nextServices time.Time
 	hostFailing  bool
 	svcFailing   bool
-	busy         bool // an action is running
 
 	results  chan result
 	late     chan []Record
@@ -120,8 +124,12 @@ func WithLogger(log *zap.Logger) LoopOption {
 	return func(l *Loop) { l.log = log }
 }
 
-// NewLoop creates the guard loop over a new Guard for cfg.
+// NewLoop creates the guard loop over a new Guard for cfg. An ActionTimeout
+// that is not positive falls back to defaultActionTimeout.
 func NewLoop(cfg Config, clock Clock, sampler Sampler, actuator Actuator, reporter Reporter, opts ...LoopOption) *Loop {
+	if cfg.ActionTimeout <= 0 {
+		cfg.ActionTimeout = defaultActionTimeout
+	}
 	l := &Loop{
 		cfg: cfg, guard: New(cfg), clock: clock, sampler: sampler, actuator: actuator, reporter: reporter,
 		log:      zap.NewNop(),
@@ -153,16 +161,25 @@ func (l *Loop) RestoreLate(records []Record) {
 }
 
 // Run samples, decides and acts until ctx is done. With Mode off it returns at
-// once.
+// once. On its way out it waits for the running action, takes in its result
+// (an action that succeeded as ctx ended is still recorded) and has the
+// reporter deliver everything still queued.
 func (l *Loop) Run(ctx context.Context) {
 	if l.cfg.Mode == ModeOff {
 		return
 	}
+	stopped := make(chan struct{})
 	var deliver sync.WaitGroup
-	deliver.Go(func() { l.deliver(ctx) })
+	deliver.Go(func() { l.deliver(ctx, stopped) })
 	defer func() {
-		deliver.Wait()
 		l.actions.Wait()
+		select {
+		case r := <-l.results:
+			l.finish(l.clock.Now(), r)
+		default:
+		}
+		close(stopped)
+		deliver.Wait()
 	}()
 	for {
 		l.step(ctx, l.clock.Now())
@@ -198,21 +215,27 @@ func (l *Loop) step(ctx context.Context, now time.Time) {
 }
 
 // collect takes in the result of a finished action or the records restored
-// late, if any.
+// late, if any. It takes one item per beat: when both are ready, the other
+// waits for the next beat, at most HostInterval later, which is harmless.
 func (l *Loop) collect(now time.Time) {
 	select {
 	case r := <-l.results:
-		l.busy = false
-		l.guard.ActionDone(now, r.rec, r.ok)
-		if r.ok {
-			l.save(now)
-		}
-		l.emit(r.out)
+		l.finish(now, r)
 	case records := <-l.late:
 		l.guard.Merge(now, records)
 		l.save(now)
 	default:
 	}
+}
+
+// finish tells the guard how an action ended, saves the records it keeps and
+// queues the outcome.
+func (l *Loop) finish(now time.Time, r result) {
+	l.guard.ActionDone(now, r.rec, r.ok)
+	if r.ok {
+		l.save(now)
+	}
+	l.emit(r.out)
 }
 
 // note queues a sampler error to log when a read starts failing, and returns
@@ -241,7 +264,6 @@ func (l *Loop) handle(ctx context.Context, now time.Time, dec Decision) {
 		return
 	}
 	// The guard decides no new action before ActionDone, so at most one runs.
-	l.busy = true
 	l.actions.Add(1)
 	go l.act(ctx, dec)
 }
@@ -275,24 +297,25 @@ func (l *Loop) topProcess() Top {
 
 // act runs the decided action on its own goroutine and sends how it ended
 // back to the loop. A timeout or an unreachable runtime falls back to killing
-// the service's cgroup.
+// the service's cgroup. On shutdown a failed action is dropped, never killed;
+// one that succeeded is still sent, so it is recorded.
 func (l *Loop) act(ctx context.Context, dec Decision) {
 	defer l.actions.Done()
 	out, rec := dec.Outcome, dec.Record
 	err := l.run(ctx, out.Action, out.Service)
-	if ctx.Err() != nil {
+	if err != nil && ctx.Err() != nil {
 		return // shutting down: never fall back to a kill
 	}
 	ok := err == nil
 	if errors.Is(err, errActionTimeout) || errors.Is(err, ErrUnreachable) ||
 		errors.Is(err, context.DeadlineExceeded) {
-		err0 := err
+		cause := err
 		if kerr := l.kill(out.Service); kerr != nil {
 			err = fmt.Errorf("%w; kill: %w", err, kerr)
 		} else {
 			ok, err = true, nil
 			out.Kind, rec.Action = OutcomeKilled, ActionKill
-			out.Unreachable = errors.Is(err0, ErrUnreachable)
+			out.Unreachable = errors.Is(cause, ErrUnreachable)
 			if !out.Unreachable {
 				out.Timeout = l.cfg.ActionTimeout
 			}
@@ -381,13 +404,39 @@ func offer[T any](ch chan T, v T) bool {
 	}
 }
 
-// deliver hands outcomes and state to the reporter until ctx is done; the
-// last state not yet saved is saved on the way out.
-func (l *Loop) deliver(ctx context.Context) {
+// deliver hands outcomes and state to the reporter until stopped is closed,
+// which Run does once nothing more can be queued. It then delivers what is
+// left: each queued outcome with the done ctx, so a notifier queues it for the
+// next start. State is always saved with a ctx that is never done: records
+// taken in as the guard stops must still be kept.
+func (l *Loop) deliver(ctx context.Context, stopped <-chan struct{}) {
 	var logged uint64
 	for {
 		select {
-		case <-ctx.Done():
+		case <-stopped:
+			l.drain(ctx)
+
+			return
+		case recs := <-l.states:
+			l.reporter.Save(context.WithoutCancel(ctx), recs)
+		case it := <-l.outcomes:
+			l.deliverItem(ctx, it)
+		}
+		if n := l.dropped.Load(); n != logged {
+			l.log.Warn("memory guard dropped outcomes: the reporter fell behind", zap.Uint64("dropped", n-logged))
+			logged = n
+		}
+	}
+}
+
+// drain delivers the outcomes and the state still queued when the loop has
+// stopped.
+func (l *Loop) drain(ctx context.Context) {
+	for {
+		select {
+		case it := <-l.outcomes:
+			l.deliverItem(ctx, it)
+		default:
 			select {
 			case recs := <-l.states:
 				l.reporter.Save(context.WithoutCancel(ctx), recs)
@@ -395,18 +444,16 @@ func (l *Loop) deliver(ctx context.Context) {
 			}
 
 			return
-		case recs := <-l.states:
-			l.reporter.Save(ctx, recs)
-		case it := <-l.outcomes:
-			if it.err != nil {
-				l.log.Warn("memory guard sampler failed", zap.Error(it.err))
-			} else {
-				l.reporter.Report(ctx, it.out, l.cfg.Message(it.out))
-			}
-		}
-		if n := l.dropped.Load(); n != logged {
-			l.log.Warn("memory guard dropped outcomes: the reporter fell behind", zap.Uint64("dropped", n-logged))
-			logged = n
 		}
 	}
+}
+
+// deliverItem reports an outcome or logs a sampler error.
+func (l *Loop) deliverItem(ctx context.Context, it item) {
+	if it.err != nil {
+		l.log.Warn("memory guard sampler failed", zap.Error(it.err))
+
+		return
+	}
+	l.reporter.Report(ctx, it.out, l.cfg.Message(it.out))
 }

@@ -338,10 +338,10 @@ func (s *loopSim) run(d time.Duration) {
 	s.t.Helper()
 	for range int(d / time.Second) {
 		s.host.grow()
-		busy := s.l.busy
-		s.l.step(s.t.Context(), s.clock.Now())
-		if !busy && s.l.busy {
-			s.settle()
+		now := s.clock.Now()
+		s.l.step(s.t.Context(), now)
+		if ep := s.l.guard.Episode(); ep.State == StateActed && ep.ActedAt.Equal(now) {
+			s.settle() // this beat dispatched an action
 		}
 		if s.clock.Advance(time.Second) > 0 {
 			s.l.actions.Wait()
@@ -600,7 +600,6 @@ func TestKillOnlyServiceOrScopeCgroups(t *testing.T) {
 				Culprit: Culprit{Service: Service{Kind: KindUnit, Name: "x", CgroupPath: tc.path}},
 				Kind:    OutcomeRestarted, Action: ActionRestart,
 			}}
-			s.l.busy = true
 			s.l.actions.Add(1)
 			s.l.act(t.Context(), dec)
 			r := <-s.l.results
@@ -1093,5 +1092,233 @@ func TestSamplerErrorsAreLoggedOnce(t *testing.T) {
 	}
 	if n := logs.FilterMessage("memory guard sampler failed").Len(); n != 2 {
 		t.Fatalf("logged %d sampler failures, want the host read once and the top process once", n)
+	}
+}
+
+// TestZeroActionTimeoutFallsBackToTheDefault: an ActionTimeout that config
+// validation should have refused never makes every action time out at once.
+func TestZeroActionTimeoutFallsBackToTheDefault(t *testing.T) {
+	for _, timeout := range []time.Duration{0, -time.Second} {
+		cfg := loopConfig(ModeAct)
+		cfg.ActionTimeout = timeout
+		clock := newFakeClock(t0())
+		host := newFakeHost(clock)
+		l := NewLoop(cfg, clock, host, newFakeActuator(host, clock), nopReporter{})
+		if l.cfg.ActionTimeout != defaultActionTimeout {
+			t.Fatalf("ActionTimeout %v gives %v, want %v", timeout, l.cfg.ActionTimeout, defaultActionTimeout)
+		}
+	}
+}
+
+// TestUnreachableTimeoutIsUnreachable: an actuator error that is both
+// unreachable and a deadline is reported as unreachable, with no timeout.
+func TestUnreachableTimeoutIsUnreachable(t *testing.T) {
+	s := newLoopSim(t, loopConfig(ModeAct))
+	s.act.err = fmt.Errorf("%w: %w", ErrUnreachable, context.DeadlineExceeded)
+	dec := Decision{Act: true, Outcome: Outcome{
+		Culprit: Culprit{Service: Service{
+			Kind: KindContainer, Name: "web-app", CgroupPath: "system.slice/docker-web-appid.scope",
+		}},
+		Kind: OutcomeRestarted, Action: ActionRestart,
+	}}
+	s.l.actions.Add(1)
+	s.l.act(t.Context(), dec)
+	r := <-s.l.results
+	if !r.ok || r.out.Kind != OutcomeKilled || !r.out.Unreachable || r.out.Timeout != 0 {
+		t.Fatalf("result %+v, want killed as unreachable without a timeout", r)
+	}
+}
+
+// cancelledAfter is a context whose Err turns Canceled once cancel is called
+// while its Done channel never closes: it pins the moment an action finishes
+// just as the guard stops.
+type cancelledAfter struct {
+	mu   sync.Mutex
+	done bool
+}
+
+func (*cancelledAfter) Deadline() (time.Time, bool) { return time.Time{}, false }
+func (*cancelledAfter) Done() <-chan struct{}       { return nil }
+func (*cancelledAfter) Value(any) any               { return nil }
+
+func (c *cancelledAfter) cancel() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.done = true
+}
+
+func (c *cancelledAfter) Err() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.done {
+		return context.Canceled
+	}
+
+	return nil
+}
+
+// cancellingActuator restarts successfully and stops the guard while doing
+// so.
+type cancellingActuator struct {
+	nopActuator
+
+	ctx *cancelledAfter
+}
+
+func (a cancellingActuator) Restart(context.Context, Service) error {
+	a.ctx.cancel()
+
+	return nil
+}
+
+type nopActuator struct{}
+
+func (nopActuator) Restart(context.Context, Service) error { return nil }
+func (nopActuator) Stop(context.Context, Service) error    { return nil }
+func (nopActuator) Kill(string) error                      { return nil }
+
+// TestActionDoneAtShutdownIsSent: an action that succeeded as the guard
+// stopped still sends its result, so it is recorded (FR-009); a failed one
+// never falls back to a kill.
+func TestActionDoneAtShutdownIsSent(t *testing.T) {
+	ctx := &cancelledAfter{}
+	clock := newFakeClock(t0())
+	host := newFakeHost(clock)
+	l := NewLoop(loopConfig(ModeAct), clock, host, cancellingActuator{ctx: ctx}, nopReporter{})
+	dec := Decision{Act: true, Outcome: Outcome{
+		Culprit: Culprit{Service: Service{ID: "container:web-app", Kind: KindContainer, Name: "web-app"}},
+		Kind:    OutcomeRestarted, Action: ActionRestart,
+	}, Record: Record{ServiceID: "container:web-app", Name: "web-app", Action: ActionRestart, At: t0(), Mode: ModeAct}}
+	l.actions.Add(1)
+	l.act(ctx, dec)
+	select {
+	case r := <-l.results:
+		if !r.ok || r.out.Kind != OutcomeRestarted || r.rec.Action != ActionRestart {
+			t.Fatalf("result %+v, want the restart", r)
+		}
+	default:
+		t.Fatal("the restart that finished at shutdown sent no result")
+	}
+
+	// A restart that failed at shutdown is neither killed nor reported.
+	s := newLoopSim(t, loopConfig(ModeAct))
+	s.act.err = ErrUnreachable
+	cctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	s.l.actions.Add(1)
+	s.l.act(cctx, dec)
+	if len(s.l.results) != 0 {
+		t.Fatalf("results %d, want none for a restart that failed at shutdown", len(s.l.results))
+	}
+	for _, c := range s.act.log() {
+		if c.verb == "kill" {
+			t.Fatalf("calls %+v, want no kill at shutdown", s.act.log())
+		}
+	}
+}
+
+// TestRunRecordsAnActionThatEndedAtShutdown: a result the loop had not
+// collected yet when it stopped is still taken in: its record is saved and
+// its outcome reported.
+func TestRunRecordsAnActionThatEndedAtShutdown(t *testing.T) {
+	clock := newFakeClock(t0())
+	host := newFakeHost(clock, standardServices()...)
+	act := newFakeActuator(host, clock)
+	t.Cleanup(func() { close(act.release) })
+	rep := &recordingReporter{reports: make(chan Message, 8), saves: make(chan []Record, 8)}
+	l := NewLoop(loopConfig(ModeAct), clock, host, act, rep)
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() {
+		l.Run(ctx)
+		close(done)
+	}()
+
+	host.set(40, 0, webLeak())
+	for range 300 {
+		clock.waitTimer(t, time.Second)
+		host.grow()
+		clock.Advance(time.Second)
+	}
+	host.set(3, 35, webLeak())
+	for range 60 {
+		clock.waitTimer(t, time.Second)
+		if len(act.log()) > 0 {
+			break
+		}
+		host.grow()
+		clock.Advance(time.Second)
+	}
+	// The restart is issued and the loop waits for its next beat, which never
+	// comes: the result is still in the channel when the guard stops.
+	deadline := time.Now().Add(failsafe)
+	for len(l.results) == 0 {
+		if time.Now().After(deadline) {
+			t.Fatal("the restart never finished")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	cancel()
+	<-done
+
+	select {
+	case recs := <-rep.saves:
+		if len(recs) != 1 || recs[0].Action != ActionRestart || recs[0].Mode != ModeAct {
+			t.Fatalf("saved %+v, want the restart record", recs)
+		}
+	default:
+		t.Fatal("the restart that ended at shutdown was not saved")
+	}
+	select {
+	case m := <-rep.reports:
+		if !strings.HasPrefix(m.Text, "memory: restarted container web-app") {
+			t.Fatalf("report %+v, want the restart", m)
+		}
+	default:
+		t.Fatal("the restart that ended at shutdown was not reported")
+	}
+}
+
+// ctxReporter records every outcome reported and whether its context was
+// done.
+type ctxReporter struct {
+	mu      sync.Mutex
+	reports []string
+	done    []bool
+}
+
+func (r *ctxReporter) Report(ctx context.Context, _ Outcome, m Message) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.reports = append(r.reports, m.Text)
+	r.done = append(r.done, ctx.Err() != nil)
+}
+
+func (*ctxReporter) Save(context.Context, []Record) {}
+
+// TestRunReportsQueuedOutcomesOnShutdown: outcomes still queued when the
+// guard stops are handed to the reporter with the done context, so the
+// notifier queues them for the next start instead of losing them.
+func TestRunReportsQueuedOutcomesOnShutdown(t *testing.T) {
+	clock := newFakeClock(t0())
+	host := newFakeHost(clock)
+	rep := &ctxReporter{}
+	l := NewLoop(loopConfig(ModeAct), clock, host, newFakeActuator(host, clock), rep)
+	for i := range 3 {
+		l.emit(Outcome{Kind: OutcomeKilled, Service: Service{Name: fmt.Sprint("svc", i)}})
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	l.Run(ctx)
+
+	rep.mu.Lock()
+	defer rep.mu.Unlock()
+	if len(rep.reports) != 3 {
+		t.Fatalf("reported %q, want the three queued outcomes", rep.reports)
+	}
+	for i, done := range rep.done {
+		if !done {
+			t.Fatalf("outcome %d reported with a live context, want the done one", i)
+		}
 	}
 }

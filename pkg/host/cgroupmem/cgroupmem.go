@@ -65,9 +65,17 @@ func NewDefault() *Reader {
 // (its memory controller is off). When there are service cgroups but none of
 // them is accounted, the error wraps ErrNoMemoryAccounting.
 func (r *Reader) Services() ([]Service, error) {
+	svcs, _, err := r.Survey()
+
+	return svcs, err
+}
+
+// Survey is Services that also returns how many service cgroups it skipped
+// for having no memory.stat: those exist but cannot be measured.
+func (r *Reader) Survey() ([]Service, int, error) {
 	entries, err := os.ReadDir(filepath.Join(r.root, systemSlice))
 	if err != nil {
-		return nil, fmt.Errorf("read %s: %w", systemSlice, err)
+		return nil, 0, fmt.Errorf("read %s: %w", systemSlice, err)
 	}
 	w := walk{r: r}
 	for _, e := range entries {
@@ -76,20 +84,21 @@ func (r *Reader) Services() ([]Service, error) {
 		}
 		if !strings.HasSuffix(e.Name(), ".slice") {
 			if err := w.service(systemSlice, e.Name()); err != nil {
-				return nil, err
+				return nil, 0, err
 			}
 
 			continue
 		}
 		if err := w.nested(filepath.Join(systemSlice, e.Name())); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 	}
 	if len(w.out) == 0 && w.unaccounted > 0 {
-		return nil, fmt.Errorf("read %s: %d service cgroups: %w", systemSlice, w.unaccounted, ErrNoMemoryAccounting)
+		return nil, w.unaccounted, fmt.Errorf("read %s: %d service cgroups: %w",
+			systemSlice, w.unaccounted, ErrNoMemoryAccounting)
 	}
 
-	return w.out, nil
+	return w.out, w.unaccounted, nil
 }
 
 // anonBytes returns anon + shmem from memory.stat content; anon must be present.

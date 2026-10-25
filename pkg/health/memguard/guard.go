@@ -223,11 +223,12 @@ type Guard struct {
 }
 
 // New creates the guard model. Each service's history is
-// CulpritWindow / ServiceInterval samples deep.
+// CulpritWindow / ServiceInterval + 1 samples deep: a window holds a sample at
+// each of its ends.
 func New(cfg Config) *Guard {
 	return &Guard{
 		cfg:     cfg,
-		depth:   max(1, int(cfg.CulpritWindow/ServiceInterval)),
+		depth:   max(1, int(cfg.CulpritWindow/ServiceInterval)+1),
 		entries: make(map[serviceKey]*entry),
 		ep:      Episode{State: StateIdle},
 	}

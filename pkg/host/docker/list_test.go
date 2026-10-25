@@ -5,6 +5,7 @@ import (
 	"errors"
 	"maps"
 	"slices"
+	"strings"
 	"testing"
 	"time"
 
@@ -21,6 +22,8 @@ type fakeEngine struct {
 	filterErr  error
 	nameMatch  []container.Summary // returned by a list filtered by name
 	nameErr    error
+	restarted  []string
+	restartErr error
 	stopped    []string
 	stopErr    error
 	inspected  []string
@@ -65,11 +68,12 @@ func (f *fakeEngine) ContainerInspect(
 }
 
 func (f *fakeEngine) ContainerRestart(
-	ctx context.Context, _ string, _ client.ContainerRestartOptions,
+	ctx context.Context, id string, _ client.ContainerRestartOptions,
 ) (client.ContainerRestartResult, error) {
 	f.recordDeadline(ctx)
+	f.restarted = append(f.restarted, id)
 
-	return client.ContainerRestartResult{}, nil
+	return client.ContainerRestartResult{}, f.restartErr
 }
 
 func (f *fakeEngine) recordDeadline(ctx context.Context) {
@@ -213,21 +217,45 @@ func TestInspectNotFound(t *testing.T) {
 	}
 }
 
-func TestStop(t *testing.T) {
+func TestActions(t *testing.T) {
 	errBoom := errors.New("boom")
 
-	f := &fakeEngine{}
-	if err := (&Client{api: f}).Stop(context.Background(), "web-app"); err != nil {
-		t.Fatalf("Stop() error = %v", err)
+	tests := []struct {
+		name string
+		fail bool
+		stop bool
+	}{
+		{name: "restart"},
+		{name: "restart fails", fail: true},
+		{name: "stop", stop: true},
+		{name: "stop fails", fail: true, stop: true},
 	}
-	if !slices.Equal(f.stopped, []string{"web-app"}) {
-		t.Errorf("stopped = %v, want [web-app]", f.stopped)
-	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			f := &fakeEngine{}
+			action, done := (&Client{api: f}).Restart, &f.restarted
+			if tt.stop {
+				action, done = (&Client{api: f}).Stop, &f.stopped
+			}
+			if tt.fail {
+				f.restartErr, f.stopErr = errBoom, errBoom
+			}
 
-	f = &fakeEngine{stopErr: errBoom}
-	err := (&Client{api: f}).Stop(context.Background(), "web-app")
-	if !errors.Is(err, errBoom) {
-		t.Errorf("Stop() error = %v, want wrapping %v", err, errBoom)
+			err := action(t.Context(), "web-app")
+			if !slices.Equal(*done, []string{"web-app"}) {
+				t.Errorf("acted on %v, want [web-app]", *done)
+			}
+			if !tt.fail {
+				if err != nil {
+					t.Fatalf("error = %v, want nil", err)
+				}
+
+				return
+			}
+			if !errors.Is(err, errBoom) || !strings.Contains(err.Error(), "web-app") {
+				t.Fatalf("error = %v, want wrapping %v and naming the container", err, errBoom)
+			}
+		})
 	}
 }
 

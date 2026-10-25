@@ -58,16 +58,9 @@ func text(o Outcome) string {
 	case OutcomeStopped:
 		return "memory: stopped " + subject(o) + ": " + repeat(o) + " (" + growth(o) + "); " + available(o)
 	case OutcomeWouldStop:
-		return "memory: would stop " + subject(
-			o,
-		) + ": " + repeat(
-			o,
-		) + " (" + growth(
-			o,
-		) + "); " + host(
-			o,
-			false,
-		) + preview
+		subj, grew := subject(o), growth(o)
+
+		return fmt.Sprintf("memory: would stop %s: %s (%s); %s%s", subj, repeat(o), grew, host(o, false), preview)
 	case OutcomeKilled:
 		return killed(o)
 	case OutcomeNotRecovered:
@@ -95,14 +88,9 @@ func actionFailed(o Outcome) string {
 }
 
 func notRecovered(o Outcome) string {
-	s := "memory: " + gerund(
-		o.Action,
-	) + " " + o.Service.Name + " (" + formatSize(
-		o.Size,
-	) + " before) did not free memory; " + host(
-		o,
-		true,
-	)
+	hostNow := host(o, true)
+	s := fmt.Sprintf("memory: %s %s (%s before) did not free memory; %s",
+		gerund(o.Action), o.Service.Name, formatSize(o.Size), hostNow)
 	if o.Top.Name != "" {
 		s += "; top: " + describe(o.Top)
 	}
@@ -163,18 +151,9 @@ func growth(o Outcome) string {
 
 // growthOf is "12→31 GB in 10 min".
 func growthOf(o Outcome) string {
-	return strings.TrimSuffix(
-		strings.TrimSuffix(formatSize(o.Before), " GB"),
-		".0",
-	) + "→" + formatSize(
-		o.Size,
-	) + " in " +
-		strings.Replace(
-			formatSpan(o.Window),
-			"m",
-			" min",
-			1,
-		)
+	span := strings.Replace(formatSpan(o.Window), "m", " min", 1)
+
+	return fmt.Sprintf("%s→%s in %s", formatGB(o.Before, false), formatGB(o.Size, true), span)
 }
 
 // repeat is "ran away again 2h10m after tgshd restarted it".
@@ -213,12 +192,23 @@ func describe(t Top) string {
 
 // formatSize shows GB with one decimal below 10 GB and none above.
 func formatSize(b uint64) string {
+	return formatGB(b, true)
+}
+
+// formatGB shows b in GB with one decimal below 10 GB and none above. With
+// unit it ends in " GB" ("3.0 GB"); without, a whole number drops its ".0", as
+// the low end of a range does ("3→22 GB").
+func formatGB(b uint64, unit bool) string {
 	v := float64(b) / float64(1<<30)
+	n := strconv.FormatFloat(v, 'f', 0, 64)
 	if one := strconv.FormatFloat(v, 'f', 1, 64); v < 10 && one != "10.0" {
-		return one + " GB"
+		n = one
+	}
+	if !unit {
+		return strings.TrimSuffix(n, ".0")
 	}
 
-	return strconv.FormatFloat(v, 'f', 0, 64) + " GB"
+	return n + " GB"
 }
 
 // formatSpan shows d rounded to whole minutes, at least one: "10m", "2h10m".

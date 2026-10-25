@@ -70,8 +70,8 @@ func TestShieldOOMFailureStillLocksMemory(t *testing.T) {
 
 func TestSyscallMlockallRejectsBadFlags(t *testing.T) {
 	// An invalid flag set must fail with EINVAL without locking anything.
-	if err := syscallMlockall(1 << 20); err == nil {
-		t.Fatal("want EINVAL for invalid flags")
+	if err := syscallMlockall(1 << 20); !errors.Is(err, syscall.EINVAL) {
+		t.Fatalf("syscallMlockall(bad flags) = %v, want EINVAL", err)
 	}
 }
 

@@ -1995,8 +1995,12 @@ func TestPushModeQueuesWhenTelegramFails(t *testing.T) {
 	if got := f.tlg.texts(); len(got) != 0 {
 		t.Fatalf("telegram = %q, want nothing while it fails", got)
 	}
-	if len(f.st.state.Queue) != 1 {
-		t.Fatalf("queue = %+v, want the event queued", f.st.state.Queue)
+	if q := f.st.state.Queue; len(q) != 1 || q[0].Key != "memory/guard/db" || q[0].Channel != "tlg" ||
+		q[0].Kind != "event" {
+		t.Fatalf("queue = %+v, want the event queued for Telegram", q)
+	}
+	if a := f.st.alerts; len(a) != 1 || a[0].Kind != store.KindEvent || a[0].Text != "stop record" {
+		t.Fatalf("alert log = %+v, want the one stop record", a)
 	}
 
 	f.tlg.setFail(false)

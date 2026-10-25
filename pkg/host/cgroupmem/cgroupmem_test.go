@@ -100,6 +100,47 @@ func TestServicesWithoutMemoryAccounting(t *testing.T) {
 	}
 }
 
+// TestSurveyCountsUnaccountedServices: beside accounted services, the
+// cgroups without memory.stat are counted, so the guard can say they are not
+// guarded.
+func TestSurveyCountsUnaccountedServices(t *testing.T) {
+	root := t.TempDir()
+	unit(t, root, "system.slice/ok.service", 10, 0, 20)
+	write(t, root, "system.slice/backup.service/cgroup.procs", "")
+	write(t, root, "system.slice/apps.slice/worker.service/cgroup.procs", "")
+
+	got, unaccounted, err := New(root, t.TempDir()).Survey()
+	if err != nil || len(got) != 1 || got[0].Name != "ok.service" || unaccounted != 2 {
+		t.Fatalf("Survey() = %+v, %d, %v; want ok.service and two unaccounted", got, unaccounted, err)
+	}
+}
+
+// TestNestedSliceGoneIsSkipped: a nested slice removed while the walk reads it
+// is skipped without an error.
+func TestNestedSliceGoneIsSkipped(t *testing.T) {
+	w := walk{r: New(t.TempDir(), t.TempDir())}
+	if err := w.nested("system.slice/gone.slice"); err != nil || len(w.out) != 0 || w.unaccounted != 0 {
+		t.Fatalf("nested(gone) = %v, out %+v, unaccounted %d; want skipped", err, w.out, w.unaccounted)
+	}
+}
+
+// TestServicesUnreadableMemoryStat: a memory.stat that exists but cannot be
+// read is an error, not a vanished cgroup.
+func TestServicesUnreadableMemoryStat(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a mode 0 file")
+	}
+	root := t.TempDir()
+	unit(t, root, "system.slice/locked.service", 10, 0, 20)
+	if err := os.Chmod(filepath.Join(root, "system.slice", "locked.service", "memory.stat"), 0); err != nil {
+		t.Fatal(err)
+	}
+	_, err := New(root, t.TempDir()).Services()
+	if !errors.Is(err, os.ErrPermission) {
+		t.Fatalf("Services() error = %v, want a permission error", err)
+	}
+}
+
 func TestServicesReadError(t *testing.T) {
 	root := t.TempDir()
 	write(t, root, "system.slice/bad.service/memory.stat", "anon notanumber\nshmem 0\n")

@@ -17,13 +17,14 @@ type Culprit struct {
 
 // Culprit returns the eligible or protected service with the largest growth
 // of anon within the culprit window ending at at (research R4). Growth must be
-// at least CulpritMinGrowth; ties go to the larger size, then to the lower ID.
+// at least CulpritMinGrowth, and never zero, even when CulpritMinGrowth is
+// (FR-003); ties go to the larger size, then to the lower ID.
 func (g *Guard) Culprit(at time.Time) (Culprit, bool) {
 	var best Culprit
 	found := false
 	for _, e := range g.entries {
 		c, ok := e.growth(at, g.cfg.CulpritWindow)
-		if !ok || c.Growth < g.cfg.CulpritMinGrowth {
+		if !ok || c.Growth == 0 || c.Growth < g.cfg.CulpritMinGrowth {
 			continue
 		}
 		if !found || beats(c, best) {

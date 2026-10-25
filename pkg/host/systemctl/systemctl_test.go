@@ -90,9 +90,10 @@ func TestExecRunnerCancelAndMissingBinary(t *testing.T) {
 	ctx, cancel := context.WithCancel(t.Context())
 	cancel()
 	c = New("sleep")
-	// "sleep --no-ask-password ..." fails anyway; a cancelled context must also be an error.
-	if err := c.Stop(ctx, "web-app.service"); err == nil {
-		t.Fatal("expected error for cancelled context")
+	// "sleep --no-ask-password ..." fails anyway: the error must be the
+	// cancellation, which do() puts in place of the exit error.
+	if err := c.Stop(ctx, "web-app.service"); !errors.Is(err, context.Canceled) {
+		t.Fatalf("Stop() error = %v, want context.Canceled", err)
 	}
 }
 

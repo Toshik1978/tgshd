@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 )
 
@@ -75,8 +76,8 @@ func TestReadPressure(t *testing.T) {
 
 func TestReadPressureMissing(t *testing.T) {
 	_, err := New(t.TempDir()).ReadPressure()
-	if !errors.Is(err, ErrNoPressure) {
-		t.Fatalf("got %v, want ErrNoPressure", err)
+	if !errors.Is(err, ErrNoPressure) || !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("got %v, want ErrNoPressure wrapping the missing file", err)
 	}
 }
 
@@ -101,24 +102,12 @@ func addProc(t *testing.T, root, pid, name string, rssKB int, cgroup string) {
 	t.Helper()
 	status := "Name:\t" + name + "\nState:\tS (sleeping)\n"
 	if rssKB >= 0 {
-		status += "VmRSS:\t" + itoa(rssKB) + " kB\n"
+		status += "VmRSS:\t" + strconv.Itoa(rssKB) + " kB\n"
 	}
 	write(t, root, pid+"/status", status)
 	if cgroup != "" {
 		write(t, root, pid+"/cgroup", cgroup)
 	}
-}
-
-func itoa(n int) string {
-	if n == 0 {
-		return "0"
-	}
-	s := ""
-	for ; n > 0; n /= 10 {
-		s = string(rune('0'+n%10)) + s
-	}
-
-	return s
 }
 
 func TestTopProcesses(t *testing.T) {

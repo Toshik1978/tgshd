@@ -118,8 +118,8 @@ func TestOwnCgroupNestedInsideService(t *testing.T) {
 
 func TestRingDepth(t *testing.T) {
 	g := New(testConfig())
-	if g.depth != 120 {
-		t.Fatalf("depth %d, want 120 (10m / 5s)", g.depth)
+	if g.depth != 121 {
+		t.Fatalf("depth %d, want 121 (10m / 5s, both ends of the window)", g.depth)
 	}
 	if d := New(Config{CulpritWindow: time.Second}).depth; d != 1 {
 		t.Fatalf("depth of a window below the interval %d, want 1", d)
@@ -188,6 +188,12 @@ func TestCulpritSawtooth(t *testing.T) {
 	if !ok || c.Service.ID != "container:web-app" || c.Growth != 2*gib {
 		t.Fatalf("after flush culprit %+v ok=%v", c, ok)
 	}
+	// The cache's own growth starts from the flushed sample: a pre-flush peak
+	// is never its minimum.
+	cache, ok := g.entries[serviceKey{kind: KindContainer, name: "cache"}].growth(at, g.cfg.CulpritWindow)
+	if !ok || cache.Growth != 0 || cache.Before != 4*gib || cache.Size != 4*gib {
+		t.Fatalf("after flush the cache's growth %+v ok=%v, want none from 4 GiB", cache, ok)
+	}
 }
 
 func TestCulpritMinimumOutsideWindowIsForgotten(t *testing.T) {
@@ -231,6 +237,19 @@ func TestCulpritBelowMinGrowth(t *testing.T) {
 	g.ObserveServices(at, []Sample{container("web-app", 3*gib)})
 	if c, ok := g.Culprit(at); !ok || c.Growth != gib {
 		t.Fatalf("growth equal to culprit_min_growth: %+v ok=%v", c, ok)
+	}
+}
+
+// TestCulpritNeedsGrowthWithoutMinGrowth: with culprit_min_growth unset the
+// model still never blames a service that did not grow (FR-003).
+func TestCulpritNeedsGrowthWithoutMinGrowth(t *testing.T) {
+	g := New(Config{CulpritWindow: 10 * time.Minute})
+	at := feed(g, [][]Sample{
+		{container("web-app", 2*gib), container("cache", 30*gib)},
+		{container("web-app", 2*gib), container("cache", 30*gib)},
+	})
+	if c, ok := g.Culprit(at); ok {
+		t.Fatalf("a flat service is the culprit: %+v", c)
 	}
 }
 

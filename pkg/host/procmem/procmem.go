@@ -94,11 +94,11 @@ func (r *Reader) ReadMemInfo() (MemInfo, error) {
 }
 
 // ReadPressure parses the some and full avg10/avg60 values of /proc/pressure/memory.
-// A missing file yields ErrNoPressure.
+// A missing file yields ErrNoPressure, wrapping the path error.
 func (r *Reader) ReadPressure() (Pressure, error) {
 	data, err := os.ReadFile(filepath.Join(r.root, "pressure", "memory"))
 	if errors.Is(err, os.ErrNotExist) {
-		return Pressure{}, ErrNoPressure
+		return Pressure{}, fmt.Errorf("%w: %w", ErrNoPressure, err)
 	}
 	if err != nil {
 		return Pressure{}, fmt.Errorf("read memory pressure: %w", err)

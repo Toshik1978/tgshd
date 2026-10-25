@@ -141,12 +141,18 @@ func (r Record) Equal(o Record) bool {
 		r.Before == o.Before && r.Mode == o.Mode
 }
 
+// Within reports whether r is still within window at at, the repeat_window
+// rule every holder of the records prunes by.
+func (r Record) Within(window time.Duration, at time.Time) bool {
+	return at.Sub(r.At) <= window
+}
+
 // MergeRecords returns the records of own and of more still within window at
 // at, each once, oldest first. It never changes own or more.
 func MergeRecords(window time.Duration, at time.Time, own, more []Record) []Record {
 	merged := make([]Record, 0, len(own)+len(more))
 	for _, r := range slices.Concat(own, more) {
-		if at.Sub(r.At) <= window && !slices.ContainsFunc(merged, r.Equal) {
+		if r.Within(window, at) && !slices.ContainsFunc(merged, r.Equal) {
 			merged = append(merged, r)
 		}
 	}
@@ -333,7 +339,7 @@ func (g *Guard) actionFor(id string, at time.Time) (Action, time.Time) {
 
 // live reports whether r is still within the repeat window at at.
 func (g *Guard) live(r Record, at time.Time) bool {
-	return at.Sub(r.At) <= g.cfg.RepeatWindow
+	return r.Within(g.cfg.RepeatWindow, at)
 }
 
 // Merge adds records restored after the guard started to its own: a record it
