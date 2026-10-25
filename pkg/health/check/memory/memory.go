@@ -156,16 +156,9 @@ func (c *Check) judgeAvailable(res *health.CheckResult, host Host, top *topLooku
 	reading := health.Reading{Key: keyAvailable, Verdict: health.Good, Text: percent(pct) + " available"}
 	if pct < float64(c.settings.WarnAvailablePercent) {
 		reading.Verdict = health.Bad
-		reading.Text = fmt.Sprintf(
-			"%s available (%s of %s GB)%s",
-			percentNear(
-				pct,
-				c.settings.WarnAvailablePercent,
-			),
-			number(float64(host.Available)/gib),
-			number(float64(host.Total)/gib),
-			top.suffix(),
-		)
+		level := percentNear(pct, c.settings.WarnAvailablePercent)
+		have, total := number(float64(host.Available)/gib), number(float64(host.Total)/gib)
+		reading.Text = fmt.Sprintf("%s available (%s of %s GB)%s", level, have, total, top.suffix())
 	}
 	res.Readings = append(res.Readings, reading)
 }
@@ -178,16 +171,9 @@ func (c *Check) judgeSwap(res *health.CheckResult, host Host, top *topLookup) {
 	reading := health.Reading{Key: keySwap, Verdict: health.Good, Text: "swap " + percent(pct) + " used"}
 	if pct > float64(c.settings.WarnSwapPercent) {
 		reading.Verdict = health.Bad
-		reading.Text = fmt.Sprintf(
-			"swap %s used (%s of %s GB)%s",
-			percentNear(
-				pct,
-				c.settings.WarnSwapPercent,
-			),
-			number(float64(used)/gib),
-			number(float64(host.SwapTotal)/gib),
-			top.suffix(),
-		)
+		level := percentNear(pct, c.settings.WarnSwapPercent)
+		have, total := number(float64(used)/gib), number(float64(host.SwapTotal)/gib)
+		reading.Text = fmt.Sprintf("swap %s used (%s of %s GB)%s", level, have, total, top.suffix())
 	}
 	res.Readings = append(res.Readings, reading)
 }
@@ -198,10 +184,8 @@ func (c *Check) judgePressure(res *health.CheckResult, host Host, top *topLookup
 	reading := health.Reading{Key: keyPressure, Verdict: health.Good, Text: "pressure " + percent(host.SomeAvg60)}
 	if host.SomeAvg60 > float64(c.settings.WarnPressurePercent) {
 		reading.Verdict = health.Bad
-		reading.Text = "pressure " + percentNear(
-			host.SomeAvg60,
-			c.settings.WarnPressurePercent,
-		) + " (stalled, 1 min avg)" + top.suffix()
+		level := percentNear(host.SomeAvg60, c.settings.WarnPressurePercent)
+		reading.Text = "pressure " + level + " (stalled, 1 min avg)" + top.suffix()
 	}
 	res.Readings = append(res.Readings, reading)
 }
@@ -277,10 +261,17 @@ func percentOf(part, whole uint64) float64 {
 func percent(v float64) string { return strconv.FormatFloat(v, 'f', 0, 64) + "%" }
 
 // percentNear is percent, but with one decimal when rounding would land on the
-// warn level: a problem must never read "15% available" at a floor of 15.
+// warn level: a problem must never read "15% available" at a floor of 15. The
+// decimal is cut on the level's side, so 14.96 at a floor of 15 reads 14.9%
+// and never 15.0%.
 func percentNear(v float64, level int) string {
 	if math.Round(v) == float64(level) {
-		return strconv.FormatFloat(v, 'f', 1, 64) + "%"
+		tenths := math.Ceil(v*10) / 10
+		if v < float64(level) {
+			tenths = math.Floor(v*10) / 10
+		}
+
+		return strconv.FormatFloat(tenths, 'f', 1, 64) + "%"
 	}
 
 	return percent(v)

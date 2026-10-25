@@ -296,6 +296,13 @@ func TestWarnLevelBoundaries(t *testing.T) {
 			"14.6% available (146 of 1000 GB)",
 		},
 		{
+			"available rounds to the floor at one decimal",
+			"memory/available",
+			func(h *memory.Host) { h.Available = 149*gb + gb*96/100 },
+			health.Bad,
+			"14.9% available (150 of 1000 GB)",
+		},
+		{
 			"swap at the ceiling",
 			"memory/swap",
 			func(h *memory.Host) { h.SwapFree = 200 * gb },
