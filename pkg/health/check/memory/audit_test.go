@@ -146,7 +146,7 @@ func TestAuditRaisesOneProblemNamingEveryContainerLargestFirst(t *testing.T) {
 	res := memory.New(src, auditSettings()).Run(context.Background())
 
 	r := find(t, res, keyLimit)
-	want := "3 containers run without a memory limit: web-app 31 GB, worker 3 GB, cache 1.2 GB; top: web-app 31 GB"
+	want := "memory: 3 containers run without a memory limit: web-app 31 GB, worker 3 GB, cache 1.2 GB"
 	if r.Verdict != health.Bad || r.Kind != health.State || r.Text != want {
 		t.Fatalf("reading = %+v, want text %q", r, want)
 	}
@@ -163,7 +163,7 @@ func TestAuditNamesOneContainerAndOneWithoutASample(t *testing.T) {
 
 	r := find(t, memory.New(src, auditSettings()).Run(context.Background()), keyLimit)
 
-	if want := "1 container runs without a memory limit: web-app"; r.Text != want {
+	if want := "memory: 1 container runs without a memory limit: web-app"; r.Text != want {
 		t.Fatalf("text = %q, want %q", r.Text, want)
 	}
 }
@@ -179,7 +179,7 @@ func TestAuditOrdersEqualAndUnsampledContainersByName(t *testing.T) {
 
 	r := find(t, memory.New(src, auditSettings()).Run(context.Background()), keyLimit)
 
-	want := "4 containers run without a memory limit: cache 2 GB, worker 2 GB, alpha, queue-ok; top: worker 2 GB"
+	want := "memory: 4 containers run without a memory limit: cache 2 GB, worker 2 GB, alpha, queue-ok"
 	if r.Text != want {
 		t.Fatalf("text = %q, want %q", r.Text, want)
 	}
@@ -201,7 +201,8 @@ func TestAuditResolvesWhenTheSetEmpties(t *testing.T) {
 
 	res := c.Run(context.Background())
 	r := find(t, res, keyLimit)
-	if r.Verdict != health.Good || r.Kind != health.State || r.Text != "every container runs with a memory limit" {
+	if r.Verdict != health.Good || r.Kind != health.State ||
+		r.Text != "memory: every container runs with a memory limit" {
 		t.Fatalf("resolved reading = %+v", r)
 	}
 	if ev := limitEvents(res); len(ev) != 0 {
@@ -230,7 +231,7 @@ func TestAuditSkipsExcludedContainers(t *testing.T) {
 
 	r := find(t, memory.New(src, auditSettings("scratch-job", "runner-*")).Run(context.Background()), keyLimit)
 
-	if want := "2 containers run without a memory limit: runner, web-app"; r.Text != want {
+	if want := "memory: 2 containers run without a memory limit: runner, web-app"; r.Text != want {
 		t.Fatalf("text = %q, want %q", r.Text, want)
 	}
 }
@@ -274,11 +275,11 @@ func TestAuditCutsTheListOnlyPastOneMessage(t *testing.T) {
 	if n := len(utf16.Encode([]rune(r.Text))); n > units-200 {
 		t.Fatalf("text is %d units, leaves no room for the message prefix", n)
 	}
-	if !strings.HasPrefix(r.Text, "201 containers run without a memory limit: web-app 31 GB, worker-000-") {
+	if !strings.HasPrefix(r.Text, "memory: 201 containers run without a memory limit: web-app 31 GB, worker-000-") {
 		t.Fatalf("head = %.80q", r.Text)
 	}
 	shown := strings.Count(r.Text, "worker-")
-	want := fmt.Sprintf(", … and %d more; top: web-app 31 GB", 200-shown)
+	want := fmt.Sprintf(", … and %d more", 200-shown)
 	if shown == 0 || !strings.HasSuffix(r.Text, want) {
 		t.Fatalf("tail = %q, want suffix %q", r.Text[len(r.Text)-60:], want)
 	}
@@ -312,7 +313,7 @@ func TestAuditCutsEveryNameWhenNoneFits(t *testing.T) {
 
 	r := find(t, memory.New(src, auditSettings()).Run(context.Background()), keyLimit)
 
-	if want := "2 containers run without a memory limit: … and 2 more"; r.Text != want {
+	if want := "memory: 2 containers run without a memory limit: … and 2 more"; r.Text != want {
 		t.Fatalf("text = %.120q, want %q", r.Text, want)
 	}
 }
@@ -327,11 +328,11 @@ func TestAuditAnnouncesAContainerJoiningAnOpenProblemOnce(t *testing.T) {
 	res := r.chk.Run(context.Background())
 	ev := limitEvents(res)
 	if len(ev) != 1 || ev[0].Key != keyLimit+"/queue-ok" || ev[0].Mode != health.ModeDefault ||
-		ev[0].Text != "container queue-ok runs without a memory limit" {
+		ev[0].Text != "memory: container queue-ok runs without a memory limit" {
 		t.Fatalf("events = %+v, want one for queue-ok", ev)
 	}
 	if rd := find(t, res, keyLimit); rd.Verdict != health.Bad ||
-		rd.Text != "2 containers run without a memory limit: queue-ok, web-app" {
+		rd.Text != "memory: 2 containers run without a memory limit: queue-ok, web-app" {
 		t.Fatalf("problem = %+v", rd)
 	}
 	r.eng.Apply(r.now, "memory", rigInterval, 0, res.Readings)
@@ -349,7 +350,7 @@ func TestAuditDoesNotAnnounceALeaver(t *testing.T) {
 	if ev := limitEvents(res); len(ev) != 0 {
 		t.Fatalf("events = %+v, want none", ev)
 	}
-	if rd := find(t, res, keyLimit); rd.Text != "1 container runs without a memory limit: web-app" {
+	if rd := find(t, res, keyLimit); rd.Text != "memory: 1 container runs without a memory limit: web-app" {
 		t.Fatalf("problem = %+v", rd)
 	}
 }
@@ -388,7 +389,7 @@ func TestAuditCountsAContainerDockerIsRestarting(t *testing.T) {
 	looping.Running, looping.Restarting = false, true
 	src.containers = []memory.Container{kept("web-app"), looping}
 	res := r.chk.Run(context.Background())
-	if rd := find(t, res, keyLimit); rd.Text != "2 containers run without a memory limit: web-app, worker" {
+	if rd := find(t, res, keyLimit); rd.Text != "memory: 2 containers run without a memory limit: web-app, worker" {
 		t.Fatalf("problem = %+v, want worker still counted", rd)
 	}
 	r.eng.Apply(r.now, "memory", rigInterval, 0, res.Readings)

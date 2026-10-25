@@ -85,13 +85,14 @@ func TestEngineKeepsOneProblemWhileTheTopConsumerChanges(t *testing.T) {
 		t.Fatalf("top consumer changed: alerts = %+v, want none", again)
 	}
 	c, ok := eng.Condition("memory/available")
-	if !ok || !c.Open || c.LastText != "9% available (5.6 of 62 GB); top: worker 33 GB" || !c.StreakStart.Equal(t0) {
+	if !ok || !c.Open || c.LastText != "memory: 9% available (5.6 of 62 GB); top: worker 33 GB" ||
+		!c.StreakStart.Equal(t0) {
 		t.Fatalf("condition = %+v; want open since %v with the latest text", c, t0)
 	}
 
 	src.host = healthy()
 	resolved := apply(t0.Add(time.Minute))
-	if len(resolved) != 1 || resolved[0].Kind != health.AlertResolved || resolved[0].Text != "45% available" {
+	if len(resolved) != 1 || resolved[0].Kind != health.AlertResolved || resolved[0].Text != "memory: 45% available" {
 		t.Fatalf("resolved = %+v", resolved)
 	}
 }

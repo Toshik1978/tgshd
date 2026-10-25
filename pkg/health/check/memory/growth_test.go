@@ -59,7 +59,7 @@ func TestGrowthSteadyClimbOpens(t *testing.T) {
 
 	r := growthReading(t, res, "web-app")
 	if r.Verdict != health.Bad || r.Kind != health.State ||
-		r.Text != "web-app grew 12→28 GB in 40 min; top: web-app 28 GB" {
+		r.Text != "memory: web-app grew 12→28 GB in 40 min; top: web-app 28 GB" {
 		t.Fatalf("reading = %+v", r)
 	}
 }
@@ -73,7 +73,7 @@ func TestGrowthBelowWarnStaysGood(t *testing.T) {
 	res := step(chk, src, c, 10*time.Minute, map[string]uint64{"db": 13 * gb})
 
 	r := growthReading(t, res, "db")
-	if r.Verdict != health.Good || r.Text != "db at 13 GB" {
+	if r.Verdict != health.Good || r.Text != "memory: db at 13 GB" {
 		t.Fatalf("reading = %+v", r)
 	}
 }
@@ -116,7 +116,7 @@ func TestGrowthFlatServiceStaysGood(t *testing.T) {
 	for range 70 {
 		res = step(chk, src, c, time.Minute, map[string]uint64{"db": 12 * gb})
 	}
-	if r := growthReading(t, res, "db"); r.Verdict != health.Good || r.Text != "db at 12 GB" {
+	if r := growthReading(t, res, "db"); r.Verdict != health.Good || r.Text != "memory: db at 12 GB" {
 		t.Fatalf("reading = %+v", r)
 	}
 }
@@ -174,7 +174,7 @@ func TestGrowthHysteresisAndResolve(t *testing.T) {
 	step(chk, src, c, 5*time.Minute, map[string]uint64{"web-app": 15 * gb})
 	res = step(chk, src, c, 5*time.Minute, map[string]uint64{"web-app": 15 * gb})
 	r := growthReading(t, res, "web-app")
-	if r.Verdict != health.Good || r.Text != "web-app at 15 GB" {
+	if r.Verdict != health.Good || r.Text != "memory: web-app at 15 GB" {
 		t.Fatalf("reading = %+v", r)
 	}
 }
@@ -227,7 +227,7 @@ func TestGrowthExportRestore(t *testing.T) {
 	}
 	res := step(fresh, src, c, 10*time.Minute, map[string]uint64{"web-app": 22 * gb})
 	r := growthReading(t, res, "web-app")
-	if r.Verdict != health.Bad || r.Text != "web-app grew 10→22 GB in 20 min; top: web-app 22 GB" {
+	if r.Verdict != health.Bad || r.Text != "memory: web-app grew 10→22 GB in 20 min; top: web-app 22 GB" {
 		t.Fatalf("reading = %+v", r)
 	}
 
@@ -280,7 +280,7 @@ func TestGrowthProblemTopLookupHappensOncePerRun(t *testing.T) {
 			t.Errorf("%s reading = %+v", name, r)
 		}
 	}
-	if r := find(t, res, "memory/limit"); r.Verdict != health.Bad || !strings.Contains(r.Text, "; top: ") {
+	if r := find(t, res, "memory/limit"); r.Verdict != health.Bad || strings.Contains(r.Text, "; top: ") {
 		t.Errorf("limit reading = %+v", r)
 	}
 	// One read for the growth history, one shared top lookup for every problem.
@@ -298,7 +298,7 @@ func TestGrowthSubMinuteSpanPrintsOneMinute(t *testing.T) {
 	res := step(chk, src, c, 20*time.Second, map[string]uint64{"web-app": 20 * gb})
 
 	r := growthReading(t, res, "web-app")
-	if want := "web-app grew 10→20 GB in 1 min; top: web-app 20 GB"; r.Verdict != health.Bad || r.Text != want {
+	if want := "memory: web-app grew 10→20 GB in 1 min; top: web-app 20 GB"; r.Verdict != health.Bad || r.Text != want {
 		t.Fatalf("reading = %+v, want %q", r, want)
 	}
 }
@@ -341,7 +341,7 @@ func TestGrowthRestoreReadsTheBareRingsOfAnOlderVersion(t *testing.T) {
 	}
 	res := step(chk, src, c, 10*time.Minute, map[string]uint64{"web-app": 16 * gb})
 	r := growthReading(t, res, "web-app")
-	want := "web-app grew 10→16 GB in 10 min; top: web-app 16 GB"
+	want := "memory: web-app grew 10→16 GB in 10 min; top: web-app 16 GB"
 	if r.Verdict != health.Bad || r.Text != want {
 		t.Fatalf("reading = %+v", r)
 	}

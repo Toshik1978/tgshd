@@ -3,7 +3,8 @@
 Amends [002 contracts/telegram-commands.md](../../002-deeper-health-checks/contracts/telegram-commands.md)
 ("Pushed messages", `/status`). Sizes are shown in GB with one decimal below 10 GB and none above
 (`5.6 GB`, `31 GB`); `<top>` is `<name> <size>` of the largest service, or of the largest process
-(`python3 (pid 4242)`) when no service holds most of the memory.
+(`python3 (pid 4242)`) when no service holds most of the memory. Every warning but the limit list
+ends with `; top: <top>`: that list is already sorted by size.
 
 ## Warnings (PROBLEM / RESOLVED, channel `mode`)
 
@@ -12,7 +13,7 @@ PROBLEM: memory: 9% available (5.6 of 62 GB); top: web-app 31 GB (since 01:10)
 PROBLEM: memory: swap 85% used (6.8 of 8 GB); top: web-app 31 GB
 PROBLEM: memory: pressure 12% (stalled, 1 min avg); top: web-app 31 GB
 PROBLEM: memory: web-app grew 12→31 GB in 40 min; top: web-app 31 GB
-PROBLEM: memory: 3 containers run without a memory limit: web-app 31 GB, worker 3 GB, cache 1.2 GB; top: web-app 31 GB
+PROBLEM: memory: 3 containers run without a memory limit: web-app 31 GB, worker 3 GB, cache 1.2 GB
 RESOLVED: memory: 45% available
 RESOLVED: memory: swap 20% used
 RESOLVED: memory: pressure 0%

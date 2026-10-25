@@ -321,7 +321,7 @@ there is no memory check and no guard.
   (restarted by Swarm, not by their own policy) are not audited. A container
   Docker is restarting (crash-loop backoff) stays counted. One
   problem names them all, largest first, e.g.
-  `PROBLEM: memory: 3 containers run without a memory limit: web-app 31 GB, worker 3 GB, cache 1.2 GB; top: web-app 31 GB`
+  `PROBLEM: memory: 3 containers run without a memory limit: web-app 31 GB, worker 3 GB, cache 1.2 GB`
   (only a list too long for one message ends with `… and K more`). It
   resolves when none is left (`every container runs with a memory limit`).
   Once the PROBLEM is open (after `threshold`), a container that joins is

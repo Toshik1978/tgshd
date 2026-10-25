@@ -2918,7 +2918,7 @@ func TestMemoryCheckAuditsContainerLimits(t *testing.T) {
 			got = append(got, r)
 		}
 	}
-	want := "1 container runs without a memory limit: web-app"
+	want := "memory: 1 container runs without a memory limit: web-app"
 	if len(got) != 1 || got[0].Key != "memory/limit" || got[0].Verdict != health.Bad ||
 		!strings.HasPrefix(got[0].Text, want) {
 		t.Fatalf("limit readings = %+v, want one problem naming only web-app (scratch-job excluded)", got)

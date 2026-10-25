@@ -33,6 +33,9 @@ const (
 // kindUnreadable is the CheckError kind of a failed source read.
 const kindUnreadable = "unreadable"
 
+// subject starts every text of the check, so an alert names its sender.
+const subject = "memory: "
+
 const gib = float64(1 << 30)
 
 // ErrNoPressure marks a host without memory pressure information (PSI off).
@@ -173,12 +176,12 @@ func (c *Check) judgeAvailable(res *health.CheckResult, host Host, top *topLooku
 	pct := percentOf(host.Available, host.Total)
 	res.Samples = append(res.Samples, health.Sample{Metric: metricAvailable, Value: pct})
 
-	reading := health.Reading{Key: keyAvailable, Verdict: health.Good, Text: percent(pct) + " available"}
+	reading := health.Reading{Key: keyAvailable, Verdict: health.Good, Text: subject + percent(pct) + " available"}
 	if pct < float64(c.settings.WarnAvailablePercent) {
 		reading.Verdict = health.Bad
 		level := percentNear(pct, c.settings.WarnAvailablePercent)
 		have, total := number(float64(host.Available)/gib), number(float64(host.Total)/gib)
-		reading.Text = fmt.Sprintf("%s available (%s of %s GB)%s", level, have, total, top.suffix())
+		reading.Text = fmt.Sprintf(subject+"%s available (%s of %s GB)%s", level, have, total, top.suffix())
 	}
 	res.Readings = append(res.Readings, reading)
 }
@@ -188,12 +191,12 @@ func (c *Check) judgeSwap(res *health.CheckResult, host Host, top *topLookup) {
 	pct := percentOf(used, host.SwapTotal)
 	res.Samples = append(res.Samples, health.Sample{Metric: metricSwap, Value: pct})
 
-	reading := health.Reading{Key: keySwap, Verdict: health.Good, Text: "swap " + percent(pct) + " used"}
+	reading := health.Reading{Key: keySwap, Verdict: health.Good, Text: subject + "swap " + percent(pct) + " used"}
 	if pct > float64(c.settings.WarnSwapPercent) {
 		reading.Verdict = health.Bad
 		level := percentNear(pct, c.settings.WarnSwapPercent)
 		have, total := number(float64(used)/gib), number(float64(host.SwapTotal)/gib)
-		reading.Text = fmt.Sprintf("swap %s used (%s of %s GB)%s", level, have, total, top.suffix())
+		reading.Text = fmt.Sprintf(subject+"swap %s used (%s of %s GB)%s", level, have, total, top.suffix())
 	}
 	res.Readings = append(res.Readings, reading)
 }
@@ -201,11 +204,13 @@ func (c *Check) judgeSwap(res *health.CheckResult, host Host, top *topLookup) {
 func (c *Check) judgePressure(res *health.CheckResult, host Host, top *topLookup) {
 	res.Samples = append(res.Samples, health.Sample{Metric: metricPressure, Value: host.SomeAvg60})
 
-	reading := health.Reading{Key: keyPressure, Verdict: health.Good, Text: "pressure " + percent(host.SomeAvg60)}
+	reading := health.Reading{
+		Key: keyPressure, Verdict: health.Good, Text: subject + "pressure " + percent(host.SomeAvg60),
+	}
 	if host.SomeAvg60 > float64(c.settings.WarnPressurePercent) {
 		reading.Verdict = health.Bad
 		level := percentNear(host.SomeAvg60, c.settings.WarnPressurePercent)
-		reading.Text = "pressure " + level + " (stalled, 1 min avg)" + top.suffix()
+		reading.Text = subject + "pressure " + level + " (stalled, 1 min avg)" + top.suffix()
 	}
 	res.Readings = append(res.Readings, reading)
 }

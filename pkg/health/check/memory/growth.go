@@ -99,7 +99,7 @@ func (c *Check) judgeService(name string, top *topLookup) (health.Verdict, strin
 		c.growth.opened[name] = true
 
 		return health.Bad, fmt.Sprintf(
-			"%s grew %s→%s in %s%s",
+			subject+"%s grew %s→%s in %s%s",
 			name,
 			number(float64(ring[low].Anon)/gib),
 			size(latest.Anon),
@@ -110,7 +110,7 @@ func (c *Check) judgeService(name string, top *topLookup) (health.Verdict, strin
 
 	delete(c.growth.opened, name)
 
-	return health.Good, name + " at " + size(latest.Anon)
+	return health.Good, subject + name + " at " + size(latest.Anon)
 }
 
 // pruneLocked drops points older than the window and services left empty.

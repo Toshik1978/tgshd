@@ -124,7 +124,7 @@ func (c *Check) judgeLimits(ctx context.Context, res *health.CheckResult, top *t
 	if len(counted) == 0 {
 		res.Readings = append(res.Readings, health.Reading{
 			Key: keyLimit, Kind: health.State, Verdict: health.Good,
-			Text: "every container runs with a memory limit",
+			Text: subject + "every container runs with a memory limit",
 		})
 		// The audit is left as it was: if this run is dropped, the engine
 		// still has the PROBLEM open with the previous text.
@@ -132,7 +132,7 @@ func (c *Check) judgeLimits(ctx context.Context, res *health.CheckResult, top *t
 	}
 
 	named := largestFirst(slices.Collect(maps.Keys(counted)), top.services())
-	text := limitText(named, top.suffix())
+	text := limitText(named)
 	res.Readings = append(res.Readings, health.Reading{
 		Key: keyLimit, Kind: health.State, Verdict: health.Bad, Text: text,
 	})
@@ -157,7 +157,7 @@ func (c *Check) announceJoiners(res *health.CheckResult, named []namedContainer,
 			if !known[n.name] {
 				res.Readings = append(res.Readings, health.Reading{
 					Key: keyLimit + "/" + n.name, Kind: health.Event, Verdict: health.Bad,
-					Text: fmt.Sprintf("container %s runs without a memory limit", n.name),
+					Text: subject + "container " + n.name + " runs without a memory limit",
 				})
 			}
 		}
@@ -217,28 +217,28 @@ func largestFirst(names []string, services []Service) []namedContainer {
 	return out
 }
 
-// limitText is "3 containers run without a memory limit: web-app 31 GB,
-// worker 3 GB, cache 1.2 GB" plus suffix. Only when that would not fit
+// limitText is "memory: 3 containers run without a memory limit: web-app
+// 31 GB, worker 3 GB, cache 1.2 GB". Only when that would not fit
 // limitTextUnits are the last names cut to "… and K more".
-func limitText(named []namedContainer, suffix string) string {
-	head := strconv.Itoa(len(named)) + " containers run without a memory limit: "
+func limitText(named []namedContainer) string {
+	head := subject + strconv.Itoa(len(named)) + " containers run without a memory limit: "
 	if len(named) == 1 {
-		head = "1 container runs without a memory limit: "
+		head = subject + "1 container runs without a memory limit: "
 	}
 	parts := make([]string, len(named))
-	total := units(head) + units(suffix)
+	total := units(head)
 	for i, n := range named {
 		parts[i] = n.String()
 		total += units(parts[i])
 	}
 	total += 2 * (len(parts) - 1) // ", " separators
 	if total <= limitTextUnits {
-		return head + strings.Join(parts, ", ") + suffix
+		return head + strings.Join(parts, ", ")
 	}
 
 	// Keep the longest prefix that fits with its "… and K more" tail; the
 	// running length makes this one pass.
-	fixed := units(head) + units(suffix)
+	fixed := units(head)
 	shown, used := 0, 0
 	for i, part := range parts {
 		width := units(part)
@@ -253,10 +253,10 @@ func limitText(named []namedContainer, suffix string) string {
 		shown = i + 1
 	}
 	if shown == 0 {
-		return head + fmt.Sprintf("… and %d more", len(parts)) + suffix
+		return head + fmt.Sprintf("… and %d more", len(parts))
 	}
 
-	return head + strings.Join(parts[:shown], ", ") + fmt.Sprintf(", … and %d more", len(parts)-shown) + suffix
+	return head + strings.Join(parts[:shown], ", ") + fmt.Sprintf(", … and %d more", len(parts)-shown)
 }
 
 // units counts s in UTF-16 code units, as Telegram does.
