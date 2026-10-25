@@ -117,7 +117,7 @@ type Memory struct {
 type Guard struct {
 	Intervene Intervene `yaml:"intervene"`
 	// NeverTouch lists container names or systemd unit names that the guard
-	// never stops or restarts.
+	// never stops or restarts. A unit may be named without ".service".
 	NeverTouch []string `yaml:"never_touch"`
 
 	DangerAvailablePercent int      `yaml:"danger_available_percent"`

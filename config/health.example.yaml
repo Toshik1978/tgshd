@@ -93,7 +93,8 @@ memory:                                     # absent => no memory check and no g
   guard:                                    # the fast guard: runs on its own, not on the check interval
     intervene: report                       # off | report | act. Start in report, check the "would restart"
                                             # messages name the right service, then switch to act
-    never_touch: [ "db", "backup.service" ] # container names or systemd unit names the guard never stops or restarts
+    never_touch: [ "db", "backup.service" ] # container names or systemd unit names the guard never stops or restarts;
+                                            # a unit may be named without .service ("backup" = backup.service)
     danger_available_percent: 5             # 1-50, must be below warn_available_percent
     danger_pressure_percent: 20             # 1-100: PSI "full" avg10, share of time every task waited
     danger_for: 30s                         # 5s-5m: both danger conditions must hold this long
@@ -101,7 +102,7 @@ memory:                                     # absent => no memory check and no g
     culprit_min_growth: 1GB                 # a service must have grown by this much to be blamed
     repeat_window: 6h                       # 0 disables the stop rule (always restart); else a repeat inside it stops
     recovery_window: 2m                     # 30s-30m: wait this long after an action before judging it
-    action_timeout: 60s                     # 10s-5m: then the kernel kills the service's cgroup directly
+    action_timeout: 60s                     # 10s-5m: docker/systemctl get this long, then the kernel kills the service's cgroup
     failed_mode: sms                        # tlg | sms | tlg-or-sms: reports when tgshd could not fix it
 
 containers:

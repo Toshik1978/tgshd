@@ -266,10 +266,8 @@ func (g *memoryGuard) run(ctx context.Context, r guardRunner) {
 	errs := g.applyShield()
 
 	sampler := guardSampler{mem: g.host.mem, cgroups: g.host.cgroups, names: g.host.names}
-	if _, err := g.host.cgroups.Services(); err != nil {
-		errs = append(errs, startError{
-			guardCgroupKey, "no cgroup v2 service cgroups, the memory guard is not started: " + err.Error(),
-		})
+	if text := serviceCgroupsError(g.host.cgroups); text != "" {
+		errs = append(errs, startError{guardCgroupKey, text})
 		g.setMode(guardNotRunning)
 		raiseAll(r, errs)
 
@@ -296,7 +294,9 @@ func (g *memoryGuard) run(ctx context.Context, r guardRunner) {
 	wg.Go(func() { g.refreshNames(ctx) })
 
 	loop := memguard.NewLoop(cfg, g.host.clock, sampler,
-		guardActuator{containers: g.host.containers, units: g.host.units, cgroups: g.host.cgroups},
+		guardActuator{
+			containers: g.host.containers, units: g.host.units, cgroups: g.host.cgroups, timeout: cfg.ActionTimeout,
+		},
 		guardReporter{runner: r, state: g.state}, memguard.WithLogger(g.log))
 	loop.Restore(g.state.start(loop.RestoreLate))
 	g.log.Info("Memory guard started", zap.String("intervene", string(cfg.Mode)))
@@ -306,6 +306,26 @@ func (g *memoryGuard) run(ctx context.Context, r guardRunner) {
 	writer.Wait()
 	// The loop saved its last records on its way out: write what is left.
 	g.write(context.WithoutCancel(ctx))
+}
+
+// serviceCgroupsError says why the guard cannot measure the services, or ""
+// when it can. Without cgroup v2, or without memory accounting on the
+// services, no service could ever be blamed: the guard would only report, in
+// act too, so it is not started and the operator is told.
+func serviceCgroupsError(cgroups guardCgroups) string {
+	const notStarted = ", the memory guard is not started"
+	svcs, err := cgroups.Services()
+	switch {
+	case errors.Is(err, cgroupmem.ErrNoMemoryAccounting):
+		return "memory accounting is off for the system.slice services" + notStarted +
+			" (set DefaultMemoryAccounting=yes in systemd): " + err.Error()
+	case err != nil:
+		return "no cgroup v2 service cgroups" + notStarted + ": " + err.Error()
+	case len(svcs) == 0:
+		return "memory accounting shows no service cgroup under system.slice" + notStarted
+	}
+
+	return ""
 }
 
 // writeRecords writes the intervention records to kv memory.guard each time
@@ -570,15 +590,20 @@ func (s guardSampler) TopProcess() (memguard.Top, error) {
 }
 
 // guardActuator restarts and stops services through Docker or systemctl and
-// kills their cgroup when the runtime does not answer.
+// kills their cgroup when the runtime does not answer. Every restart and stop
+// runs under a deadline of timeout (action_timeout), so neither Docker nor
+// systemctl gives up earlier than the bound the guard's messages name.
 type guardActuator struct {
 	containers guardContainers
 	units      guardUnits
 	cgroups    guardCgroups
+	timeout    time.Duration
 }
 
 // Restart implements memguard.Actuator.
 func (a guardActuator) Restart(ctx context.Context, s memguard.Service) error {
+	ctx, cancel := context.WithTimeout(ctx, a.timeout)
+	defer cancel()
 	if s.Kind == memguard.KindContainer {
 		return containerError(a.containers.Restart(ctx, s.Name))
 	}
@@ -588,6 +613,8 @@ func (a guardActuator) Restart(ctx context.Context, s memguard.Service) error {
 
 // Stop implements memguard.Actuator.
 func (a guardActuator) Stop(ctx context.Context, s memguard.Service) error {
+	ctx, cancel := context.WithTimeout(ctx, a.timeout)
+	defer cancel()
 	if s.Kind == memguard.KindContainer {
 		return containerError(a.containers.Stop(ctx, s.Name))
 	}

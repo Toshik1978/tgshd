@@ -1319,6 +1319,7 @@ func (f *fakeGuardMemory) hostReads() int {
 type fakeGuardCgroups struct {
 	mu      sync.Mutex
 	svcErr  error
+	none    bool // no service cgroup at all
 	self    string
 	selfErr error
 	anon    uint64
@@ -1333,6 +1334,9 @@ func (f *fakeGuardCgroups) Services() ([]cgroupmem.Service, error) {
 
 	if f.svcErr != nil {
 		return nil, f.svcErr
+	}
+	if f.none {
+		return nil, nil
 	}
 	f.reads++
 	f.anon += 2 << 30
@@ -1387,6 +1391,8 @@ type fakeGuardContainers struct {
 	lists   int
 	err     error
 	calls   []string
+	// deadlines holds the context deadline of each action.
+	deadlines []time.Time
 }
 
 func (f *fakeGuardContainers) ContainerNames(context.Context) (map[string]string, error) {
@@ -1401,19 +1407,21 @@ func (f *fakeGuardContainers) ContainerNames(context.Context) (map[string]string
 	return maps.Clone(f.names), nil
 }
 
-func (f *fakeGuardContainers) Restart(_ context.Context, name string) error {
-	return f.do("restart " + name)
+func (f *fakeGuardContainers) Restart(ctx context.Context, name string) error {
+	return f.do(ctx, "restart "+name)
 }
 
-func (f *fakeGuardContainers) Stop(_ context.Context, name string) error {
-	return f.do("stop " + name)
+func (f *fakeGuardContainers) Stop(ctx context.Context, name string) error {
+	return f.do(ctx, "stop "+name)
 }
 
-func (f *fakeGuardContainers) do(call string) error {
+func (f *fakeGuardContainers) do(ctx context.Context, call string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
 	f.calls = append(f.calls, call)
+	d, _ := ctx.Deadline()
+	f.deadlines = append(f.deadlines, d)
 
 	return f.err
 }
@@ -1437,19 +1445,23 @@ type fakeGuardUnits struct {
 	mu    sync.Mutex
 	err   error
 	calls []string
+	// deadlines holds the context deadline of each action.
+	deadlines []time.Time
 }
 
-func (f *fakeGuardUnits) Restart(_ context.Context, unit string) error {
-	return f.do("restart " + unit)
+func (f *fakeGuardUnits) Restart(ctx context.Context, unit string) error {
+	return f.do(ctx, "restart "+unit)
 }
 
-func (f *fakeGuardUnits) Stop(_ context.Context, unit string) error { return f.do("stop " + unit) }
+func (f *fakeGuardUnits) Stop(ctx context.Context, unit string) error { return f.do(ctx, "stop "+unit) }
 
-func (f *fakeGuardUnits) do(call string) error {
+func (f *fakeGuardUnits) do(ctx context.Context, call string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
 	f.calls = append(f.calls, call)
+	d, _ := ctx.Deadline()
+	f.deadlines = append(f.deadlines, d)
 
 	return f.err
 }
@@ -1763,6 +1775,38 @@ func TestGuardActuatorRoutesByKindAndMapsUnreachable(t *testing.T) {
 		if !errors.Is(err, want) || errors.Is(err, memguard.ErrUnreachable) != tt.unreachable {
 			t.Errorf("%s: err = %v, want it wrapped, unreachable = %v", tt.name, err, tt.unreachable)
 		}
+	}
+}
+
+// TestGuardActuatorBoundsActionsByActionTimeout pins that every restart and
+// stop runs under a deadline of action_timeout, so neither Docker nor
+// systemctl applies a bound of its own that the guard's messages would
+// misreport.
+func TestGuardActuatorBoundsActionsByActionTimeout(t *testing.T) {
+	t.Parallel()
+
+	const timeout = 3 * time.Minute
+	f := newGuardFakes(guardT0())
+	a := guardActuator{containers: f.containers, units: f.units, cgroups: f.cgroups, timeout: timeout}
+	ctr := memguard.Service{Kind: memguard.KindContainer, Name: "web-app"}
+	unit := memguard.Service{Kind: memguard.KindUnit, Name: "backup.service"}
+
+	before := time.Now()
+	for _, err := range []error{
+		a.Restart(t.Context(), ctr), a.Stop(t.Context(), ctr), a.Restart(t.Context(), unit), a.Stop(t.Context(), unit),
+	} {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	after := time.Now()
+	for _, d := range append(slices.Clone(f.containers.deadlines), f.units.deadlines...) {
+		if d.Before(before.Add(timeout)) || d.After(after.Add(timeout)) {
+			t.Errorf("deadline = %v, want action_timeout (%v) from the call", d, timeout)
+		}
+	}
+	if n := len(f.containers.deadlines) + len(f.units.deadlines); n != 4 {
+		t.Fatalf("actions = %d, want 4", n)
 	}
 }
 
@@ -2219,6 +2263,46 @@ func TestMemoryGuardWithoutCgroupV2RaisesAndDoesNotStart(t *testing.T) {
 
 	if n := f.mem.hostReads(); n != 0 {
 		t.Fatalf("host reads = %d, want no guard loop", n)
+	}
+}
+
+// TestMemoryGuardWithoutMemoryAccountingRaisesAndDoesNotStart: cgroup v2
+// without the memory controller on the services (or no service at all)
+// leaves nothing to guard, so the guard is not started, never in act, and
+// the operator is told why.
+func TestMemoryGuardWithoutMemoryAccountingRaisesAndDoesNotStart(t *testing.T) {
+	t.Parallel()
+
+	for _, tt := range []struct {
+		name string
+		set  func(*fakeGuardCgroups)
+	}{
+		{"controller off", func(c *fakeGuardCgroups) {
+			c.svcErr = fmt.Errorf("read system.slice: %w", cgroupmem.ErrNoMemoryAccounting)
+		}},
+		{"no service cgroup", func(c *fakeGuardCgroups) { c.none = true }},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			pub := &fakePublisher{}
+			f := newGuardFakes(guardT0())
+			tt.set(f.cgroups)
+			lc := fxtest.NewLifecycle(t)
+			newHealth(guardHealthParams(t, pub, lc, testMemorySection(hcfg.InterveneAct), f))
+			lc.RequireStart()
+			waitFor(t, "the checker error", func() bool {
+				return containing(pub.messages(), "CHECKER ERROR: memory: memory accounting")
+			})
+			lc.RequireStop()
+
+			if n := f.mem.hostReads(); n != 0 {
+				t.Fatalf("host reads = %d, want no guard loop", n)
+			}
+			if !containing(pub.messages(), "not started") {
+				t.Fatalf("messages = %v, want the guard announced as not started", pub.messages())
+			}
+		})
 	}
 }
 

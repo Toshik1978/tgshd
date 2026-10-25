@@ -78,6 +78,28 @@ func TestServicesSkipsVanished(t *testing.T) {
 	}
 }
 
+// TestServicesWithoutMemoryAccounting: with the memory controller off the
+// service cgroups exist but expose no memory.stat. That is not a vanished
+// cgroup: when no service is accounted the reader says so.
+func TestServicesWithoutMemoryAccounting(t *testing.T) {
+	root := t.TempDir()
+	write(t, root, "system.slice/backup.service/cgroup.procs", "")
+	write(t, root, "system.slice/docker-abc123.scope/cgroup.procs", "")
+	write(t, root, "system.slice/apps.slice/worker.service/cgroup.procs", "")
+
+	got, err := New(root, t.TempDir()).Services()
+	if !errors.Is(err, ErrNoMemoryAccounting) {
+		t.Fatalf("Services() = %+v, %v, want ErrNoMemoryAccounting", got, err)
+	}
+
+	// One accounted service is enough: the walk returns it.
+	unit(t, root, "system.slice/ok.service", 10, 0, 20)
+	got, err = New(root, t.TempDir()).Services()
+	if err != nil || len(got) != 1 || got[0].Name != "ok.service" {
+		t.Fatalf("Services() = %+v, %v, want ok.service only", got, err)
+	}
+}
+
 func TestServicesReadError(t *testing.T) {
 	root := t.TempDir()
 	write(t, root, "system.slice/bad.service/memory.stat", "anon notanumber\nshmem 0\n")

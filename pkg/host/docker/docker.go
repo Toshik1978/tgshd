@@ -116,9 +116,10 @@ func (c *Client) Inspect(ctx context.Context, name string) (Container, error) {
 	return mapContainer(res.Container), nil
 }
 
-// Restart restarts the named container.
+// Restart restarts the named container, within the caller's deadline when it
+// set one (actionContext).
 func (c *Client) Restart(ctx context.Context, name string) error {
-	ctx, cancel := context.WithTimeout(ctx, 2*callTimeout)
+	ctx, cancel := actionContext(ctx)
 	defer cancel()
 
 	if _, err := c.api.ContainerRestart(ctx, name, client.ContainerRestartOptions{}); err != nil {
@@ -128,9 +129,10 @@ func (c *Client) Restart(ctx context.Context, name string) error {
 	return nil
 }
 
-// Stop stops the named container.
+// Stop stops the named container, within the caller's deadline when it set
+// one (actionContext).
 func (c *Client) Stop(ctx context.Context, name string) error {
-	ctx, cancel := context.WithTimeout(ctx, 2*callTimeout)
+	ctx, cancel := actionContext(ctx)
 	defer cancel()
 
 	if _, err := c.api.ContainerStop(ctx, name, client.ContainerStopOptions{}); err != nil {
@@ -138,6 +140,50 @@ func (c *Client) Stop(ctx context.Context, name string) error {
 	}
 
 	return nil
+}
+
+// Names maps the id of every container, running or not, to its name. It
+// needs the list only: no container is inspected. A container listed under
+// several names (legacy links) keeps its own, the one without a further "/".
+func (c *Client) Names(ctx context.Context) (map[string]string, error) {
+	ctx, cancel := context.WithTimeout(ctx, callTimeout)
+	defer cancel()
+
+	list, err := c.api.ContainerList(ctx, client.ContainerListOptions{All: true})
+	if err != nil {
+		return nil, fmt.Errorf("list containers: %w", err)
+	}
+	names := make(map[string]string, len(list.Items))
+	for i := range list.Items {
+		if name, ok := ownName(list.Items[i].Names); ok {
+			names[list.Items[i].ID] = name
+		}
+	}
+
+	return names, nil
+}
+
+// ownName picks a container's own name out of its listed names.
+func ownName(names []string) (string, bool) {
+	for _, n := range names {
+		if n = strings.TrimPrefix(n, "/"); n != "" && !strings.Contains(n, "/") {
+			return n, true
+		}
+	}
+
+	return "", false
+}
+
+// actionContext bounds a restart or a stop. A caller with a deadline of its
+// own (the memory guard's action_timeout, a command fix's timeout) keeps it,
+// however far it is: a graceful stop can outlast the adapter's own bound.
+// Without one the call is bounded by twice callTimeout.
+func actionContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	if _, ok := ctx.Deadline(); ok {
+		return context.WithCancel(ctx)
+	}
+
+	return context.WithTimeout(ctx, 2*callTimeout)
 }
 
 // missing reports whether a list filtered by name proves the container does

@@ -33,7 +33,8 @@ type Config struct {
 	// CulpritMinGrowth is the smallest growth, in bytes, that makes a culprit.
 	CulpritMinGrowth uint64
 	// NeverTouch lists container names or unit names the guard must not act
-	// on; such services are Protected.
+	// on; such services are Protected. A unit matches its full name or its
+	// name without ".service".
 	NeverTouch []string
 	// SelfCgroup is tgshd's own cgroup path relative to the cgroup root; the
 	// service that holds it is never eligible.
@@ -100,7 +101,7 @@ func (c Config) Service(kind Kind, name, cgroupPath string) Service {
 	if !isServiceCgroup(path) || c.holdsSelf(path) || (kind == KindUnit && isCoreUnit(name)) {
 		return s
 	}
-	if slices.Contains(c.NeverTouch, name) {
+	if c.neverTouch(kind, name) {
 		s.Protected = true
 
 		return s
@@ -108,6 +109,18 @@ func (c Config) Service(kind Kind, name, cgroupPath string) Service {
 	s.Eligible = true
 
 	return s
+}
+
+// neverTouch reports whether never_touch names the service. A unit is named
+// by its full name or, as systemctl accepts it, without ".service": "backup"
+// protects backup.service. A container is named by its name only.
+func (c Config) neverTouch(kind Kind, name string) bool {
+	if slices.Contains(c.NeverTouch, name) {
+		return true
+	}
+	short, ok := strings.CutSuffix(name, ".service")
+
+	return kind == KindUnit && ok && slices.Contains(c.NeverTouch, short)
 }
 
 // isServiceCgroup reports whether path is a service or scope under

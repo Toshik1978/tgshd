@@ -19,6 +19,11 @@ const (
 	systemSlice     = "system.slice"
 )
 
+// ErrNoMemoryAccounting is returned by Services when service cgroups exist
+// but none of them exposes memory.stat: the memory controller is not enabled
+// for them, so there is nothing to measure.
+var ErrNoMemoryAccounting = errors.New("no service cgroup exposes memory.stat; enable memory accounting")
+
 // Kind tells a systemd unit from a docker container.
 type Kind int
 
@@ -56,30 +61,35 @@ func NewDefault() *Reader {
 
 // Services lists *.service and docker-<id>.scope cgroups directly under
 // system.slice and one level down in nested *.slice directories. Cgroups that
-// vanish while being read are skipped.
+// vanish while being read are skipped, and so is a cgroup without memory.stat
+// (its memory controller is off). When there are service cgroups but none of
+// them is accounted, the error wraps ErrNoMemoryAccounting.
 func (r *Reader) Services() ([]Service, error) {
 	entries, err := os.ReadDir(filepath.Join(r.root, systemSlice))
 	if err != nil {
 		return nil, fmt.Errorf("read %s: %w", systemSlice, err)
 	}
-	var out []Service
+	w := walk{r: r}
 	for _, e := range entries {
 		if !e.IsDir() {
 			continue
 		}
 		if !strings.HasSuffix(e.Name(), ".slice") {
-			if out, err = r.appendService(out, systemSlice, e.Name()); err != nil {
+			if err := w.service(systemSlice, e.Name()); err != nil {
 				return nil, err
 			}
 
 			continue
 		}
-		if out, err = r.appendNested(out, filepath.Join(systemSlice, e.Name())); err != nil {
+		if err := w.nested(filepath.Join(systemSlice, e.Name())); err != nil {
 			return nil, err
 		}
 	}
+	if len(w.out) == 0 && w.unaccounted > 0 {
+		return nil, fmt.Errorf("read %s: %d service cgroups: %w", systemSlice, w.unaccounted, ErrNoMemoryAccounting)
+	}
 
-	return out, nil
+	return w.out, nil
 }
 
 // anonBytes returns anon + shmem from memory.stat content; anon must be present.
@@ -143,27 +153,36 @@ func (r *Reader) Kill(path string) error {
 	return nil
 }
 
-func (r *Reader) appendNested(out []Service, slice string) ([]Service, error) {
-	nested, err := os.ReadDir(filepath.Join(r.root, slice))
+// walk collects the services of one Services call.
+type walk struct {
+	r   *Reader
+	out []Service
+	// unaccounted counts the service cgroups that exist but have no
+	// memory.stat.
+	unaccounted int
+}
+
+func (w *walk) nested(slice string) error {
+	nested, err := os.ReadDir(filepath.Join(w.r.root, slice))
 	if isGone(err) {
-		return out, nil
+		return nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("read %s: %w", slice, err)
+		return fmt.Errorf("read %s: %w", slice, err)
 	}
 	for _, n := range nested {
 		if !n.IsDir() {
 			continue
 		}
-		if out, err = r.appendService(out, slice, n.Name()); err != nil {
-			return nil, err
+		if err := w.service(slice, n.Name()); err != nil {
+			return err
 		}
 	}
 
-	return out, nil
+	return nil
 }
 
-func (r *Reader) appendService(out []Service, parent, name string) ([]Service, error) {
+func (w *walk) service(parent, name string) error {
 	svc := Service{Path: filepath.Join(parent, name)}
 	switch {
 	case strings.HasSuffix(name, ".service"):
@@ -171,18 +190,24 @@ func (r *Reader) appendService(out []Service, parent, name string) ([]Service, e
 	case strings.HasPrefix(name, "docker-") && strings.HasSuffix(name, ".scope"):
 		svc.Kind, svc.Name = KindContainer, strings.TrimSuffix(strings.TrimPrefix(name, "docker-"), ".scope")
 	default:
-		return out, nil
+		return nil
 	}
-	anon, current, err := r.readMemory(svc.Path)
+	anon, current, err := w.r.readMemory(svc.Path)
 	if isGone(err) {
-		return out, nil
+		// Gone, or there without memory accounting: tell the two apart.
+		if _, statErr := os.Stat(filepath.Join(w.r.root, svc.Path)); statErr == nil {
+			w.unaccounted++
+		}
+
+		return nil
 	}
 	if err != nil {
-		return nil, err
+		return err
 	}
 	svc.Anon, svc.Current = anon, current
+	w.out = append(w.out, svc)
 
-	return append(out, svc), nil
+	return nil
 }
 
 func (r *Reader) readMemory(path string) (anon, current uint64, err error) {

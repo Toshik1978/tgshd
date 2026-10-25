@@ -317,16 +317,25 @@ there is no memory check and no guard.
   `danger_available_percent` **and** the full-stall pressure is at or above
   `danger_pressure_percent` for `danger_for`, it picks the service that grew
   most within `culprit_window` (at least `culprit_min_growth`) and restarts it
-  (`docker restart`, or `systemctl restart` for a systemd unit). If the
-  restart does not finish within `action_timeout`, it kills the service's
-  cgroup through the kernel and reports that. If the same service runs away
+  (`docker restart`, or `systemctl restart` for a systemd unit). Docker and
+  systemctl get exactly `action_timeout` to finish; if the restart has not
+  finished by then, the guard kills the service's cgroup through the kernel
+  and reports that. If the same service runs away
   again within `repeat_window`, it is **stopped** instead of restarted, and
   you are told by `failed_mode` (SMS by default). If memory does not recover
   within `recovery_window`, it says so once and does not act a second time in
-  the same episode. It never touches the services in `never_touch` (container
-  names or systemd unit names such as `db` or `backup.service`), nor tgshd's
-  own service; when the culprit is protected, or no service is growing, it
-  only reports (with the top process).
+  the same episode. It never touches the services in `never_touch`, nor
+  tgshd's own service, nor the core services it needs to keep the host
+  reachable and to act at all: `docker.service`, `containerd.service`,
+  `dbus.service`, `ssh.service`, `sshd.service` and every `systemd-*` unit
+  (these are built in and cannot be overridden). When the culprit is
+  protected, or no service is growing, it only reports (with the top
+  process).
+- **`never_touch` names** are container names (`db`) or systemd unit names,
+  either in full (`backup.service`) or, as `systemctl` accepts them, without
+  `.service` (`backup` protects `backup.service` too). A bare name protects
+  both a container and a unit of that name. Names are matched exactly, with
+  no globs.
 
 The guard never pauses in quiet windows (`pause_in_quiet_windows` applies to
 the warnings only). Its reports are queued and retried like other alerts and
@@ -334,9 +343,13 @@ may arrive after the action.
 
 **Roll out in `report` first.** `guard.intervene` is `off`, `report` (the
 default) or `act`. In `report` the guard runs the same logic but only sends
-`would restart ...` messages. Leave it there for a while, check that those
-messages name the service you would have chosen (adjust `never_touch` if
-not), and only then set `act`.
+`would restart ...` (or `would stop ...`) messages, by `mode`, so the preview
+itself is quiet. Two cases are not previews and go out by `failed_mode` (SMS
+by default) in `report` as in `act`: a danger whose culprit is protected, and
+a danger with no growing service to blame. That is deliberate: tgshd could
+not have fixed either, so only you can. Leave the guard in `report` for a
+while, check that its messages name the service you would have chosen
+(adjust `never_touch` if not), and only then set `act`.
 
 ```yaml
 memory:
@@ -356,9 +369,17 @@ memory.
 - cgroup v2 (the unified hierarchy). Without it the guard does not start and a
   checker error says so. Killing a service's cgroup as a last resort needs
   Linux 5.14 or newer.
+- Memory accounting on the services: the `system.slice` service cgroups must
+  expose `memory.stat` (systemd's `DefaultMemoryAccounting=yes`, the default
+  on cgroup v2). If none does, or there is no service cgroup at all, the
+  guard does not start, in `act` too, and a checker error says so.
 - Memory pressure information (PSI): `/proc/pressure/memory` must exist. If
-  your kernel was started with `psi=0`, enable PSI; the check reports a
-  checker error otherwise.
+  your kernel was started with `psi=0`, enable PSI. Without it the guard does
+  not start and the check reports a checker error.
+- Docker with the `systemd` cgroup driver (the default on cgroup v2), so
+  containers sit under `system.slice` as `docker-<id>.scope`. With the
+  `cgroupfs` driver containers live under `/sys/fs/cgroup/docker/` and are
+  neither sampled nor guarded.
 - tgshd runs as root on the host (see above), so it can read other processes
   and restart containers and units.
 - Shield tgshd from starvation: the shipped
@@ -370,6 +391,8 @@ memory.
 
 **Things to know**
 
+- An invalid `memory` section is a checker error (`config/memory/invalid`);
+  the daemon still starts, without the memory check and without the guard.
 - If tgshd cannot determine its own cgroup (or runs in the root cgroup), it
   cannot be sure it will not restart itself. The guard then falls back to
   `report` even though `act` is configured, and says so in a checker error.

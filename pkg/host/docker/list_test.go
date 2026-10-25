@@ -3,8 +3,10 @@ package docker
 import (
 	"context"
 	"errors"
+	"maps"
 	"slices"
 	"testing"
+	"time"
 
 	"github.com/moby/moby/api/types/container"
 	"github.com/moby/moby/client"
@@ -21,6 +23,8 @@ type fakeEngine struct {
 	nameErr    error
 	stopped    []string
 	stopErr    error
+	inspected  []string
+	deadlines  []time.Time // the deadline of each restart and stop call
 }
 
 func (f *fakeEngine) ContainerList(
@@ -52,6 +56,7 @@ func (f *fakeEngine) ContainerList(
 func (f *fakeEngine) ContainerInspect(
 	_ context.Context, id string, _ client.ContainerInspectOptions,
 ) (client.ContainerInspectResult, error) {
+	f.inspected = append(f.inspected, id)
 	if err := f.inspectErr[id]; err != nil {
 		return client.ContainerInspectResult{}, err
 	}
@@ -59,15 +64,23 @@ func (f *fakeEngine) ContainerInspect(
 	return client.ContainerInspectResult{Container: f.inspects[id]}, nil
 }
 
-func (*fakeEngine) ContainerRestart(
-	context.Context, string, client.ContainerRestartOptions,
+func (f *fakeEngine) ContainerRestart(
+	ctx context.Context, _ string, _ client.ContainerRestartOptions,
 ) (client.ContainerRestartResult, error) {
+	f.recordDeadline(ctx)
+
 	return client.ContainerRestartResult{}, nil
 }
 
+func (f *fakeEngine) recordDeadline(ctx context.Context) {
+	d, _ := ctx.Deadline()
+	f.deadlines = append(f.deadlines, d)
+}
+
 func (f *fakeEngine) ContainerStop(
-	_ context.Context, id string, _ client.ContainerStopOptions,
+	ctx context.Context, id string, _ client.ContainerStopOptions,
 ) (client.ContainerStopResult, error) {
+	f.recordDeadline(ctx)
 	f.stopped = append(f.stopped, id)
 
 	return client.ContainerStopResult{}, f.stopErr
@@ -215,5 +228,64 @@ func TestStop(t *testing.T) {
 	err := (&Client{api: f}).Stop(context.Background(), "web-app")
 	if !errors.Is(err, errBoom) {
 		t.Errorf("Stop() error = %v, want wrapping %v", err, errBoom)
+	}
+}
+
+// TestActionsKeepTheCallersDeadline pins that a restart or a stop is bounded
+// by the caller's deadline, however far it is, and only falls back to the
+// adapter's own bound when the caller set none.
+func TestActionsKeepTheCallersDeadline(t *testing.T) {
+	f := &fakeEngine{}
+	c := &Client{api: f}
+	far := time.Now().Add(5 * time.Minute)
+	ctx, cancel := context.WithDeadline(context.Background(), far)
+	defer cancel()
+
+	if err := c.Restart(ctx, "web-app"); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.Stop(ctx, "web-app"); err != nil {
+		t.Fatal(err)
+	}
+	before := time.Now()
+	if err := c.Restart(context.Background(), "web-app"); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.deadlines) != 3 {
+		t.Fatalf("deadlines = %v, want 3", f.deadlines)
+	}
+	for i, d := range f.deadlines[:2] {
+		if !d.Equal(far) {
+			t.Errorf("call %d: deadline = %v, want the caller's %v", i, d, far)
+		}
+	}
+	if d := f.deadlines[2]; d.IsZero() || d.Before(before.Add(2*callTimeout-time.Second)) ||
+		d.After(time.Now().Add(2*callTimeout)) {
+		t.Errorf("no caller deadline: deadline = %v, want about %v from now", d, 2*callTimeout)
+	}
+}
+
+// TestNames maps ids to names from the list alone, with no inspect.
+func TestNames(t *testing.T) {
+	errBoom := errors.New("boom")
+	f := &fakeEngine{listed: []container.Summary{
+		{ID: "aaa", Names: []string{"/web-app"}},
+		{ID: "bbb", Names: []string{"/db", "/other/db"}},
+		{ID: "ccc"},
+	}}
+	got, err := (&Client{api: f}).Names(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := map[string]string{"aaa": "web-app", "bbb": "db"}; !maps.Equal(got, want) {
+		t.Fatalf("Names() = %v, want %v", got, want)
+	}
+	if len(f.inspected) != 0 {
+		t.Fatalf("inspected %v, want no inspect", f.inspected)
+	}
+
+	f.listErr = errBoom
+	if _, err := (&Client{api: f}).Names(context.Background()); !errors.Is(err, errBoom) {
+		t.Fatalf("Names() error = %v, want wrapping %v", err, errBoom)
 	}
 }

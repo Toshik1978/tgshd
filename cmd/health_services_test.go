@@ -45,9 +45,13 @@ type fakeDocker struct {
 	restarted  []string
 	stopped    []string
 	closed     bool
+	lists      int
 }
 
 func (f *fakeDocker) List(context.Context) ([]docker.Container, error) {
+	f.mu.Lock()
+	f.lists++
+	f.mu.Unlock()
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -57,6 +61,18 @@ func (f *fakeDocker) List(context.Context) ([]docker.Container, error) {
 	}
 
 	return out, nil
+}
+
+func (f *fakeDocker) Names(context.Context) (map[string]string, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
+	names := make(map[string]string, len(f.containers))
+	for name := range f.containers {
+		names[f.containers[name].ID] = name
+	}
+
+	return names, nil
 }
 
 func (f *fakeDocker) Inspect(_ context.Context, name string) (docker.Container, error) {
@@ -1035,6 +1051,9 @@ func TestLazyDockerForTheMemoryGuard(t *testing.T) {
 	names, err := d.ContainerNames(t.Context())
 	if err != nil || !maps.Equal(names, map[string]string{"aaaa": "web-app", "bbbb": "db"}) {
 		t.Fatalf("ContainerNames() = %v, %v", names, err)
+	}
+	if api.lists != 0 {
+		t.Fatalf("ContainerNames() made %d inspecting lists, want the plain list only", api.lists)
 	}
 	if err := d.Stop(t.Context(), "web-app"); err != nil || !slices.Equal(api.stopped, []string{"web-app"}) {
 		t.Fatalf("Stop() = %v, stopped %v", err, api.stopped)

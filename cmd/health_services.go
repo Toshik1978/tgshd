@@ -433,6 +433,7 @@ func (osFiles) ReadFile(path string) ([]byte, error) {
 // dockerAPI is what the service checks use of pkg/host/docker.
 type dockerAPI interface {
 	List(ctx context.Context) ([]docker.Container, error)
+	Names(ctx context.Context) (map[string]string, error)
 	Inspect(ctx context.Context, name string) (docker.Container, error)
 	Restart(ctx context.Context, name string) error
 	Stop(ctx context.Context, name string) error
@@ -442,7 +443,8 @@ type dockerAPI interface {
 // lazyDocker builds the Docker client on first use and retries a failed build
 // on the next call, so a missing or broken Docker never stops the daemon from
 // starting (FR-019): the Docker-backed checks fail their runs instead. Every
-// Engine API call is bounded by the adapter's own timeouts.
+// Engine API call is bounded by the adapter's own timeouts, except a restart
+// or a stop whose caller set a deadline: that deadline is the bound.
 type lazyDocker struct {
 	newClient func() (dockerAPI, error)
 
@@ -545,19 +547,16 @@ func (d *lazyDocker) Stop(ctx context.Context, name string) error {
 }
 
 // ContainerNames maps the id of every container, running or not, to its
-// name, for the memory guard's docker-<id>.scope cgroups.
+// name, for the memory guard's docker-<id>.scope cgroups. It is one list
+// call, with no inspect per container.
 func (d *lazyDocker) ContainerNames(ctx context.Context) (map[string]string, error) {
 	api, err := d.client()
 	if err != nil {
 		return nil, err
 	}
-	list, err := api.List(ctx)
+	names, err := api.Names(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("docker: %w", err)
-	}
-	names := make(map[string]string, len(list))
-	for i := range list {
-		names[list[i].ID] = list[i].Name
 	}
 
 	return names, nil
