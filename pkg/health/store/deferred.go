@@ -68,6 +68,16 @@ func (d *Deferred) Checkpoint(ctx context.Context, dirty State, newAlerts []Aler
 	return st.Checkpoint(ctx, dirty, newAlerts, newSamples)
 }
 
+// PutKV is Store.PutKV, opening the database first when needed.
+func (d *Deferred) PutKV(ctx context.Context, key, value string) error {
+	st, err := d.get(ctx)
+	if err != nil {
+		return err
+	}
+
+	return st.PutKV(ctx, key, value)
+}
+
 // Degraded reports whether the database is not open yet or its last
 // checkpoint could not be written. It never opens the database.
 func (d *Deferred) Degraded() bool {

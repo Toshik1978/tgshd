@@ -566,8 +566,11 @@ func TestUnreachableRuntimeFallsBackToKill(t *testing.T) {
 	if len(calls) != 2 || calls[1].verb != "kill" || !calls[1].at.Equal(calls[0].at) {
 		t.Fatalf("actuator calls %+v, want an immediate kill", calls)
 	}
-	if o := oneOutcome(t, s.outcomes()); o.Kind != OutcomeKilled {
-		t.Fatalf("outcome %+v, want killed", o)
+	o := oneOutcome(t, s.outcomes())
+	m := s.l.cfg.Message(o)
+	if o.Kind != OutcomeKilled || !o.Unreachable ||
+		!strings.Contains(m.Text, "docker could not be reached") || strings.Contains(m.Text, "within") {
+		t.Fatalf("outcome %+v as %+v, want killed with a could-not-be-reached text", o, m)
 	}
 }
 
@@ -632,7 +635,7 @@ func TestFailedActionDoesNotCountTowardRepeat(t *testing.T) {
 	o := oneOutcome(t, s.outcomes())
 	m := s.l.cfg.Message(o)
 	if o.Kind != OutcomeActionFailed || m.Mode != health.ModeSMS ||
-		m.Text != "memory: could not restart web-app: no such container" {
+		m.Text != "memory: could not restart web-app (8.5 GB): no such container; host 3% available" {
 		t.Fatalf("outcome %+v as %+v, want action_failed on sms", o, m)
 	}
 	if recs, ok := s.state(); ok {
@@ -771,7 +774,7 @@ func TestRecoveryWindowStartsWhenTheActionEnds(t *testing.T) {
 	s.run(31 * time.Second) // danger holds a recovery window after the kill
 	o = oneOutcome(t, s.outcomes())
 	if m := s.l.cfg.Message(o); o.Kind != OutcomeNotRecovered || o.Action != ActionKill ||
-		!strings.HasPrefix(m.Text, "memory: killing worker.service did not free memory") {
+		!strings.HasPrefix(m.Text, "memory: killing worker.service (13 GB before) did not free memory") {
 		t.Fatalf("outcome %+v as %q, want not_recovered for the kill", o, m.Text)
 	}
 	calls := s.act.log()

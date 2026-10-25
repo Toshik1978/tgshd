@@ -158,6 +158,40 @@ func TestCheckpointUpdatesBaselineAndKV(t *testing.T) {
 	}
 }
 
+// TestPutKVWritesOneValueAlone: PutKV upserts one kv value and touches
+// nothing else; it honours ctx and refuses the reserved rate-marks key.
+func TestPutKVWritesOneValueAlone(t *testing.T) {
+	s := openTemp(t)
+	ctx := context.Background()
+	if err := s.Checkpoint(ctx, sampleState(), nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	for _, v := range []string{"[1]", "[2]"} {
+		if err := s.PutKV(ctx, "memory.guard", v); err != nil {
+			t.Fatalf("PutKV(%q): %v", v, err)
+		}
+	}
+	got, err := s.Load(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.KV["memory.guard"] != "[2]" || got.KV["kernel.cursor"] != "abc" {
+		t.Errorf("kv = %+v, want memory.guard [2] beside the checkpointed values", got.KV)
+	}
+	if len(got.Conditions) != 2 || len(got.Queue) != 1 || len(got.RateMarks) != 1 {
+		t.Errorf("PutKV touched the rest of the state: %+v", got)
+	}
+
+	if err := s.PutKV(ctx, rateMarksKey, "[]"); err == nil {
+		t.Error("PutKV of the rate-marks key must fail")
+	}
+	cancelled, cancel := context.WithCancel(ctx)
+	cancel()
+	if err := s.PutKV(cancelled, "memory.guard", "[3]"); !errors.Is(err, context.Canceled) {
+		t.Errorf("PutKV with a cancelled ctx = %v, want context.Canceled", err)
+	}
+}
+
 func TestAlertsAndSamplesAppend(t *testing.T) {
 	s := openTemp(t)
 	ctx := context.Background()

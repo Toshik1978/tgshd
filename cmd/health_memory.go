@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os/exec"
 	"path"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -21,6 +22,7 @@ import (
 	"github.com/Toshik1978/tgshd/pkg/health/memguard"
 	"github.com/Toshik1978/tgshd/pkg/health/report"
 	"github.com/Toshik1978/tgshd/pkg/health/runner"
+	"github.com/Toshik1978/tgshd/pkg/health/store"
 	"github.com/Toshik1978/tgshd/pkg/host/cgroupmem"
 	"github.com/Toshik1978/tgshd/pkg/host/procmem"
 	"github.com/Toshik1978/tgshd/pkg/host/systemctl"
@@ -33,6 +35,8 @@ const (
 	memoryGuardKey = "memory.guard"
 	// memoryGrowthKey is the kv key of the memory check's growth history.
 	memoryGrowthKey = "memory.growth"
+	// memoryAuditKey is the kv key of the limit audit's known containers.
+	memoryAuditKey = "memory.audit"
 	// memoryTopServices is how many services the /status memory block lists.
 	memoryTopServices = 3
 	// guardNotRunning is the /status guard mode of a guard that could not start.
@@ -46,6 +50,10 @@ const (
 
 	// systemdBusError is what systemctl prints when systemd cannot be reached.
 	systemdBusError = "Failed to connect to"
+
+	// guardWriteTimeout bounds one write of the intervention records, so a
+	// hung store neither holds the writer nor the shutdown for long.
+	guardWriteTimeout = 5 * time.Second
 )
 
 // errDockerUnavailable is wrapped by lazyDocker when it cannot build the
@@ -125,6 +133,12 @@ func (realClock) Now() time.Time { return time.Now() }
 // After implements memguard.Clock.
 func (realClock) After(d time.Duration) <-chan time.Time { return time.After(d) }
 
+// guardKV is where the guard writes its intervention records: the state
+// database.
+type guardKV interface {
+	PutKV(ctx context.Context, key, value string) error
+}
+
 // guardRunner is what the guard uses of the health runner.
 type guardRunner interface {
 	PushMode(ctx context.Context, check, key, text, record string, mode health.Mode)
@@ -138,7 +152,12 @@ type memoryGuard struct {
 	cfg   memguard.Config
 	host  *guardHost
 	state *guardState
-	log   *zap.Logger
+	// kv receives the intervention records; nil keeps them in memory only.
+	kv  guardKV
+	log *zap.Logger
+	// writeFailing is set while the records cannot be written; only the
+	// writer and, after it ended, the final write touch it.
+	writeFailing bool
 	// mode is the mode /status shows: the configured one until the guard
 	// starts, then the one it runs in, or guardNotRunning.
 	mode atomic.Pointer[string]
@@ -168,7 +187,7 @@ func newMemoryGuard(m *hcfg.Memory, host *guardHost, logger *zap.Logger) *memory
 			FailedChannel:          health.Mode(g.FailedMode),
 		},
 		host:  host,
-		state: &guardState{log: logger},
+		state: newGuardState(logger),
 		log:   logger,
 	}
 	guard.setMode(string(guard.cfg.Mode))
@@ -190,13 +209,23 @@ func (g *memoryGuard) status() report.Guard {
 	return s
 }
 
-// persister keeps the intervention records in the checkpoint as kv
-// memory.guard.
+// persister restores the intervention records from kv memory.guard when the
+// runner loads the store. It saves nothing: the guard writes its records
+// itself as soon as an action completes and on stop (writeRecords), so a tick
+// checkpoint never writes an older copy over a newer one.
 //
 //nolint:ireturn // the runner takes its persisters as runner.Persister.
 func (g *memoryGuard) persister() runner.Persister {
-	return runner.KVPersister{Key: memoryGuardKey, State: g.state}
+	return guardPersister{runner.KVPersister{Key: memoryGuardKey, State: g.state}}
 }
+
+// guardPersister is the restore-only persister of the guard's records.
+type guardPersister struct {
+	runner.KVPersister
+}
+
+// Save implements runner.Persister; the guard writes its records itself.
+func (guardPersister) Save(*store.State) error { return nil }
 
 // register starts the guard in OnStart and stops it in OnStop. Register it
 // after registerStart, so the stored records are restored before the loop
@@ -271,7 +300,67 @@ func (g *memoryGuard) run(ctx context.Context, r guardRunner) {
 		guardReporter{runner: r, state: g.state}, memguard.WithLogger(g.log))
 	loop.Restore(g.state.start())
 	g.log.Info("Memory guard started", zap.String("intervene", string(cfg.Mode)))
+	var writer sync.WaitGroup
+	writer.Go(func() { g.writeRecords(ctx) })
 	loop.Run(ctx)
+	writer.Wait()
+	// The loop saved its last records on its way out: write what is left.
+	g.write(context.WithoutCancel(ctx))
+}
+
+// writeRecords writes the intervention records to kv memory.guard each time
+// the loop saves them (an action completed), until ctx is done. It runs off
+// the loop's decision path, so a slow store never holds the guard back
+// (FR-008); a failed write is retried every runner tick.
+func (g *memoryGuard) writeRecords(ctx context.Context) {
+	for ctx.Err() == nil {
+		select {
+		case <-ctx.Done():
+			return
+		case <-g.state.dirty:
+		}
+		for !g.write(ctx) {
+			select {
+			case <-ctx.Done():
+				return
+			case <-g.host.clock.After(runner.Tick):
+			}
+		}
+	}
+}
+
+// write writes the records not written yet and reports whether nothing is
+// left to retry. Until the stored records were read the guard's own never
+// replace them.
+func (g *memoryGuard) write(ctx context.Context) bool {
+	if g.kv == nil {
+		return true
+	}
+	records, version, ok := g.state.unwritten()
+	if !ok {
+		return true
+	}
+	data, err := encodeRecords(records)
+	if err != nil {
+		g.log.Error("Memory guard cannot encode its records", zap.Error(err))
+
+		return true
+	}
+	writeCtx, cancel := context.WithTimeout(ctx, guardWriteTimeout)
+	defer cancel()
+	if err := g.kv.PutKV(writeCtx, memoryGuardKey, data); err != nil {
+		if !g.writeFailing {
+			g.log.Warn("Memory guard cannot write its records; a restart may forget its recent actions",
+				zap.Error(err))
+		}
+		g.writeFailing = true
+
+		return false
+	}
+	g.writeFailing = false
+	g.state.markWritten(version)
+
+	return true
 }
 
 // raiseAll raises errs as checker errors, in order.
@@ -559,34 +648,56 @@ func (r guardReporter) Save(ctx context.Context, records []memguard.Record) {
 	r.state.Save(ctx, records)
 }
 
-// guardState holds the intervention records between the guard loop and the
-// checkpoint (runner.KVState). The loop takes the restored records once, when
-// it starts; records restored later (the store could not be read at start)
-// are kept for the checkpoint until the loop saves its own, but the running
+// guardState holds the intervention records between the guard loop, the
+// writer and the store. The loop takes the restored records once, when it
+// starts; records restored later (the store could not be read at start) are
+// kept beside the loop's own so the store does not lose them, but the running
 // loop goes on without them.
 type guardState struct {
 	log *zap.Logger
+	// dirty is signalled when there are records to write.
+	dirty chan struct{}
 
-	mu       sync.Mutex
-	records  []memguard.Record
+	mu sync.Mutex
+	// records are the loop's, or the restored ones until the loop saves.
+	records []memguard.Record
+	// late are the records restored after the loop started.
+	late     []memguard.Record
 	started  bool
 	loopSave bool
+	// restored is set once the stored records were read: only then may the
+	// guard's own replace them.
+	restored bool
+	// version counts the changes to write; written is the last one written.
+	version, written uint64
 }
 
-// Save keeps the loop's records; ctx is not needed for an in-memory copy.
+// newGuardState returns an empty guardState.
+func newGuardState(log *zap.Logger) *guardState {
+	return &guardState{log: log, dirty: make(chan struct{}, 1)}
+}
+
+// Save keeps the loop's records and wakes the writer; it never blocks.
 func (s *guardState) Save(_ context.Context, records []memguard.Record) {
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	s.records, s.loopSave = records, true
+	s.version++
+	s.mu.Unlock()
+
+	s.signal()
 }
 
 // Export implements runner.KVState.
 func (s *guardState) Export() (string, error) {
 	s.mu.Lock()
-	records := s.records
+	records := s.all()
 	s.mu.Unlock()
 
+	return encodeRecords(records)
+}
+
+// encodeRecords is the kv memory.guard value of records.
+func encodeRecords(records []memguard.Record) (string, error) {
 	if records == nil {
 		records = []memguard.Record{}
 	}
@@ -598,27 +709,73 @@ func (s *guardState) Export() (string, error) {
 	return string(data), nil
 }
 
-// Restore implements runner.KVState.
+// Restore implements runner.KVState. A value that cannot be decoded counts as
+// read: the guard's own records then replace it.
 func (s *guardState) Restore(data string) error {
 	var records []memguard.Record
+	var err error
 	if data != "" {
-		if err := json.Unmarshal([]byte(data), &records); err != nil {
-			return fmt.Errorf("decode memory guard records: %w", err)
+		if err = json.Unmarshal([]byte(data), &records); err != nil {
+			records, err = nil, fmt.Errorf("decode memory guard records: %w", err)
 		}
 	}
 
 	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if s.started {
+	s.restored = true
+	late := s.started
+	if late {
 		s.log.Warn("Memory guard records restored after the guard started; it goes on without them",
 			zap.Int("records", len(records)))
-	}
-	if !s.loopSave {
+		s.late = records
+		s.version++
+	} else if !s.loopSave {
 		s.records = records
 	}
+	s.mu.Unlock()
 
-	return nil
+	if late {
+		s.signal()
+	}
+
+	return err
+}
+
+// signal wakes the writer; it never blocks.
+func (s *guardState) signal() {
+	select {
+	case s.dirty <- struct{}{}:
+	default:
+	}
+}
+
+// all returns the late and the loop's records. The caller holds s.mu.
+func (s *guardState) all() []memguard.Record {
+	if len(s.late) == 0 {
+		return s.records
+	}
+
+	return append(slices.Clone(s.late), s.records...)
+}
+
+// unwritten returns the records to write and their version; false when
+// nothing changed since the last write or the stored records were not read.
+func (s *guardState) unwritten() ([]memguard.Record, uint64, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if !s.restored || s.version == s.written {
+		return nil, 0, false
+	}
+
+	return s.all(), s.version, true
+}
+
+// markWritten records that version was written.
+func (s *guardState) markWritten(version uint64) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.written = max(s.written, version)
 }
 
 // last returns the latest record held.
@@ -627,7 +784,7 @@ func (s *guardState) last() (memguard.Record, bool) {
 	defer s.mu.Unlock()
 
 	var latest memguard.Record
-	for _, r := range s.records {
+	for _, r := range s.all() {
 		if r.At.After(latest.At) {
 			latest = r
 		}
@@ -646,8 +803,8 @@ func (s *guardState) start() []memguard.Record {
 	return s.records
 }
 
-// restored returns the records held now.
-func (s *guardState) restored() []memguard.Record {
+// restoredRecords returns the records held now.
+func (s *guardState) restoredRecords() []memguard.Record {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 

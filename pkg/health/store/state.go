@@ -337,17 +337,34 @@ func writeBaselines(ctx context.Context, tx *sql.Tx, bases []Baseline) error {
 	return nil
 }
 
+// PutKV writes one kv value at once, outside the checkpoint, and touches
+// nothing else: the memory guard writes its intervention records as soon as
+// an action completes, and owns their key. The reserved rate-marks key is
+// refused.
+func (s *Store) PutKV(ctx context.Context, key, value string) error {
+	if key == rateMarksKey {
+		return fmt.Errorf("put kv %q: the key is reserved", key)
+	}
+	if _, err := s.db.ExecContext(ctx, kvUpsert, key, value); err != nil {
+		return fmt.Errorf("put kv %q: %w", key, err)
+	}
+
+	return nil
+}
+
+// kvUpsert writes one kv value.
+const kvUpsert = `INSERT INTO kv (k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v`
+
 func writeKV(ctx context.Context, tx *sql.Tx, kv map[string]string, marks string) error {
-	const upsert = `INSERT INTO kv (k, v) VALUES (?, ?) ON CONFLICT(k) DO UPDATE SET v = excluded.v`
 	for k, v := range kv {
 		if k == rateMarksKey {
 			continue
 		}
-		if _, err := tx.ExecContext(ctx, upsert, k, v); err != nil {
+		if _, err := tx.ExecContext(ctx, kvUpsert, k, v); err != nil {
 			return fmt.Errorf("write kv %q: %w", k, err)
 		}
 	}
-	if _, err := tx.ExecContext(ctx, upsert, rateMarksKey, marks); err != nil {
+	if _, err := tx.ExecContext(ctx, kvUpsert, rateMarksKey, marks); err != nil {
 		return fmt.Errorf("write rate marks: %w", err)
 	}
 

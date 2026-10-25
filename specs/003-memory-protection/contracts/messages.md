@@ -11,8 +11,8 @@ Amends [002 contracts/telegram-commands.md](../../002-deeper-health-checks/contr
 PROBLEM: memory: 9% available (5.6 of 62 GB); top: web-app 31 GB (since 01:10)
 PROBLEM: memory: swap 85% used (6.8 of 8 GB); top: web-app 31 GB
 PROBLEM: memory: pressure 12% (stalled, 1 min avg); top: web-app 31 GB
-PROBLEM: memory: web-app grew 12→31 GB in 40 min
-PROBLEM: memory: container web-app has no memory limit
+PROBLEM: memory: web-app grew 12→31 GB in 40 min; top: web-app 31 GB
+PROBLEM: memory: container web-app has no memory limit; top: web-app 31 GB
 RESOLVED: memory: 45% available
 RESOLVED: memory: swap 20% used
 RESOLVED: memory: pressure 0%
@@ -28,10 +28,11 @@ RESOLVED: memory: container web-app has a memory limit      # or: "… stopped"
 | would restart (report mode) | `mode` | `memory: would restart container web-app (grew 12→31 GB in 10 min); host 4% available, stalled 35% — intervene is report` |
 | stopped (repeat) | `failed_mode` | `memory: stopped container web-app: ran away again 2h10m after tgshd restarted it (grew 3→22 GB in 10 min); host 4% available` |
 | killed (runtime did not answer) | `failed_mode` | `memory: killed service backup.service through the kernel: systemctl did not answer within 60s (grew …); host 2% available` |
-| not recovered | `failed_mode` | `memory: restarting web-app did not free memory; host still 3% available, stalled 45%; top: worker 20 GB` |
+| killed (runtime unreachable) | `failed_mode` | `memory: killed service backup.service through the kernel: systemctl could not be reached (grew …); host 2% available` (`docker could not be reached` for a container) |
+| not recovered | `failed_mode` | `memory: restarting web-app (31 GB before) did not free memory; host still 3% available, stalled 45%; top: worker 20 GB` |
 | protected | `failed_mode` | `memory: host 3% available, stalled 45%; db is growing (12→40 GB in 10 min) but is never-touch, tgshd did not act` |
 | no culprit | `failed_mode` | `memory: host 3% available, stalled 45%; no service is growing; top process: python3 (pid 4242) 40 GB in user.slice` |
-| action failed | `failed_mode` | `memory: could not restart web-app: <error>` |
+| action failed | `failed_mode` | `memory: could not restart web-app (31 GB): <error>; host 3% available` |
 
 "stalled" is `full avg10` pressure: the share of time every task waited for memory.
 

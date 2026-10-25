@@ -37,7 +37,7 @@ type growth struct {
 
 // judgeGrowth records one point per service and judges each service's rise
 // over the growth window. Disabled when the window or warn level is zero.
-func (c *Check) judgeGrowth(ctx context.Context, res *health.CheckResult) {
+func (c *Check) judgeGrowth(ctx context.Context, res *health.CheckResult, top *topLookup) {
 	if c.settings.GrowthWindow <= 0 || c.settings.GrowthWarn == 0 {
 		return
 	}
@@ -64,7 +64,7 @@ func (c *Check) judgeGrowth(ctx context.Context, res *health.CheckResult) {
 	for _, name := range slices.Sorted(maps.Keys(c.growth.rings)) {
 		reading := health.Reading{Key: keyGrowthPrefix + name, Kind: health.State}
 		if seen[name] {
-			reading.Verdict, reading.Text = c.judgeService(name)
+			reading.Verdict, reading.Text = c.judgeService(name, top)
 		} else {
 			// Gone from the host: resolve whatever was open.
 			delete(c.growth.opened, name)
@@ -75,8 +75,9 @@ func (c *Check) judgeGrowth(ctx context.Context, res *health.CheckResult) {
 }
 
 // judgeService applies research R12 to one service's ring. A condition that is
-// open stays open until the rise falls below half the warn level.
-func (c *Check) judgeService(name string) (health.Verdict, string) {
+// open stays open until the rise falls below half the warn level. A problem
+// text names the current top consumer (FR-014).
+func (c *Check) judgeService(name string, top *topLookup) (health.Verdict, string) {
 	ring := c.growth.rings[name]
 	low, high := 0, 0
 	for i, p := range ring {
@@ -95,8 +96,15 @@ func (c *Check) judgeService(name string) (health.Verdict, string) {
 		float64(latest.Anon) >= stillAtPeak*float64(ring[high].Anon)
 	if climbing || (c.growth.opened[name] && rise*2 >= warn) {
 		c.growth.opened[name] = true
-		return health.Bad, fmt.Sprintf("%s grew %s→%s in %s",
-			name, number(float64(ring[low].Anon)/gib), size(latest.Anon), span(latest.At.Sub(ring[low].At)))
+
+		return health.Bad, fmt.Sprintf(
+			"%s grew %s→%s in %s%s",
+			name,
+			number(float64(ring[low].Anon)/gib),
+			size(latest.Anon),
+			span(latest.At.Sub(ring[low].At)),
+			top.suffix(),
+		)
 	}
 
 	delete(c.growth.opened, name)

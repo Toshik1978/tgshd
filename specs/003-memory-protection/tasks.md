@@ -120,3 +120,12 @@ After US1: T013 (US2) and T017 (US4) together.
 1. Phase 1, then US1 → deploy with `intervene: report`; watch the "would restart" reports.
 2. US2 and US4 next (warnings and clear OOM reports), then US3.
 3. Switch the host to `intervene: act` once the reports have picked the right services.
+
+## Phase 7: Convergence
+
+- [x] T021 Write the guard's intervention records to the store as soon as an action completes and on shutdown, instead of only at the next tick checkpoint, in cmd/health_memory.go (tests in cmd/health_test.go: a restart right after an action keeps the repeat history) per FR-009 (partial)
+- [x] T022 Add the memory-before figure to the "not recovered" and "action failed" outcome texts, and the host's available memory to "action failed", in pkg/health/memguard/outcome.go and contracts/messages.md (tests in pkg/health/memguard/outcome_test.go) per FR-007 (partial)
+- [x] T023 Name the current top consumer in the growth and missing-limit PROBLEM texts in pkg/health/check/memory/growth.go and pkg/health/check/memory/audit.go, and in contracts/messages.md (tests in growth_test.go and audit_test.go) per FR-014 (partial)
+- [x] T024 Resolve `memory/limit/<container>` conditions for containers no longer listed after a daemon restart in pkg/health/check/memory/audit.go (tests in audit_test.go) per FR-018 (partial)
+- [x] T025 Word the killed outcome for an unreachable runtime as "could not be reached" instead of claiming a timeout that never elapsed, in pkg/health/memguard/outcome.go and pkg/health/memguard/loop.go (tests in outcome_test.go and loop_test.go) per contracts/messages.md "killed" (partial)
+- [x] T026 Add `health_memory.go` and `health_memory_check.go` to the `cmd` (health) row of .claude/CLAUDE.md per plan: Source Code (partial)

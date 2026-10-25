@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
@@ -1804,10 +1805,29 @@ func TestGuardActuatorKillsOnlyServicesAndScopes(t *testing.T) {
 	}
 }
 
-// kvStore is a runner.Store that keeps only the kv.
+// kvStore is a runner.Store that keeps only the kv; its first failPuts
+// PutKV calls fail.
 type kvStore struct {
-	mu sync.Mutex
-	kv map[string]string
+	mu       sync.Mutex
+	kv       map[string]string
+	failPuts int
+	puts     int
+}
+
+func (s *kvStore) PutKV(_ context.Context, key, value string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	s.puts++
+	if s.puts <= s.failPuts {
+		return errors.New("database is locked")
+	}
+	if s.kv == nil {
+		s.kv = map[string]string{}
+	}
+	s.kv[key] = value
+
+	return nil
 }
 
 func (s *kvStore) Load(context.Context) (store.State, error) {
@@ -1839,10 +1859,11 @@ func (s *kvStore) value(key string) string {
 }
 
 // guardDaemon runs one daemon's runner and guard over st and f until stopped.
-func guardDaemon(t *testing.T, st runner.Store, f *guardFakes) (*runner.Runner, *fxtest.Lifecycle) {
+func guardDaemon(t *testing.T, st *kvStore, f *guardFakes) (*runner.Runner, *fxtest.Lifecycle) {
 	t.Helper()
 
 	g := newMemoryGuard(testMemorySection(hcfg.InterveneAct), f.host(), zap.NewNop())
+	g.kv = st
 	r := runner.New(runner.Options{
 		Store: st, Persisters: []runner.Persister{g.persister()}, Concurrency: 1,
 		Telegram: &recordingSender{}, Mode: notify.ModeTelegram, Logger: zap.NewNop(),
@@ -1858,18 +1879,17 @@ func guardDaemon(t *testing.T, st runner.Store, f *guardFakes) (*runner.Runner, 
 	return r, lc
 }
 
-func TestGuardStateRoundTripsThroughTheStore(t *testing.T) {
+// TestGuardRecordsSurviveARestartRightAfterAnAction: the record of an action
+// reaches the store as soon as the action completes, with no tick checkpoint
+// in between, so a daemon restarted right after it keeps the repeat history.
+func TestGuardRecordsSurviveARestartRightAfterAnAction(t *testing.T) {
 	t.Parallel()
 
 	st := &kvStore{}
 	first := newGuardFakes(guardT0())
-	r, lc := guardDaemon(t, st, first)
+	_, lc := guardDaemon(t, st, first)
 	waitFor(t, "the restart", func() bool { return len(first.containers.actions()) > 0 })
-	waitFor(t, "the checkpoint of the record", func() bool {
-		if err := r.Do(t.Context()); err != nil {
-			t.Fatal(err)
-		}
-
+	waitFor(t, "the record in the store, with no tick", func() bool {
 		return strings.Contains(st.value(memoryGuardKey), `"name":"web-app"`)
 	})
 	lc.RequireStop()
@@ -1888,10 +1908,126 @@ func TestGuardStateRoundTripsThroughTheStore(t *testing.T) {
 	}
 }
 
+// TestMemoryGuardRetriesAFailedRecordWrite: a write the store refuses is
+// retried every tick, not left for the next action, and warned about once.
+func TestMemoryGuardRetriesAFailedRecordWrite(t *testing.T) {
+	t.Parallel()
+
+	core, logs := observer.New(zap.WarnLevel)
+	st := &kvStore{failPuts: 2}
+	host := newGuardFakes(guardT0()).host()
+	host.clock = tickClock{}
+	g := newMemoryGuard(testMemorySection(hcfg.InterveneAct), host, zap.New(core))
+	g.kv = st
+	if err := g.state.Restore(""); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		g.writeRecords(ctx)
+	}()
+
+	g.state.Save(t.Context(), []memguard.Record{guardRecord("web-app", guardT0())})
+	waitFor(t, "the record in the store after the failed writes", func() bool {
+		return strings.Contains(st.value(memoryGuardKey), `"name":"web-app"`)
+	})
+	cancel()
+	<-done
+
+	if n := logs.FilterMessageSnippet("Memory guard cannot write its records").Len(); n != 1 {
+		t.Fatalf("warnings = %d, want one while the writes keep failing", n)
+	}
+}
+
+func guardRecord(name string, at time.Time) memguard.Record {
+	return memguard.Record{
+		ServiceID: "container:" + name, Name: name, Action: memguard.ActionRestart, At: at, Before: 1 << 30,
+		Mode: memguard.ModeAct,
+	}
+}
+
+// TestMemoryGuardWritesItsRecordsOnStop: records the loop saved but that were
+// not written yet are written when the guard stops.
+func TestMemoryGuardWritesItsRecordsOnStop(t *testing.T) {
+	t.Parallel()
+
+	st := &kvStore{}
+	g := newMemoryGuard(testMemorySection(hcfg.InterveneAct), newGuardFakes(guardT0()).host(), zap.NewNop())
+	g.kv = st
+	if err := g.state.Restore(""); err != nil {
+		t.Fatal(err)
+	}
+	g.state.Save(t.Context(), []memguard.Record{guardRecord("web-app", guardT0())})
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	g.run(ctx, &blockingRunner{release: closedChan()})
+
+	if !strings.Contains(st.value(memoryGuardKey), `"name":"web-app"`) {
+		t.Fatalf("stored %q, want the record written on stop", st.value(memoryGuardKey))
+	}
+}
+
+// TestMemoryGuardDoesNotWriteOverUnreadRecords: until the stored records were
+// read, the guard's own never replace them.
+func TestMemoryGuardDoesNotWriteOverUnreadRecords(t *testing.T) {
+	t.Parallel()
+
+	st := &kvStore{kv: map[string]string{memoryGuardKey: `[{"name":"db"}]`}}
+	g := newMemoryGuard(testMemorySection(hcfg.InterveneAct), newGuardFakes(guardT0()).host(), zap.NewNop())
+	g.kv = st
+	g.state.Save(t.Context(), []memguard.Record{guardRecord("web-app", guardT0())})
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	g.run(ctx, &blockingRunner{release: closedChan()})
+
+	if got := st.value(memoryGuardKey); got != `[{"name":"db"}]` {
+		t.Fatalf("stored %q, want the unread records kept", got)
+	}
+}
+
+// TestGuardStateKeepsRecordsRestoredLate: records restored after the loop
+// started are kept beside the loop's own, so the store does not lose them.
+func TestGuardStateKeepsRecordsRestoredLate(t *testing.T) {
+	t.Parallel()
+
+	s := newGuardState(zap.NewNop())
+	s.start()
+	own := guardRecord("web-app", guardT0().Add(time.Hour))
+	s.Save(t.Context(), []memguard.Record{own})
+	stored := guardRecord("worker", guardT0())
+	data, err := json.Marshal([]memguard.Record{stored})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err = s.Restore(string(data)); err != nil {
+		t.Fatal(err)
+	}
+	s.Save(t.Context(), []memguard.Record{own})
+
+	out, err := s.Export()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got []memguard.Record
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatal(err)
+	}
+	if want := []memguard.Record{stored, own}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("exported %+v, want %+v", got, want)
+	}
+	if last, ok := s.last(); !ok || last.Name != "web-app" {
+		t.Fatalf("last = %+v, %v", last, ok)
+	}
+}
+
 func TestGuardStateKV(t *testing.T) {
 	t.Parallel()
 
-	s := &guardState{log: zap.NewNop()}
+	s := newGuardState(zap.NewNop())
 	if err := s.Restore(""); err != nil {
 		t.Fatal(err)
 	}
@@ -1907,11 +2043,11 @@ func TestGuardStateKV(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	other := &guardState{log: zap.NewNop()}
+	other := newGuardState(zap.NewNop())
 	if err := other.Restore(data); err != nil {
 		t.Fatal(err)
 	}
-	if got := other.restored(); !reflect.DeepEqual(got, rec) {
+	if got := other.restoredRecords(); !reflect.DeepEqual(got, rec) {
 		t.Fatalf("restored %+v, want %+v", got, rec)
 	}
 	if err := other.Restore("{"); err == nil {
@@ -2143,8 +2279,13 @@ func TestMemoryChecksBuiltOnlyWithTheSection(t *testing.T) {
 		c.Mode != health.Mode(hcfg.ModeTLG) || !c.PauseInQuiet || c.NeedsInternet || c.DependsOn != "" {
 		t.Fatalf("check = %+v", c)
 	}
-	if p, ok := set.Persisters[0].(runner.KVPersister); len(set.Persisters) != 1 || !ok || p.Key != "memory.growth" {
-		t.Fatalf("persisters = %+v, want the growth history under kv memory.growth", set.Persisters)
+	if len(set.Persisters) != 2 {
+		t.Fatalf("persisters = %+v, want two", set.Persisters)
+	}
+	for i, key := range []string{"memory.growth", "memory.audit"} {
+		if p, ok := set.Persisters[i].(runner.KVPersister); !ok || p.Key != key {
+			t.Fatalf("persisters[%d] = %+v, want kv %s", i, set.Persisters[i], key)
+		}
 	}
 }
 

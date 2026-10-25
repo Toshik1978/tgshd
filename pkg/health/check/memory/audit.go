@@ -2,6 +2,7 @@ package memory
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"maps"
@@ -14,7 +15,8 @@ import (
 const keyLimitPrefix = "memory/limit/"
 
 // audit remembers the containers judged on the previous run, so one that
-// vanished is resolved once.
+// vanished is resolved once. The set is persisted (see AuditState), so a
+// container removed while the daemon was down is resolved after the restart.
 type audit struct {
 	mu    sync.Mutex
 	known map[string]bool
@@ -24,7 +26,7 @@ type audit struct {
 // A container that stops, gains a limit or disappears resolves its condition.
 // Without a container runtime the audit is skipped; an unreadable list is one
 // checker error and leaves the conditions as they were.
-func (c *Check) judgeLimits(ctx context.Context, res *health.CheckResult) {
+func (c *Check) judgeLimits(ctx context.Context, res *health.CheckResult, top *topLookup) {
 	containers, err := c.source.Containers(ctx)
 	if errors.Is(err, ErrNoContainers) {
 		return
@@ -52,7 +54,7 @@ func (c *Check) judgeLimits(ctx context.Context, res *health.CheckResult) {
 			reading.Text = fmt.Sprintf("container %s has a memory limit", ctr.Name)
 		default:
 			reading.Verdict = health.Bad
-			reading.Text = fmt.Sprintf("container %s has no memory limit", ctr.Name)
+			reading.Text = fmt.Sprintf("container %s has no memory limit%s", ctr.Name, top.suffix())
 		}
 		res.Readings = append(res.Readings, reading)
 	}
@@ -67,4 +69,44 @@ func (c *Check) judgeLimits(ctx context.Context, res *health.CheckResult) {
 		}
 	}
 	c.audit.known = seen
+}
+
+// AuditState returns the persistable set of containers the limit audit has
+// judged (kv memory.audit), kept apart from the growth history.
+func (c *Check) AuditState() *AuditState { return &AuditState{audit: &c.audit} }
+
+// AuditState exports and restores the limit audit's known containers.
+type AuditState struct {
+	audit *audit
+}
+
+// Export serialises the known container names.
+func (s *AuditState) Export() ([]byte, error) {
+	s.audit.mu.Lock()
+	defer s.audit.mu.Unlock()
+	data, err := json.Marshal(slices.Sorted(maps.Keys(s.audit.known)))
+	if err != nil {
+		return nil, fmt.Errorf("export memory audit: %w", err)
+	}
+
+	return data, nil
+}
+
+// Restore loads names written by Export. Empty data is a no-op.
+func (s *AuditState) Restore(data []byte) error {
+	if len(data) == 0 {
+		return nil
+	}
+	var names []string
+	if err := json.Unmarshal(data, &names); err != nil {
+		return fmt.Errorf("restore memory audit: %w", err)
+	}
+	s.audit.mu.Lock()
+	defer s.audit.mu.Unlock()
+	s.audit.known = make(map[string]bool, len(names))
+	for _, n := range names {
+		s.audit.known[n] = true
+	}
+
+	return nil
 }

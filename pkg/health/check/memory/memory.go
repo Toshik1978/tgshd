@@ -141,8 +141,8 @@ func (c *Check) Run(ctx context.Context) health.CheckResult {
 	} else {
 		res.Err = errors.Join(res.Err, health.CheckError{Subject: "pressure", Kind: "unavailable", Err: ErrNoPressure})
 	}
-	c.judgeGrowth(ctx, &res)
-	c.judgeLimits(ctx, &res)
+	c.judgeGrowth(ctx, &res, top)
+	c.judgeLimits(ctx, &res, top)
 	res.Err = errors.Join(res.Err, top.err())
 
 	return res

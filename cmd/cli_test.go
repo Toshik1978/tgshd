@@ -578,9 +578,9 @@ func TestCollectCheckSetsUsesTheDaemonProviders(t *testing.T) {
 	if !slices.Equal(names, want) || len(set.Errors) != 0 {
 		t.Fatalf("checks = %v, errors = %+v", names, set.Errors)
 	}
-	// disks, temps, kernel, containers, freshness, command and memory keep
-	// state.
-	if len(set.Persisters) != 7 || set.Memory == nil || set.Drives == nil || len(set.Background) != 1 ||
+	// disks, temps, kernel, containers, freshness, command and memory (growth
+	// and audit) keep state.
+	if len(set.Persisters) != 8 || set.Memory == nil || set.Drives == nil || len(set.Background) != 1 ||
 		len(set.Fixes) != 1 {
 		t.Fatalf("persisters = %d, drives = %v, background = %d, fixes = %d",
 			len(set.Persisters), set.Drives, len(set.Background), len(set.Fixes))

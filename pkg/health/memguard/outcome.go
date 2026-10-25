@@ -69,8 +69,7 @@ func text(o Outcome) string {
 			false,
 		) + preview
 	case OutcomeKilled:
-		return fmt.Sprintf("memory: killed %s through the kernel: %s did not answer within %ds (%s); %s",
-			subject(o), runtime(o), int(o.Timeout.Seconds()), growth(o), available(o))
+		return killed(o)
 	case OutcomeNotRecovered:
 		return notRecovered(o)
 	case OutcomeProtected:
@@ -91,11 +90,19 @@ func actionFailed(o Outcome) string {
 		reason = o.Err.Error()
 	}
 
-	return "memory: could not " + string(o.Action) + " " + o.Service.Name + ": " + reason
+	return "memory: could not " + string(o.Action) + " " + o.Service.Name + " (" + formatSize(o.Size) + "): " + reason +
+		"; " + available(o)
 }
 
 func notRecovered(o Outcome) string {
-	s := "memory: " + gerund(o.Action) + " " + o.Service.Name + " did not free memory; " + host(o, true)
+	s := "memory: " + gerund(
+		o.Action,
+	) + " " + o.Service.Name + " (" + formatSize(
+		o.Size,
+	) + " before) did not free memory; " + host(
+		o,
+		true,
+	)
 	if o.Top.Name != "" {
 		s += "; top: " + describe(o.Top)
 	}
@@ -226,4 +233,16 @@ func formatSpan(d time.Duration) string {
 	}
 
 	return strconv.Itoa(h) + "h" + strconv.Itoa(m) + "m"
+}
+
+// killed renders the killed outcome: the runtime either did not answer within
+// the action timeout or could not be reached at all.
+func killed(o Outcome) string {
+	why := fmt.Sprintf("did not answer within %ds", int(o.Timeout.Seconds()))
+	if o.Unreachable {
+		why = "could not be reached"
+	}
+
+	return fmt.Sprintf("memory: killed %s through the kernel: %s %s (%s); %s",
+		subject(o), runtime(o), why, growth(o), available(o))
 }

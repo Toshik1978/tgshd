@@ -113,3 +113,101 @@ func TestAuditIsSilentWithoutAContainerRuntime(t *testing.T) {
 		t.Fatalf("err = %v, want none", res.Err)
 	}
 }
+
+func TestAuditProblemNamesTheTopConsumer(t *testing.T) {
+	src := &fakeSource{
+		host:       healthy(),
+		services:   []memory.Service{{Name: "web-app", Anon: 31 * gb}},
+		containers: []memory.Container{{Name: "web-app", Running: true}, {Name: "worker", Running: true}},
+	}
+
+	res := memory.New(src, auditSettings()).Run(context.Background())
+
+	for _, name := range []string{"web-app", "worker"} {
+		want := "container " + name + " has no memory limit; top: web-app 31 GB"
+		if r := find(t, res, "memory/limit/"+name); r.Verdict != health.Bad || r.Text != want {
+			t.Errorf("%s reading = %+v, want text %q", name, r, want)
+		}
+	}
+	if src.svcCalls != 1 {
+		t.Errorf("services read %d times, want once for the top lookup", src.svcCalls)
+	}
+}
+
+func TestAuditResolvedTextsCarryNoTopConsumer(t *testing.T) {
+	src := &fakeSource{
+		host:       healthy(),
+		services:   []memory.Service{{Name: "web-app", Anon: 31 * gb}},
+		containers: []memory.Container{{Name: "web-app", Running: true, HasLimit: true}},
+	}
+
+	res := memory.New(src, auditSettings()).Run(context.Background())
+
+	if r := find(t, res, "memory/limit/web-app"); r.Text != "container web-app has a memory limit" {
+		t.Fatalf("reading = %+v", r)
+	}
+	if src.svcCalls != 0 {
+		t.Errorf("services read %d times with nothing to name", src.svcCalls)
+	}
+}
+
+func TestAuditResolvesAContainerRemovedWhileTheDaemonWasDown(t *testing.T) {
+	src := &fakeSource{host: healthy(), containers: []memory.Container{
+		{Name: "web-app", Running: true}, {Name: "worker", Running: true},
+	}}
+	before := memory.New(src, auditSettings())
+	before.Run(context.Background())
+	saved, err := before.AuditState().Export()
+	if err != nil {
+		t.Fatalf("export: %v", err)
+	}
+
+	// The daemon restarts and worker is gone from the host meanwhile.
+	src.containers = []memory.Container{{Name: "web-app", Running: true}}
+	after := memory.New(src, auditSettings())
+	if err := after.AuditState().Restore(saved); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+
+	res := after.Run(context.Background())
+	if r := find(t, res, "memory/limit/worker"); r.Verdict != health.Good || r.Text != "container worker stopped" {
+		t.Fatalf("worker = %+v, want resolved", r)
+	}
+	if r := find(t, res, "memory/limit/web-app"); r.Verdict != health.Bad {
+		t.Fatalf("web-app = %+v, want still open", r)
+	}
+}
+
+func TestAuditKeepsRestoredContainersWhenTheListErrors(t *testing.T) {
+	src := &fakeSource{host: healthy(), containers: []memory.Container{{Name: "worker", Running: true}}}
+	before := memory.New(src, auditSettings())
+	before.Run(context.Background())
+	saved, _ := before.AuditState().Export()
+
+	src.ctrErr = errors.New("docker down")
+	after := memory.New(src, auditSettings())
+	if err := after.AuditState().Restore(saved); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+	for _, r := range after.Run(context.Background()).Readings {
+		if r.Key == "memory/limit/worker" {
+			t.Fatalf("unexpected reading on a list error: %+v", r)
+		}
+	}
+
+	src.ctrErr = nil
+	src.containers = nil
+	if r := find(t, after.Run(context.Background()), "memory/limit/worker"); r.Verdict != health.Good {
+		t.Fatalf("worker = %+v, want resolved once the list is readable", r)
+	}
+}
+
+func TestAuditRestoreRejectsGarbage(t *testing.T) {
+	c := memory.New(&fakeSource{host: healthy()}, auditSettings())
+	if err := c.AuditState().Restore([]byte("{")); err == nil {
+		t.Fatal("want an error for malformed data")
+	}
+	if err := c.AuditState().Restore(nil); err != nil {
+		t.Fatalf("empty restore: %v", err)
+	}
+}

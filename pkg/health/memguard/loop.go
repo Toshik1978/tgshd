@@ -270,11 +270,16 @@ func (l *Loop) act(ctx context.Context, dec Decision) {
 	ok := err == nil
 	if errors.Is(err, errActionTimeout) || errors.Is(err, ErrUnreachable) ||
 		errors.Is(err, context.DeadlineExceeded) {
+		err0 := err
 		if kerr := l.kill(out.Service); kerr != nil {
 			err = fmt.Errorf("%w; kill: %w", err, kerr)
 		} else {
 			ok, err = true, nil
-			out.Kind, out.Timeout, rec.Action = OutcomeKilled, l.cfg.ActionTimeout, ActionKill
+			out.Kind, rec.Action = OutcomeKilled, ActionKill
+			out.Unreachable = errors.Is(err0, ErrUnreachable)
+			if !out.Unreachable {
+				out.Timeout = l.cfg.ActionTimeout
+			}
 		}
 	}
 	if !ok {

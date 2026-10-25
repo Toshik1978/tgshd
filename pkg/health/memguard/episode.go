@@ -94,6 +94,9 @@ type Outcome struct {
 	Err error
 	// Timeout is how long the runtime was given to answer, for killed.
 	Timeout time.Duration
+	// Unreachable is true for killed when the runtime could not be reached at
+	// all, so no timeout elapsed.
+	Unreachable bool
 }
 
 // Decision is what one host reading makes the guard do.

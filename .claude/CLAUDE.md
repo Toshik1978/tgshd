@@ -68,7 +68,7 @@ group, gated behind an env-var check in `main()`.
 | Package | Responsibility |
 | :--- | :--- |
 | `cmd` | `main.go`: fx composition root, config, env-gated wiring; `cli.go`: `check --once` and `heartbeat` subcommands |
-| `cmd` (health) | `health.go`, `health_adapters.go`, `health_hardware.go`, `health_services.go`, `health_sms.go`, `health_reports.go`: health wiring, adapters and report/summary providers |
+| `cmd` (health) | `health.go`, `health_adapters.go`, `health_hardware.go`, `health_services.go`, `health_sms.go`, `health_reports.go`, `health_memory.go`, `health_memory_check.go`: health wiring, adapters and report/summary providers |
 | `cmd/app` | `Application` lifecycle, gocron worker scheduler |
 | `pkg/telegram` | Telegram consumer (routing, `access.go` allow-list) + publisher (replies) |
 | `pkg/command` | Command handlers (`/ping`, `/power`, `/speed`, `/5g` `/4g` `/3g`, `/sms`, `/status`, `/clear`, `/retire`, `/history`, `/temp`, `/disks`, script) |

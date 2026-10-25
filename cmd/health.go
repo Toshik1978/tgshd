@@ -106,6 +106,7 @@ type healthSetup struct {
 type stateStore interface {
 	runner.Store
 	reportStore
+	guardKV
 }
 
 // healthParams are the dependencies of the health runner.
@@ -316,6 +317,9 @@ func newHealth(p healthParams) healthOut {
 	guard := newMemoryGuard(p.Setup.Config.Memory, p.Guard, p.Logger)
 	if guard != nil {
 		set.Persisters = append(set.Persisters, guard.persister())
+		if p.Setup.Store != nil {
+			guard.kv = p.Setup.Store
+		}
 	}
 	reports := newHealthReports(p.Setup, set, p.Uptime, p.Logger)
 	if guard != nil {

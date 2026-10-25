@@ -54,9 +54,12 @@ func buildMemoryCheck(m *hcfg.Memory, src memorySource, lister containerLister, 
 	}
 
 	return checkSet{
-		Checks:     []health.Check{newCheck(memoryCheckName, common, run)},
-		Persisters: []runner.Persister{runner.KVPersister{Key: memoryGrowthKey, State: bytesKV{state: chk}}},
-		Memory:     chk,
+		Checks: []health.Check{newCheck(memoryCheckName, common, run)},
+		Persisters: []runner.Persister{
+			runner.KVPersister{Key: memoryGrowthKey, State: bytesKV{state: chk}},
+			runner.KVPersister{Key: memoryAuditKey, State: bytesKV{state: chk.AuditState()}},
+		},
+		Memory: chk,
 	}
 }
 

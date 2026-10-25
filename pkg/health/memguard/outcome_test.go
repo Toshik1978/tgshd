@@ -147,6 +147,25 @@ func TestMessage(t *testing.T) {
 			"memory: killed container web-app through the kernel: docker did not answer within 60s (grew 12→31 GB in 10 min); host 2% available",
 		},
 		{
+			"killed unit, runtime unreachable",
+			Outcome{
+				Kind: OutcomeKilled, Culprit: culpritOf(KindUnit, "backup.service", 2*gb, 12*gb), AvailablePct: 2,
+				Unreachable: true,
+			},
+			"memory/guard/backup.service",
+			health.ModeSMS,
+			"memory: killed service backup.service through the kernel: systemctl could not be reached (grew 2→12 GB in 10 min); host 2% available",
+		},
+		{
+			"killed container, runtime unreachable",
+			Outcome{
+				Kind: OutcomeKilled, Culprit: web, AvailablePct: 2, Unreachable: true,
+			},
+			"memory/guard/web-app",
+			health.ModeSMS,
+			"memory: killed container web-app through the kernel: docker could not be reached (grew 12→31 GB in 10 min); host 2% available",
+		},
+		{
 			"not recovered",
 			Outcome{
 				Kind:         OutcomeNotRecovered,
@@ -158,13 +177,13 @@ func TestMessage(t *testing.T) {
 			},
 			"memory/guard/web-app",
 			health.ModeSMS,
-			"memory: restarting web-app did not free memory; host still 3% available, stalled 45%; top: worker 20 GB",
+			"memory: restarting web-app (31 GB before) did not free memory; host still 3% available, stalled 45%; top: worker 20 GB",
 		},
 		{
 			"not recovered without top",
 			Outcome{Kind: OutcomeNotRecovered, Action: ActionStop, Culprit: web, AvailablePct: 3, FullAvg10: 45},
 			"memory/guard/web-app", health.ModeSMS,
-			"memory: stopping web-app did not free memory; host still 3% available, stalled 45%",
+			"memory: stopping web-app (31 GB before) did not free memory; host still 3% available, stalled 45%",
 		},
 		{
 			"protected",
@@ -196,15 +215,22 @@ func TestMessage(t *testing.T) {
 		},
 		{
 			"action failed",
-			Outcome{Kind: OutcomeActionFailed, Action: ActionRestart, Culprit: web, Err: errors.New("docker: boom")},
-			"memory/guard/web-app", health.ModeSMS,
-			"memory: could not restart web-app: docker: boom",
+			Outcome{
+				Kind:         OutcomeActionFailed,
+				Action:       ActionRestart,
+				Culprit:      web,
+				AvailablePct: 3,
+				Err:          errors.New("docker: boom"),
+			},
+			"memory/guard/web-app",
+			health.ModeSMS,
+			"memory: could not restart web-app (31 GB): docker: boom; host 3% available",
 		},
 		{
 			"action failed without error",
-			Outcome{Kind: OutcomeActionFailed, Action: ActionKill, Culprit: web},
+			Outcome{Kind: OutcomeActionFailed, Action: ActionKill, Culprit: web, AvailablePct: 3},
 			"memory/guard/web-app", health.ModeSMS,
-			"memory: could not kill web-app: unknown error",
+			"memory: could not kill web-app (31 GB): unknown error; host 3% available",
 		},
 	}
 	for _, tt := range tests {

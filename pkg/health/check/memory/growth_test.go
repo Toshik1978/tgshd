@@ -58,7 +58,8 @@ func TestGrowthSteadyClimbOpens(t *testing.T) {
 	}
 
 	r := growthReading(t, res, "web-app")
-	if r.Verdict != health.Bad || r.Kind != health.State || r.Text != "web-app grew 12→28 GB in 40 min" {
+	if r.Verdict != health.Bad || r.Kind != health.State ||
+		r.Text != "web-app grew 12→28 GB in 40 min; top: web-app 28 GB" {
 		t.Fatalf("reading = %+v", r)
 	}
 }
@@ -225,7 +226,8 @@ func TestGrowthExportRestore(t *testing.T) {
 		t.Fatal(err)
 	}
 	res := step(fresh, src, c, 10*time.Minute, map[string]uint64{"web-app": 22 * gb})
-	if r := growthReading(t, res, "web-app"); r.Verdict != health.Bad || r.Text != "web-app grew 10→22 GB in 20 min" {
+	r := growthReading(t, res, "web-app")
+	if r.Verdict != health.Bad || r.Text != "web-app grew 10→22 GB in 20 min; top: web-app 22 GB" {
 		t.Fatalf("reading = %+v", r)
 	}
 
@@ -253,5 +255,33 @@ func TestGrowthServicesErrorIsCheckerError(t *testing.T) {
 	res := memory.New(src, growthSettings(c)).Run(context.Background())
 	if res.Err == nil {
 		t.Fatal("expected checker error")
+	}
+}
+
+func TestGrowthProblemTopLookupHappensOncePerRun(t *testing.T) {
+	c := &clock{now: start0()}
+	src := &fakeSource{host: healthy(), containers: []memory.Container{{Name: "db", Running: true}}}
+	chk := memory.New(src, growthSettings(c))
+
+	var res health.CheckResult
+	for i := range 5 {
+		src.svcCalls = 0
+		res = step(chk, src, c, 10*time.Minute, map[string]uint64{
+			"web-app": uint64(12+4*i) * gb, "worker": uint64(11+4*i) * gb,
+		})
+	}
+
+	for _, name := range []string{"web-app", "worker"} {
+		r := growthReading(t, res, name)
+		if r.Verdict != health.Bad || !strings.HasSuffix(r.Text, "; top: web-app 28 GB") {
+			t.Errorf("%s reading = %+v", name, r)
+		}
+	}
+	if r := find(t, res, "memory/limit/db"); r.Verdict != health.Bad || !strings.Contains(r.Text, "; top: ") {
+		t.Errorf("limit reading = %+v", r)
+	}
+	// One read for the growth history, one shared top lookup for every problem.
+	if src.svcCalls != 2 {
+		t.Errorf("services read %d times, want 2", src.svcCalls)
 	}
 }

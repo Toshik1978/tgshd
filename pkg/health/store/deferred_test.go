@@ -202,3 +202,37 @@ func TestDeferredClosedFailsFast(t *testing.T) {
 		})
 	}
 }
+
+// TestDeferredPutKV: PutKV opens the database like Checkpoint, and fails
+// once closed.
+func TestDeferredPutKV(t *testing.T) {
+	dir := t.TempDir()
+	errUnavailable := errors.New("state directory unavailable")
+	opens := 0
+	d := NewDeferred(nil, func(ctx context.Context) (*Store, error) {
+		opens++
+		if opens == 1 {
+			return nil, errUnavailable
+		}
+
+		return Open(ctx, dir)
+	})
+	ctx := t.Context()
+
+	if err := d.PutKV(ctx, "memory.guard", "[]"); !errors.Is(err, errUnavailable) {
+		t.Fatalf("PutKV = %v, want the open error", err)
+	}
+	if err := d.PutKV(ctx, "memory.guard", "[1]"); err != nil {
+		t.Fatalf("PutKV after the retry: %v", err)
+	}
+	st, err := d.Load(ctx)
+	if err != nil || st.KV["memory.guard"] != "[1]" {
+		t.Fatalf("Load = %+v, %v", st.KV, err)
+	}
+	if err := d.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := d.PutKV(ctx, "memory.guard", "[2]"); !errors.Is(err, ErrClosed) {
+		t.Fatalf("PutKV after Close = %v, want ErrClosed", err)
+	}
+}

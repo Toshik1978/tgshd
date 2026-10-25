@@ -62,6 +62,11 @@ no_culprit, action_failed}`. `restarted` and `would_*` use `mode`; the rest use 
 `map[ServiceID][]{At, Anon}` — bounded per service; services gone for longer than
 `growth_window` are dropped on export.
 
+## Limit audit known set (persisted, kv `memory.audit`)
+
+`[]string` — the container names the audit last judged, so a `memory/limit/<container>`
+condition for a container removed while the daemon was down resolves after the restart.
+
 ## Conditions and samples (existing engine and store)
 
 | Key | Kind | Opens when |
