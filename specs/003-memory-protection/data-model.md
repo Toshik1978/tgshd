@@ -48,7 +48,7 @@ Fields: `Since`, `State`, `Culprit` (service, before-size, growth, window), `Act
 ## Intervention record (persisted, kv `memory.guard`)
 
 `{ServiceID, Name, Action (restart|stop|kill), At, Before, Mode (act|report)}` — kept while
-`At` is within `repeat_window`; `report` records are kept for the log but never count as a
+`At` is within `repeat_window`; written by the guard through `Store.PutKV` (R11); `report` records are kept for the log but never count as a
 restart for the repeat rule.
 
 ## Outcome (guard → reporter)

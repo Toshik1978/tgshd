@@ -127,12 +127,20 @@ Decisions behind [plan.md](plan.md). Each entry: decision, rationale, alternativ
 ## R11. Persistence
 
 - **Decision**: Intervention records (service, action, at, before) are kept in the guard and
-  exported into the runner's checkpoint as kv `memory.guard` (JSON), restored at start; records
-  older than `repeat_window` are dropped. The tick check's per-service growth history is a
+  written by the guard itself as kv `memory.guard` (JSON) through `Store.PutKV`: as soon as an
+  action completes (a writer goroutine off the decision path, retried every tick on failure) and
+  once more on stop. The runner's tick checkpoint only restores the key at start and writes
+  nothing for it. Records that load late (the store was unreadable at start) are handed to the
+  running guard, which merges them without blocking its decision path. Records older than
+  `repeat_window` are dropped. The tick check's per-service growth history is a
   bounded ring (one point per check run, `growth_window` deep) exported as kv `memory.growth`.
   Host-level metrics (`memory.available_pct`, `memory.swap_pct`, `memory.pressure_some_avg60`)
   go to the existing `samples` table.
-- **Rationale**: FR-009, FR-017. Per-service raw samples in `samples` (90-day retention) would
+- **Rationale**: FR-009, FR-017. FR-009 needs the record in the store before a restart that
+  follows an action closely, so it cannot wait for the next checkpoint. The checkpoint replaces
+  the stored state as a whole, so one that carried only this kv would erase the stored
+  conditions and queue; `PutKV` upserts the one key and touches nothing else, and the guard owns
+  that key. Per-service raw samples in `samples` (90-day retention) would
   reach millions of rows; the growth ring only needs the window.
 
 ## R12. Early-warning growth judgement

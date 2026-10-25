@@ -186,10 +186,10 @@ func newMemoryGuard(m *hcfg.Memory, host *guardHost, logger *zap.Logger) *memory
 			Channel:                health.Mode(m.Mode),
 			FailedChannel:          health.Mode(g.FailedMode),
 		},
-		host:  host,
-		state: newGuardState(logger),
-		log:   logger,
+		host: host,
+		log:  logger,
 	}
+	guard.state = newGuardState(logger, host.clock, guard.cfg.RepeatWindow)
 	guard.setMode(string(guard.cfg.Mode))
 
 	return guard
@@ -298,7 +298,7 @@ func (g *memoryGuard) run(ctx context.Context, r guardRunner) {
 	loop := memguard.NewLoop(cfg, g.host.clock, sampler,
 		guardActuator{containers: g.host.containers, units: g.host.units, cgroups: g.host.cgroups},
 		guardReporter{runner: r, state: g.state}, memguard.WithLogger(g.log))
-	loop.Restore(g.state.start())
+	loop.Restore(g.state.start(loop.RestoreLate))
 	g.log.Info("Memory guard started", zap.String("intervene", string(cfg.Mode)))
 	var writer sync.WaitGroup
 	writer.Go(func() { g.writeRecords(ctx) })
@@ -649,19 +649,26 @@ func (r guardReporter) Save(ctx context.Context, records []memguard.Record) {
 }
 
 // guardState holds the intervention records between the guard loop, the
-// writer and the store. The loop takes the restored records once, when it
-// starts; records restored later (the store could not be read at start) are
-// kept beside the loop's own so the store does not lose them, but the running
-// loop goes on without them.
+// writer and the store. The loop takes the restored records when it starts;
+// records restored later (the store could not be read at start) are handed to
+// the running loop, which merges them into its own, and are kept beside the
+// loop's records until it saved them, so the store does not lose them.
 type guardState struct {
-	log *zap.Logger
+	log   *zap.Logger
+	clock memguard.Clock
+	// window is repeat_window: records older than it are dropped.
+	window time.Duration
 	// dirty is signalled when there are records to write.
 	dirty chan struct{}
+	// handoff hands records restored late to the running loop; it never
+	// blocks.
+	handoff func([]memguard.Record)
 
 	mu sync.Mutex
 	// records are the loop's, or the restored ones until the loop saves.
 	records []memguard.Record
-	// late are the records restored after the loop started.
+	// late are the records restored after the loop started that the loop has
+	// not saved yet. The slice is shared with the loop: never change it.
 	late     []memguard.Record
 	started  bool
 	loopSave bool
@@ -672,15 +679,26 @@ type guardState struct {
 	version, written uint64
 }
 
-// newGuardState returns an empty guardState.
-func newGuardState(log *zap.Logger) *guardState {
-	return &guardState{log: log, dirty: make(chan struct{}, 1)}
+// newGuardState returns an empty guardState that keeps records for window.
+func newGuardState(log *zap.Logger, clock memguard.Clock, window time.Duration) *guardState {
+	return &guardState{log: log, clock: clock, window: window, dirty: make(chan struct{}, 1)}
 }
 
-// Save keeps the loop's records and wakes the writer; it never blocks.
+// Save keeps the loop's records and wakes the writer; it never blocks. The
+// late records the loop now holds, or that left repeat_window, are dropped.
 func (s *guardState) Save(_ context.Context, records []memguard.Record) {
 	s.mu.Lock()
 	s.records, s.loopSave = records, true
+	if len(s.late) > 0 {
+		now := s.clock.Now()
+		var late []memguard.Record
+		for _, r := range s.late {
+			if now.Sub(r.At) <= s.window && !slices.ContainsFunc(records, r.Equal) {
+				late = append(late, r)
+			}
+		}
+		s.late = late
+	}
 	s.version++
 	s.mu.Unlock()
 
@@ -722,9 +740,9 @@ func (s *guardState) Restore(data string) error {
 
 	s.mu.Lock()
 	s.restored = true
-	late := s.started
+	late, handoff := s.started, s.handoff
 	if late {
-		s.log.Warn("Memory guard records restored after the guard started; it goes on without them",
+		s.log.Warn("Memory guard records restored after the guard started; handing them to the running guard",
 			zap.Int("records", len(records)))
 		s.late = records
 		s.version++
@@ -734,6 +752,7 @@ func (s *guardState) Restore(data string) error {
 	s.mu.Unlock()
 
 	if late {
+		handoff(records)
 		s.signal()
 	}
 
@@ -748,13 +767,14 @@ func (s *guardState) signal() {
 	}
 }
 
-// all returns the late and the loop's records. The caller holds s.mu.
+// all returns the loop's records and the late ones it has not saved yet, each
+// once and pruned by repeat_window. The caller holds s.mu.
 func (s *guardState) all() []memguard.Record {
 	if len(s.late) == 0 {
 		return s.records
 	}
 
-	return append(slices.Clone(s.late), s.records...)
+	return memguard.MergeRecords(s.window, s.clock.Now(), s.records, s.late)
 }
 
 // unwritten returns the records to write and their version; false when
@@ -793,12 +813,13 @@ func (s *guardState) last() (memguard.Record, bool) {
 	return latest, !latest.At.IsZero()
 }
 
-// start marks the loop started and returns the records restored so far.
-func (s *guardState) start() []memguard.Record {
+// start marks the loop started and returns the records restored so far;
+// records restored later go to handoff.
+func (s *guardState) start(handoff func([]memguard.Record)) []memguard.Record {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	s.started = true
+	s.started, s.handoff = true, handoff
 
 	return s.records
 }

@@ -1,6 +1,9 @@
 package memguard
 
-import "time"
+import (
+	"slices"
+	"time"
+)
 
 // Mode is what the guard does about a culprit.
 type Mode string
@@ -129,6 +132,27 @@ type Record struct {
 	At        time.Time `json:"at"`
 	Before    uint64    `json:"before"`
 	Mode      Mode      `json:"mode"`
+}
+
+// Equal reports whether r and o are the same intervention, with At compared
+// as an instant, as it reads back from the store.
+func (r Record) Equal(o Record) bool {
+	return r.ServiceID == o.ServiceID && r.Name == o.Name && r.Action == o.Action && r.At.Equal(o.At) &&
+		r.Before == o.Before && r.Mode == o.Mode
+}
+
+// MergeRecords returns the records of own and of more still within window at
+// at, each once, oldest first. It never changes own or more.
+func MergeRecords(window time.Duration, at time.Time, own, more []Record) []Record {
+	merged := make([]Record, 0, len(own)+len(more))
+	for _, r := range slices.Concat(own, more) {
+		if at.Sub(r.At) <= window && !slices.ContainsFunc(merged, r.Equal) {
+			merged = append(merged, r)
+		}
+	}
+	slices.SortStableFunc(merged, func(a, b Record) int { return a.At.Compare(b.At) })
+
+	return merged
 }
 
 // ObserveHost judges one host reading (research R8) and returns the decision
@@ -310,6 +334,13 @@ func (g *Guard) actionFor(id string, at time.Time) (Action, time.Time) {
 // live reports whether r is still within the repeat window at at.
 func (g *Guard) live(r Record, at time.Time) bool {
 	return at.Sub(r.At) <= g.cfg.RepeatWindow
+}
+
+// Merge adds records restored after the guard started to its own: a record it
+// holds already is kept once, and only records still within the repeat window
+// at at are kept.
+func (g *Guard) Merge(at time.Time, records []Record) {
+	g.records = MergeRecords(g.cfg.RepeatWindow, at, g.records, records)
 }
 
 func (g *Guard) addRecord(at time.Time, r Record) {

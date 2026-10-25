@@ -1808,10 +1808,12 @@ func TestGuardActuatorKillsOnlyServicesAndScopes(t *testing.T) {
 // kvStore is a runner.Store that keeps only the kv; its first failPuts
 // PutKV calls fail.
 type kvStore struct {
-	mu       sync.Mutex
-	kv       map[string]string
-	failPuts int
-	puts     int
+	mu        sync.Mutex
+	kv        map[string]string
+	failPuts  int
+	puts      int
+	failLoads int
+	loads     int
 }
 
 func (s *kvStore) PutKV(_ context.Context, key, value string) error {
@@ -1833,6 +1835,11 @@ func (s *kvStore) PutKV(_ context.Context, key, value string) error {
 func (s *kvStore) Load(context.Context) (store.State, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	s.loads++
+	if s.loads <= s.failLoads {
+		return store.State{}, errors.New("database is locked")
+	}
 
 	return store.State{KV: maps.Clone(s.kv)}, nil
 }
@@ -1858,7 +1865,8 @@ func (s *kvStore) value(key string) string {
 	return s.kv[key]
 }
 
-// guardDaemon runs one daemon's runner and guard over st and f until stopped.
+// guardDaemon runs one daemon's runner and guard over st and f until stopped,
+// and returns once the guard watches the named containers.
 func guardDaemon(t *testing.T, st *kvStore, f *guardFakes) (*runner.Runner, *fxtest.Lifecycle) {
 	t.Helper()
 
@@ -1874,7 +1882,6 @@ func guardDaemon(t *testing.T, st *kvStore, f *guardFakes) (*runner.Runner, *fxt
 	lc.RequireStart()
 	// Danger only once Docker named the containers, so web-app is watched.
 	waitNamed(t, f)
-	f.mem.setDanger(true)
 
 	return r, lc
 }
@@ -1888,6 +1895,7 @@ func TestGuardRecordsSurviveARestartRightAfterAnAction(t *testing.T) {
 	st := &kvStore{}
 	first := newGuardFakes(guardT0())
 	_, lc := guardDaemon(t, st, first)
+	first.mem.setDanger(true)
 	waitFor(t, "the restart", func() bool { return len(first.containers.actions()) > 0 })
 	waitFor(t, "the record in the store, with no tick", func() bool {
 		return strings.Contains(st.value(memoryGuardKey), `"name":"web-app"`)
@@ -1901,10 +1909,48 @@ func TestGuardRecordsSurviveARestartRightAfterAnAction(t *testing.T) {
 	// repeat_window is stopped, not restarted again.
 	second := newGuardFakes(guardT0().Add(3 * time.Hour))
 	_, lc = guardDaemon(t, st, second)
+	second.mem.setDanger(true)
 	waitFor(t, "the second action", func() bool { return len(second.containers.actions()) > 0 })
 	lc.RequireStop()
 	if got := second.containers.actions(); !slices.Equal(got, []string{"stop web-app"}) {
 		t.Fatalf("second daemon: docker calls = %v, want the restored record to make it a stop", got)
+	}
+}
+
+// TestGuardUsesRecordsLoadedAfterItStarted: when the store cannot be read at
+// start the guard starts without its records; once a later tick loads them,
+// the running guard uses them, so a service it restarted before is stopped,
+// not restarted again, and the store keeps the restored record.
+func TestGuardUsesRecordsLoadedAfterItStarted(t *testing.T) {
+	t.Parallel()
+
+	earlier := guardRecord("web-app", guardT0().Add(-time.Hour))
+	data, err := encodeRecords([]memguard.Record{earlier})
+	if err != nil {
+		t.Fatal(err)
+	}
+	st := &kvStore{kv: map[string]string{memoryGuardKey: data}, failLoads: 1}
+	f := newGuardFakes(guardT0())
+	r, lc := guardDaemon(t, st, f)
+	if err := r.Load(t.Context()); err != nil {
+		t.Fatalf("the later load: %v", err)
+	}
+	f.mem.setDanger(true)
+	waitFor(t, "the action", func() bool { return len(f.containers.actions()) > 0 })
+	waitFor(t, "the stop in the store", func() bool {
+		return strings.Contains(st.value(memoryGuardKey), `"action":"stop"`)
+	})
+	lc.RequireStop()
+
+	if got := f.containers.actions(); !slices.Equal(got, []string{"stop web-app"}) {
+		t.Fatalf("docker calls = %v, want the late record to make it a stop", got)
+	}
+	var stored []memguard.Record
+	if err := json.Unmarshal([]byte(st.value(memoryGuardKey)), &stored); err != nil {
+		t.Fatal(err)
+	}
+	if len(stored) != 2 || !stored[0].Equal(earlier) || stored[1].Action != memguard.ActionStop {
+		t.Fatalf("stored %+v, want the restored restart and the stop", stored)
 	}
 }
 
@@ -1989,24 +2035,54 @@ func TestMemoryGuardDoesNotWriteOverUnreadRecords(t *testing.T) {
 	}
 }
 
-// TestGuardStateKeepsRecordsRestoredLate: records restored after the loop
-// started are kept beside the loop's own, so the store does not lose them.
-func TestGuardStateKeepsRecordsRestoredLate(t *testing.T) {
+// TestGuardStateHandsRecordsRestoredLateToTheLoop: records restored after the
+// loop started go to the running loop, and are kept beside the loop's own,
+// once each and pruned by repeat_window, until the loop saved them.
+func TestGuardStateHandsRecordsRestoredLateToTheLoop(t *testing.T) {
 	t.Parallel()
 
-	s := newGuardState(zap.NewNop())
-	s.start()
+	clock := &stepClock{now: guardT0().Add(2 * time.Hour)}
+	s := newGuardState(zap.NewNop(), clock, 6*time.Hour)
+	var handed [][]memguard.Record
+	s.start(func(r []memguard.Record) { handed = append(handed, r) })
 	own := guardRecord("web-app", guardT0().Add(time.Hour))
 	s.Save(t.Context(), []memguard.Record{own})
 	stored := guardRecord("worker", guardT0())
-	data, err := json.Marshal([]memguard.Record{stored})
+	expired := guardRecord("cache", guardT0().Add(-5*time.Hour))
+	data, err := encodeRecords([]memguard.Record{stored, own, expired})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err = s.Restore(string(data)); err != nil {
+	if err = s.Restore(data); err != nil {
 		t.Fatal(err)
 	}
+	if len(handed) != 1 || len(handed[0]) != 3 {
+		t.Fatalf("handed %+v, want the three restored records once", handed)
+	}
+	// A save the loop queued before it merged them keeps them.
 	s.Save(t.Context(), []memguard.Record{own})
+	clock.now = clock.now.Add(4 * time.Hour) // expired leaves repeat_window
+
+	if got := exportedRecords(t, s); len(got) != 2 || !got[0].Equal(stored) || !got[1].Equal(own) {
+		t.Fatalf("exported %+v, want %+v and %+v", got, stored, own)
+	}
+	if last, ok := s.last(); !ok || last.Name != "web-app" {
+		t.Fatalf("last = %+v, %v", last, ok)
+	}
+
+	// Once the loop saved its merged records the late ones are dropped.
+	s.Save(t.Context(), []memguard.Record{stored, own})
+	if s.late != nil {
+		t.Fatalf("late = %+v, want none once the loop holds them", s.late)
+	}
+	if got := exportedRecords(t, s); len(got) != 2 {
+		t.Fatalf("exported %+v, want the loop's two records", got)
+	}
+}
+
+// exportedRecords decodes what s exports for the store.
+func exportedRecords(t *testing.T, s *guardState) []memguard.Record {
+	t.Helper()
 
 	out, err := s.Export()
 	if err != nil {
@@ -2016,18 +2092,14 @@ func TestGuardStateKeepsRecordsRestoredLate(t *testing.T) {
 	if err := json.Unmarshal([]byte(out), &got); err != nil {
 		t.Fatal(err)
 	}
-	if want := []memguard.Record{stored, own}; !reflect.DeepEqual(got, want) {
-		t.Fatalf("exported %+v, want %+v", got, want)
-	}
-	if last, ok := s.last(); !ok || last.Name != "web-app" {
-		t.Fatalf("last = %+v, %v", last, ok)
-	}
+
+	return got
 }
 
 func TestGuardStateKV(t *testing.T) {
 	t.Parallel()
 
-	s := newGuardState(zap.NewNop())
+	s := newGuardState(zap.NewNop(), &stepClock{now: guardT0()}, 6*time.Hour)
 	if err := s.Restore(""); err != nil {
 		t.Fatal(err)
 	}
@@ -2043,7 +2115,7 @@ func TestGuardStateKV(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	other := newGuardState(zap.NewNop())
+	other := newGuardState(zap.NewNop(), &stepClock{now: guardT0()}, 6*time.Hour)
 	if err := other.Restore(data); err != nil {
 		t.Fatal(err)
 	}

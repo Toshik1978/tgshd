@@ -20,6 +20,7 @@ const HostInterval = time.Second
 const (
 	outcomeBuffer = 32
 	stateBuffer   = 1
+	lateBuffer    = 1
 )
 
 // ErrUnreachable is returned by an Actuator when the service's runtime
@@ -104,6 +105,7 @@ type Loop struct {
 	busy         bool // an action is running
 
 	results  chan result
+	late     chan []Record
 	outcomes chan item
 	states   chan []Record
 	dropped  atomic.Uint64
@@ -124,6 +126,7 @@ func NewLoop(cfg Config, clock Clock, sampler Sampler, actuator Actuator, report
 		cfg: cfg, guard: New(cfg), clock: clock, sampler: sampler, actuator: actuator, reporter: reporter,
 		log:      zap.NewNop(),
 		results:  make(chan result, 1),
+		late:     make(chan []Record, lateBuffer),
 		outcomes: make(chan item, outcomeBuffer),
 		states:   make(chan []Record, stateBuffer),
 	}
@@ -138,6 +141,15 @@ func NewLoop(cfg Config, clock Clock, sampler Sampler, actuator Actuator, report
 // called before Run.
 func (l *Loop) Restore(records []Record) {
 	l.guard.Restore(l.clock.Now(), records)
+}
+
+// RestoreLate hands the loop intervention records restored after it started,
+// when the store could not be read at start. It never blocks: the loop merges
+// them into its own on its next beat (Guard.Merge) and saves the result. A
+// newer call replaces records not taken yet, so each call must pass all the
+// records restored late.
+func (l *Loop) RestoreLate(records []Record) {
+	offer(l.late, records)
 }
 
 // Run samples, decides and acts until ctx is done. With Mode off it returns at
@@ -185,7 +197,8 @@ func (l *Loop) step(ctx context.Context, now time.Time) {
 	}
 }
 
-// collect takes in the result of a finished action, if any.
+// collect takes in the result of a finished action or the records restored
+// late, if any.
 func (l *Loop) collect(now time.Time) {
 	select {
 	case r := <-l.results:
@@ -195,6 +208,9 @@ func (l *Loop) collect(now time.Time) {
 			l.save(now)
 		}
 		l.emit(r.out)
+	case records := <-l.late:
+		l.guard.Merge(now, records)
+		l.save(now)
 	default:
 	}
 }

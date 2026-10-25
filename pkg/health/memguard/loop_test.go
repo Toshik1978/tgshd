@@ -1004,6 +1004,60 @@ func TestRestoredRecordsCountTowardRepeat(t *testing.T) {
 	}
 }
 
+// TestLateRecordsCountTowardRepeat: records restored after the loop started
+// (the store could not be read at start) reach the running guard, so the next
+// runaway of a service it restarted before is stopped, not restarted again.
+func TestLateRecordsCountTowardRepeat(t *testing.T) {
+	s := newLoopSim(t, loopConfig(ModeAct), standardServices()...)
+	s.host.set(40, 0, webLeak())
+	s.run(5 * time.Minute)
+	s.l.RestoreLate([]Record{{
+		ServiceID: "container:web-app", Name: "web-app", Action: ActionRestart,
+		At: t0().Add(-time.Hour), Before: 20 * gib, Mode: ModeAct,
+	}})
+	s.host.set(3, 35, webLeak())
+	s.run(time.Minute)
+
+	if calls := s.act.log(); len(calls) != 1 || calls[0].verb != "stop" {
+		t.Fatalf("actuator calls %+v, want a stop", calls)
+	}
+	if o := oneOutcome(t, s.outcomes()); o.Kind != OutcomeStopped || !o.LastAction.Equal(t0().Add(-time.Hour)) {
+		t.Fatalf("outcome %+v, want stopped after the late restart", o)
+	}
+}
+
+// TestLateRecordsMergeWithTheGuardsOwn: late records are merged into the
+// guard's own, not put in their place: a duplicate is kept once, a record
+// outside repeat_window is dropped, and the merged records are saved.
+func TestLateRecordsMergeWithTheGuardsOwn(t *testing.T) {
+	s := newLoopSim(t, loopConfig(ModeReport), standardServices()...)
+	s.host.set(40, 0, webLeak())
+	s.run(5 * time.Minute)
+	s.host.set(3, 35, webLeak())
+	s.run(time.Minute)
+	own, ok := s.state()
+	if !ok || len(own) != 1 {
+		t.Fatalf("state %+v, want the guard's own report record", own)
+	}
+
+	worker := Record{
+		ServiceID: "unit:worker.service", Name: "worker.service", Action: ActionRestart,
+		At: t0().Add(-time.Hour), Before: gib, Mode: ModeAct,
+	}
+	expired := worker
+	expired.At = t0().Add(-7 * time.Hour)
+	dup := own[0]
+	dup.At = dup.At.In(time.FixedZone("elsewhere", 3600)) // as decoded from the store
+	s.l.RestoreLate([]Record{expired, dup, worker})
+	s.run(time.Second)
+
+	got, ok := s.state()
+	if want := []Record{worker, own[0]}; !ok || len(got) != len(want) ||
+		got[0] != want[0] || got[1] != want[1] {
+		t.Fatalf("saved %+v, want %+v", got, want)
+	}
+}
+
 // TestSamplerErrorsAreLoggedOnce: a failing read skips the beat and is logged
 // once when it starts failing, not on every beat; a failing top-process read
 // still reports the episode.

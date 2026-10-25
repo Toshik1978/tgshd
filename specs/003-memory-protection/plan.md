@@ -35,7 +35,7 @@ files via `os`, `mlockall` via `syscall.Syscall` (R7), `systemctl` via `os/exec`
 `golang.org/x/sys` stays indirect (R3).
 
 **Storage**: the existing SQLite store. No migration: guard records and growth history are JSON in
-`kv` (`memory.guard`, `memory.growth`); host metrics use the `samples` table (R11).
+`kv` (`memory.guard`, written by the guard itself through `Store.PutKV`; `memory.growth`); host metrics use the `samples` table (R11).
 
 **Testing**: standard library `testing`, table-driven; hand-written fakes for `memguard.Clock`,
 `Sampler`, `Actuator`, `Reporter`, the check's `Source`, and the kernel `ServiceResolver`;
@@ -117,7 +117,7 @@ pkg/health/
 ├── config/types.go, checks.go,  # + Memory section, Size type, defaults and validation
 │   defaults.go, validate.go
 ├── report/status.go             # + memory block
-└── runner/runner.go             # + PushMode (event with a delivery mode); guard state in checkpoint
+└── runner/runner.go             # + PushMode (event with a delivery mode); guard records restored from kv, not saved
 
 pkg/host/
 ├── procmem/ +                   # /proc/meminfo, /proc/pressure/memory, /proc/*/status top processes,
@@ -129,8 +129,9 @@ pkg/host/
 
 cmd/
 ├── health_memory.go +           # wiring: sources, name map (Docker list → id→name, refreshed by the
-│                                #   memory check), guard start/stop on the fx lifecycle, reporter → PushMode
-├── health.go                    # build the memory check; restore/export guard + growth state
+│                                #   memory check), guard start/stop on the fx lifecycle, reporter → PushMode,
+│                                #   guard writer: kv `memory.guard` via Store.PutKV after each action and on stop
+├── health.go                    # build the memory check; restore guard records, restore/export growth state
 └── cli.go                       # check --once: memory readings and guard mode
 
 config/

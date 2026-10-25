@@ -129,3 +129,8 @@ After US1: T013 (US2) and T017 (US4) together.
 - [x] T024 Resolve `memory/limit/<container>` conditions for containers no longer listed after a daemon restart in pkg/health/check/memory/audit.go (tests in audit_test.go) per FR-018 (partial)
 - [x] T025 Word the killed outcome for an unreachable runtime as "could not be reached" instead of claiming a timeout that never elapsed, in pkg/health/memguard/outcome.go and pkg/health/memguard/loop.go (tests in outcome_test.go and loop_test.go) per contracts/messages.md "killed" (partial)
 - [x] T026 Add `health_memory.go` and `health_memory_check.go` to the `cmd` (health) row of .claude/CLAUDE.md per plan: Source Code (partial)
+
+## Phase 8: Convergence
+
+- [x] T027 Hand intervention records that load after the guard started (store unreadable at start) to the running guard so the repeat rule uses them, merged without blocking the decision path, and prune them by `repeat_window`, in pkg/health/memguard/loop.go and cmd/health_memory.go (tests in pkg/health/memguard/loop_test.go and cmd/health_test.go: a late load turns the next restart of an already-restarted service into a stop) per FR-009 (partial)
+- [x] T028 Record in research.md R11 and plan.md that the guard writes `memory.guard` directly through `Store.PutKV` as soon as an action completes and on stop, instead of through the tick checkpoint, and why per plan: R11 persistence (contradicts)
