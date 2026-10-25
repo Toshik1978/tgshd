@@ -1,6 +1,7 @@
 package memory
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -132,7 +133,33 @@ func span(d time.Duration) string {
 		return number(d.Hours()) + " h"
 	}
 
-	return fmt.Sprintf("%d min", int(d.Round(time.Minute)/time.Minute))
+	return fmt.Sprintf("%d min", max(1, int(d.Round(time.Minute)/time.Minute)))
+}
+
+// growthState is the persisted form: the rings and the services whose growth
+// condition is open (the hold-open flag, which a restart must not lose).
+type growthState struct {
+	Rings  map[string][]point `json:"rings"`
+	Opened []string           `json:"opened,omitempty"`
+}
+
+// decodeGrowth reads the current format, or the bare rings map an earlier
+// version wrote.
+func decodeGrowth(data []byte) (growthState, error) {
+	var probe map[string]json.RawMessage
+	if err := json.Unmarshal(data, &probe); err != nil {
+		return growthState{}, err //nolint:wrapcheck // wrapped by the caller
+	}
+	var state growthState
+	// A bare map holds arrays of points; the current format holds an object.
+	if rings, ok := probe["rings"]; ok && !bytes.HasPrefix(bytes.TrimSpace(rings), []byte("[")) {
+		err := json.Unmarshal(data, &state)
+
+		return state, err //nolint:wrapcheck // wrapped by the caller
+	}
+	err := json.Unmarshal(data, &state.Rings)
+
+	return state, err //nolint:wrapcheck // wrapped by the caller
 }
 
 // Export serialises the growth history for the key-value store (kv
@@ -143,7 +170,8 @@ func (c *Check) Export() ([]byte, error) {
 	if c.settings.GrowthWindow > 0 {
 		c.pruneLocked(c.settings.now())
 	}
-	data, err := json.Marshal(c.growth.rings)
+	state := growthState{Rings: c.growth.rings, Opened: slices.Sorted(maps.Keys(c.growth.opened))}
+	data, err := json.Marshal(state)
 	if err != nil {
 		return nil, fmt.Errorf("export memory growth: %w", err)
 	}
@@ -156,17 +184,20 @@ func (c *Check) Restore(data []byte) error {
 	if len(data) == 0 {
 		return nil
 	}
-	var rings map[string][]point
-	if err := json.Unmarshal(data, &rings); err != nil {
+	state, err := decodeGrowth(data)
+	if err != nil {
 		return fmt.Errorf("restore memory growth: %w", err)
 	}
 	c.growth.mu.Lock()
 	defer c.growth.mu.Unlock()
-	c.growth.rings = rings
+	c.growth.rings = state.Rings
 	if c.growth.rings == nil {
 		c.growth.rings = map[string][]point{}
 	}
-	c.growth.opened = map[string]bool{}
+	c.growth.opened = make(map[string]bool, len(state.Opened))
+	for _, name := range state.Opened {
+		c.growth.opened[name] = true
+	}
 	if c.settings.GrowthWindow > 0 {
 		c.pruneLocked(c.settings.now())
 	}

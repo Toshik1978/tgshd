@@ -103,7 +103,11 @@ func (s *AuditState) Restore(data []byte) error {
 	}
 	s.audit.mu.Lock()
 	defer s.audit.mu.Unlock()
-	s.audit.known = make(map[string]bool, len(names))
+	if s.audit.known == nil {
+		s.audit.known = make(map[string]bool, len(names))
+	}
+	// A union: a restore that lands after a run must not forget what that
+	// run saw. The worst case is one extra "stopped" Good reading.
 	for _, n := range names {
 		s.audit.known[n] = true
 	}

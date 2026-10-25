@@ -263,10 +263,11 @@ func (s nvidiaSource) GPUs(ctx context.Context) ([]temps.GPU, error) {
 	return out, nil
 }
 
-// kernelChecks provides the kernel check (/dev/kmsg and EDAC) when its
-// section is present. Out-of-memory victims are named through names, the container
-// id→name map the memory check refreshes; it stays empty when that section is not
-// configured, and containers then show by their short id. Only the daemon check reads the previous boot's journal tail.
+// kernelChecks provides the kernel check (/dev/kmsg and EDAC) when its section is
+// present. Out-of-memory victims are named through names, the container id→name map
+// the memory check refreshes; it stays empty when that section is not configured,
+// and containers then show by their short id. Only the daemon check reads the
+// previous boot's journal tail.
 func kernelChecks(hs *healthSetup, names *containerNames, logger *zap.Logger) checkSet {
 	if hs.Config == nil || hs.Config.Kernel == nil {
 		return checkSet{}

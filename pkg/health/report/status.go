@@ -3,6 +3,7 @@ package report
 import (
 	"fmt"
 	"html"
+	"slices"
 	"strings"
 	"unicode/utf8"
 
@@ -39,15 +40,42 @@ func Status(s runner.Snapshot, mem *Memory) string {
 		}
 		lines = append(lines, fmt.Sprintf("All checks OK (%d checks, last cycle %s)", s.Checks, last))
 	}
+	problems := make([]string, 0, len(s.Open))
 	for _, c := range s.Open {
-		lines = append(lines, fmt.Sprintf("%s: %s (since %s)",
+		problems = append(problems, fmt.Sprintf("%s: %s (since %s)",
 			escape(c.Key), escape(c.Text), c.Since.Format(timeLayout)))
 	}
-	if mem != nil {
-		lines = append(lines, memoryLines(mem)...)
+	if mem == nil {
+		return Truncate(strings.Join(append(lines, problems...), "\n"))
 	}
 
-	return Truncate(strings.Join(lines, "\n"))
+	// The memory block follows the problems (the contract order) but must
+	// survive a long problem list, so the problems give way, not the block.
+	block := memoryLines(mem)
+	lines = append(lines, fitProblems(problems, lines, block)...)
+
+	return Truncate(strings.Join(append(lines, block...), "\n"))
+}
+
+// fitProblems keeps as many problem lines as fit in one message beside the
+// head and tail lines, and closes a shortened list with "… and N more".
+func fitProblems(problems, head, tail []string) []string {
+	fits := func(p []string) bool {
+		all := slices.Concat(head, p, tail)
+
+		return units(strings.Join(all, "\n")) <= MaxMessageUnits
+	}
+	if fits(problems) {
+		return problems
+	}
+	for keep := len(problems) - 1; keep > 0; keep-- {
+		short := slices.Concat(problems[:keep], []string{fmt.Sprintf("%s and %d more", ellipsis, len(problems)-keep)})
+		if fits(short) {
+			return short
+		}
+	}
+
+	return []string{fmt.Sprintf("%s and %d more", ellipsis, len(problems))}
 }
 
 // quietNote renders the quiet-window note: the reason, since when the

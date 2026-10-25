@@ -661,9 +661,14 @@ func TestSummaryMemoryLine(t *testing.T) {
 			"memory: 45% available (28 of 62 GB), swap 20% used, stalled 0%; top: web-app 13 GB",
 		},
 		{
-			"problems only",
+			"host problem carries the figures itself",
+			in(mem, runner.OpenCondition{Key: "memory/available", Text: "9% available (5.6 of 62 GB)"}),
+			"memory: 9% available (5.6 of 62 GB)\n",
+		},
+		{
+			"a service problem keeps the host figures",
 			in(mem, runner.OpenCondition{Key: "memory/growth/web-app", Text: "web-app grew 12→31 GB in 40 min"}),
-			"memory: web-app grew 12→31 GB in 40 min\n",
+			"memory: web-app grew 12→31 GB in 40 min; 45% available (28 of 62 GB), swap 20% used, stalled 0%; top: web-app 13 GB\n",
 		},
 		{"unreadable", in(&Memory{Unreadable: true}), "memory: unreadable\n"},
 		{"no figures", in(nil), "memory: ok\n"},

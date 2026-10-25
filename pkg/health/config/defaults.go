@@ -6,6 +6,10 @@ import (
 	"github.com/Toshik1978/tgshd/pkg/health"
 )
 
+// defaultDangerAvailablePercent is the guard's default danger level; the
+// validation hint names it when an operator lowers only the warn level.
+const defaultDangerAvailablePercent = 5
+
 // Default values for every section, as shown in the configuration contract.
 
 func common(interval, threshold time.Duration, mode Mode) Common {
@@ -134,7 +138,7 @@ func defaultMemory() Memory {
 		Guard: Guard{
 			Intervene:              InterveneReport,
 			NeverTouch:             []string{},
-			DangerAvailablePercent: 5,
+			DangerAvailablePercent: defaultDangerAvailablePercent,
 			DangerPressurePercent:  20,
 			DangerFor:              Duration(30 * time.Second),
 			CulpritWindow:          Duration(10 * time.Minute),

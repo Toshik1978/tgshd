@@ -361,8 +361,9 @@ memory:
 `tgshd check --once` runs the memory check like the others and prints its
 readings (`memory/available`, `memory/swap`, `memory/pressure`, per-service
 growth and the container limits), then a `GUARD memory/guard: <mode>` line
-with the configured `intervene` mode. It never starts the guard, acts or locks
-memory.
+with the configured `intervene` mode (`act` and `report` carry the note
+`(configured; check --once never starts it)`). It never starts the guard, acts
+or locks memory.
 
 **Host requirements**
 

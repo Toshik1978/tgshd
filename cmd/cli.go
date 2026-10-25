@@ -484,7 +484,11 @@ func writeGuardMode(w io.Writer, m *hcfg.Memory) {
 	if m == nil {
 		return
 	}
-	fmt.Fprintf(w, "GUARD %s/guard: %s\n", memoryCheckName, m.Guard.Intervene)
+	mode := string(m.Guard.Intervene)
+	if m.Guard.Intervene != hcfg.InterveneOff {
+		mode += " (configured; check --once never starts it)"
+	}
+	fmt.Fprintf(w, "GUARD %s/guard: %s\n", memoryCheckName, mode)
 }
 
 // writeError prints one checker or setup error.

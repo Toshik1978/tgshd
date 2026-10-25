@@ -1,6 +1,7 @@
 package config_test
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -1087,14 +1088,15 @@ func TestMemoryRanges(t *testing.T) {
 
 func TestMemoryDangerBelowWarn(t *testing.T) {
 	tests := []struct {
-		doc string
-		ok  bool
+		doc  string
+		ok   bool
+		hint string // expected in the reason, when not empty
 	}{
-		{"memory: {warn_available_percent: 10, guard: {danger_available_percent: 9}}", true},
-		{"memory: {warn_available_percent: 10, guard: {danger_available_percent: 10}}", false},
-		{"memory: {warn_available_percent: 3}", false}, // default danger 5
-		{"memory: {warn_available_percent: 6}", true},
-		{"memory: {warn_available_percent: 99, guard: {danger_available_percent: 50}}", true},
+		{"memory: {warn_available_percent: 10, guard: {danger_available_percent: 9}}", true, ""},
+		{"memory: {warn_available_percent: 10, guard: {danger_available_percent: 10}}", false, ""},
+		{"memory: {warn_available_percent: 3}", false, "danger_available_percent defaults to 5; lower it too"},
+		{"memory: {warn_available_percent: 6}", true, ""},
+		{"memory: {warn_available_percent: 99, guard: {danger_available_percent: 50}}", true, ""},
 	}
 	for _, tt := range tests {
 		_, errs := config.Parse([]byte(tt.doc+"\n"), "health.yaml")
@@ -1103,6 +1105,12 @@ func TestMemoryDangerBelowWarn(t *testing.T) {
 		}
 		if !tt.ok && (len(errs) != 1 || !strings.Contains(errs[0].Reason, "danger_available_percent")) {
 			t.Errorf("%s: want danger_available_percent error: %+v", tt.doc, errs)
+		}
+		if tt.hint != "" && (len(errs) != 1 || !strings.Contains(errs[0].Reason, tt.hint)) {
+			t.Errorf("%s: want hint %q: %+v", tt.doc, tt.hint, errs)
+		}
+		if !tt.ok && tt.hint == "" && len(errs) == 1 && strings.Contains(errs[0].Reason, "defaults to") {
+			t.Errorf("%s: hint on an explicit danger level: %+v", tt.doc, errs)
 		}
 	}
 }
@@ -1128,31 +1136,33 @@ func TestMemorySizes(t *testing.T) {
 		{"1.5GB", 0, false},
 		{"4PB", 0, false},
 		{"4gb", 0, false},
+		{"4 GB", 0, false}, // no padding between the number and the unit
 		{"", 0, false},
 	}
+	fields := []struct {
+		key, format string
+		get         func(*config.Memory) uint64
+	}{
+		{"growth_warn", "memory: {growth_warn: %q}\n", func(m *config.Memory) uint64 { return uint64(m.GrowthWarn) }},
+		{
+			"culprit_min_growth", "memory: {guard: {culprit_min_growth: %q}}\n",
+			func(m *config.Memory) uint64 { return uint64(m.Guard.CulpritMinGrowth) },
+		},
+	}
 	for _, tt := range tests {
-		for _, key := range []string{"growth_warn", "guard: {culprit_min_growth"} {
-			doc := "memory: {" + key + ": \"" + tt.in + "\"}}\n"
-			if key == "growth_warn" {
-				doc = "memory: {growth_warn: \"" + tt.in + "\"}\n"
-			}
-
-			cfg, errs := config.Parse([]byte(doc), "health.yaml")
+		for _, f := range fields {
+			cfg, errs := config.Parse([]byte(fmt.Sprintf(f.format, tt.in)), "health.yaml")
 			if tt.ok {
 				if len(errs) != 0 {
-					t.Errorf("%s %q: unexpected %+v", key, tt.in, errs)
+					t.Errorf("%s %q: unexpected %+v", f.key, tt.in, errs)
 
 					continue
 				}
-				got := cfg.Memory.GrowthWarn
-				if key != "growth_warn" {
-					got = cfg.Memory.Guard.CulpritMinGrowth
-				}
-				if uint64(got) != tt.want {
-					t.Errorf("%s %q = %d, want %d", key, tt.in, got, tt.want)
+				if got := f.get(cfg.Memory); got != tt.want {
+					t.Errorf("%s %q = %d, want %d", f.key, tt.in, got, tt.want)
 				}
 			} else if len(errs) != 1 || errs[0].Entry != "memory" {
-				t.Errorf("%s %q must be one memory error: %+v", key, tt.in, errs)
+				t.Errorf("%s %q must be one memory error: %+v", f.key, tt.in, errs)
 			}
 		}
 	}

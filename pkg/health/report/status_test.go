@@ -1,6 +1,7 @@
 package report
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -269,5 +270,42 @@ func TestStatusMemorySizes(t *testing.T) {
 		if got := gigabytes(size); got != want {
 			t.Errorf("gigabytes(%d) = %q, want %q", size, got, want)
 		}
+	}
+}
+
+func TestStatusKeepsTheMemoryBlockWhenManyProblemsAreOpen(t *testing.T) {
+	t.Parallel()
+
+	s := runner.Snapshot{StoreDegraded: true}
+	for range 300 {
+		s.Open = append(s.Open, runner.OpenCondition{Key: "k", Text: strings.Repeat("x", 60)})
+	}
+
+	got := Status(s, contractMemory())
+
+	if units(got) > MaxMessageUnits {
+		t.Fatalf("units=%d", units(got))
+	}
+	for _, want := range []string{
+		"Note: state store degraded", "Memory: 45% available", "Top: web-app 13 GB", "Guard: report",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("%q dropped:\n%s", want, got[len(got)-300:])
+		}
+	}
+	lines := strings.Split(got, "\n")
+	more := lines[len(lines)-4] // the problems end right before the memory block
+	if !strings.HasPrefix(more, "… and ") || !strings.HasSuffix(more, " more") {
+		t.Fatalf("problems not closed by a count line: %q", more)
+	}
+	var kept int
+	for _, l := range lines {
+		if strings.HasPrefix(l, "k: ") {
+			kept++
+		}
+	}
+	var n int
+	if _, err := fmt.Sscanf(more, "… and %d more", &n); err != nil || kept+n != 300 {
+		t.Fatalf("kept %d + %d more != 300 (%v)", kept, n, err)
 	}
 }

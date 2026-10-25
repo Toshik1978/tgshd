@@ -1043,8 +1043,16 @@ func TestRunCheckOnceReportsTheGuardMode(t *testing.T) {
 		body string
 		want string
 	}{
-		{"act", "memory:\n  guard:\n    intervene: act\n", "GUARD memory/guard: act\n"},
-		{"report by default", "memory: {}\n", "GUARD memory/guard: report\n"},
+		{
+			"act",
+			"memory:\n  guard:\n    intervene: act\n",
+			"GUARD memory/guard: act (configured; check --once never starts it)\n",
+		},
+		{
+			"report by default",
+			"memory: {}\n",
+			"GUARD memory/guard: report (configured; check --once never starts it)\n",
+		},
 		{"off", "memory:\n  guard:\n    intervene: off\n", "GUARD memory/guard: off\n"},
 		{"no memory section", "", ""},
 	}

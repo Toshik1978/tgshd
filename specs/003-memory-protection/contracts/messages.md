@@ -20,6 +20,9 @@ RESOLVED: memory: web-app at 13 GB
 RESOLVED: memory: container web-app has a memory limit      # or: "… stopped"
 ```
 
+A percentage is whole, except where rounding would land on the warn level itself: a problem reads
+`14.6% available` (floor 15), never `15% available`. A span under a minute reads `1 min`.
+
 ## Guard outcomes (events, key `memory/guard/<service>`)
 
 | Outcome | Channel | Text |

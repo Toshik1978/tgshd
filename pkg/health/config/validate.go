@@ -503,8 +503,15 @@ func validateMemory(m *Memory, p *problems) {
 	p.percent("danger_pressure_percent", g.DangerPressurePercent, 100)
 
 	if g.DangerAvailablePercent >= m.WarnAvailablePercent {
-		p.addf("danger_available_percent %d must be below warn_available_percent %d",
-			g.DangerAvailablePercent, m.WarnAvailablePercent)
+		hint := ""
+		if g.DangerAvailablePercent == defaultDangerAvailablePercent {
+			hint = fmt.Sprintf(
+				" (danger_available_percent defaults to %d; lower it too)",
+				defaultDangerAvailablePercent,
+			)
+		}
+		p.addf("danger_available_percent %d must be below warn_available_percent %d%s",
+			g.DangerAvailablePercent, m.WarnAvailablePercent, hint)
 	}
 
 	p.durationRange("danger_for", g.DangerFor, 5*time.Second, 5*time.Minute)

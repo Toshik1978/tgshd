@@ -211,3 +211,22 @@ func TestAuditRestoreRejectsGarbage(t *testing.T) {
 		t.Fatalf("empty restore: %v", err)
 	}
 }
+
+func TestAuditRestoreAfterARunKeepsTheFresherSet(t *testing.T) {
+	src := &fakeSource{host: healthy(), containers: []memory.Container{{Name: "worker", Running: true}}}
+	chk := memory.New(src, auditSettings())
+	chk.Run(context.Background())
+
+	// A late restore carries an older set; it must not forget worker.
+	if err := chk.AuditState().Restore([]byte(`["db"]`)); err != nil {
+		t.Fatalf("restore: %v", err)
+	}
+
+	src.containers = nil
+	res := chk.Run(context.Background())
+	for _, name := range []string{"worker", "db"} {
+		if r := find(t, res, "memory/limit/"+name); r.Verdict != health.Good {
+			t.Fatalf("%s = %+v, want resolved", name, r)
+		}
+	}
+}

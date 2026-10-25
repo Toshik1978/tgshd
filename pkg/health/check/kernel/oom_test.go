@@ -255,3 +255,25 @@ func TestOOMPreviousBoot(t *testing.T) { // US4-2
 		t.Fatalf("got %q, want %q", got, want)
 	}
 }
+
+func TestOOMHeaderBeforeTheCursorStillResolvesItsKill(t *testing.T) {
+	r := newRigWith(t, kernel.WithServices(kernel.CgroupResolver(names)))
+
+	// The header is consumed and the cursor moves onto its seq; the Killed
+	// record only arrives after that.
+	feed(r, 1, hostHeader)
+	if got := readingTexts(t, r); len(got) != 0 {
+		t.Fatalf("got %q before the kill", got)
+	}
+	state, _ := r.k.Export()
+	if !strings.Contains(state, `"seq":1`) {
+		t.Fatalf("cursor not at the header: %s", state)
+	}
+
+	feed(r, 2, hostKilled)
+	got := readingTexts(t, r)
+	want := "Kernel: out of memory, killed python3 (pid 4242) in container web-app, 54 GB"
+	if len(got) != 1 || got[0] != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}

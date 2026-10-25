@@ -285,3 +285,61 @@ func TestGrowthProblemTopLookupHappensOncePerRun(t *testing.T) {
 		t.Errorf("services read %d times, want 2", src.svcCalls)
 	}
 }
+
+func TestGrowthSubMinuteSpanPrintsOneMinute(t *testing.T) {
+	c := &clock{now: start0()}
+	src := &fakeSource{host: healthy()}
+	chk := memory.New(src, growthSettings(c))
+
+	step(chk, src, c, time.Second, map[string]uint64{"web-app": 10 * gb})
+	res := step(chk, src, c, 20*time.Second, map[string]uint64{"web-app": 20 * gb})
+
+	r := growthReading(t, res, "web-app")
+	if want := "web-app grew 10→20 GB in 1 min; top: web-app 20 GB"; r.Verdict != health.Bad || r.Text != want {
+		t.Fatalf("reading = %+v, want %q", r, want)
+	}
+}
+
+func TestGrowthOpenConditionSurvivesARestartInTheHysteresisBand(t *testing.T) {
+	c := &clock{now: start0()}
+	src := &fakeSource{host: healthy()}
+	chk := memory.New(src, growthSettings(c))
+
+	step(chk, src, c, time.Minute, map[string]uint64{"web-app": 10 * gb})
+	step(chk, src, c, 5*time.Minute, map[string]uint64{"web-app": 12 * gb})
+	res := step(chk, src, c, 6*time.Minute, map[string]uint64{"web-app": 15 * gb})
+	if growthReading(t, res, "web-app").Verdict != health.Bad {
+		t.Fatal("not open")
+	}
+	data, err := chk.Export()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	fresh := memory.New(src, growthSettings(c))
+	if err := fresh.Restore(data); err != nil {
+		t.Fatal(err)
+	}
+	// The rise is now 3 GB, 0.75 of the warn level: still open, no RESOLVED.
+	res = step(fresh, src, c, 55*time.Minute, map[string]uint64{"web-app": 18 * gb})
+	if r := growthReading(t, res, "web-app"); r.Verdict != health.Bad {
+		t.Fatalf("restart closed the condition: %+v", r)
+	}
+}
+
+func TestGrowthRestoreReadsTheBareRingsOfAnOlderVersion(t *testing.T) {
+	c := &clock{now: start0()}
+	src := &fakeSource{host: healthy()}
+	chk := memory.New(src, growthSettings(c))
+
+	old := `{"web-app":[{"at":"2026-01-02T10:00:00Z","anon":10737418240}]}`
+	if err := chk.Restore([]byte(old)); err != nil {
+		t.Fatalf("old format rejected: %v", err)
+	}
+	res := step(chk, src, c, 10*time.Minute, map[string]uint64{"web-app": 16 * gb})
+	r := growthReading(t, res, "web-app")
+	want := "web-app grew 10→16 GB in 10 min; top: web-app 16 GB"
+	if r.Verdict != health.Bad || r.Text != want {
+		t.Fatalf("reading = %+v", r)
+	}
+}

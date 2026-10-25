@@ -300,13 +300,27 @@ func (g *serviceGroup) text(now time.Time, open []runner.OpenCondition) string {
 			facts = append(facts, g.prefixed(m, m.Freshness.ageText(now)))
 		case m.Modem != nil:
 			facts = append(facts, g.prefixed(m, m.Modem.text(now, len(own) > 0)))
-		case m.Memory != nil && len(own) == 0:
-			// The open problems already carry the figures that matter.
+		case m.Memory != nil && !hostMemoryOpen(m.Name, open):
+			// An open host problem already carries the figures that matter.
 			facts = append(facts, g.prefixed(m, m.Memory.summaryFact()))
 		}
 	}
 
 	return joinBody(strings.Join(problems, "; "), facts)
+}
+
+// hostMemoryOpen reports whether the memory check of the given name has an open
+// available, swap or pressure condition; their texts carry the host figures.
+// Per-service growth and container limit conditions do not.
+func hostMemoryOpen(name string, open []runner.OpenCondition) bool {
+	for _, c := range open {
+		switch c.Key {
+		case name + "/available", name + "/swap", name + "/pressure":
+			return true
+		}
+	}
+
+	return false
 }
 
 // joinBody puts the facts after the problems text; with neither it reads "ok".

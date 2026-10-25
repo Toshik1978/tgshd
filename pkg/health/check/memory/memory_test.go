@@ -247,3 +247,108 @@ func TestTopOmittedWhenNothingKnown(t *testing.T) {
 		t.Fatalf("subjects = %q, %q", errs[0].Subject, errs[1].Subject)
 	}
 }
+
+func TestTopNamesTheServiceWhenItHoldsLessThanHalfAndNoProcessIsKnown(t *testing.T) {
+	host := healthy()
+	host.Available = 5 * gb // 57 GB in use, the largest service holds 10 GB
+	src := &fakeSource{
+		host:     host,
+		services: []memory.Service{{Name: "web-app", Anon: 10 * gb}, {Name: "db", Anon: 8 * gb}},
+	}
+
+	res := memory.New(src, settings()).Run(context.Background())
+
+	want := "8% available (5 of 62 GB); top: web-app 10 GB"
+	if got := find(t, res, "memory/available").Text; got != want {
+		t.Fatalf("text = %q, want %q", got, want)
+	}
+}
+
+func TestWarnLevelBoundaries(t *testing.T) {
+	// total 1000 units keeps the percentages exact.
+	const total = 1000 * gb
+	tests := []struct {
+		name   string
+		key    string
+		mutate func(*memory.Host)
+		want   health.Verdict
+		text   string
+	}{
+		{
+			"available at the floor",
+			"memory/available",
+			func(h *memory.Host) { h.Available = 150 * gb },
+			health.Good,
+			"15% available",
+		},
+		{
+			"available just below the floor",
+			"memory/available",
+			func(h *memory.Host) { h.Available = 149 * gb },
+			health.Bad,
+			"14.9% available (149 of 1000 GB)",
+		},
+		{
+			"available rounds up to the floor",
+			"memory/available",
+			func(h *memory.Host) { h.Available = 146 * gb },
+			health.Bad,
+			"14.6% available (146 of 1000 GB)",
+		},
+		{
+			"swap at the ceiling",
+			"memory/swap",
+			func(h *memory.Host) { h.SwapFree = 200 * gb },
+			health.Good,
+			"swap 80% used",
+		},
+		{
+			"swap just above the ceiling",
+			"memory/swap",
+			func(h *memory.Host) { h.SwapFree = 199 * gb },
+			health.Bad,
+			"swap 80.1% used (801 of 1000 GB)",
+		},
+		{
+			"swap rounds down to the ceiling",
+			"memory/swap",
+			func(h *memory.Host) { h.SwapFree = 196 * gb },
+			health.Bad,
+			"swap 80.4% used (804 of 1000 GB)",
+		},
+		{
+			"pressure at the ceiling",
+			"memory/pressure",
+			func(h *memory.Host) { h.SomeAvg60 = 10 },
+			health.Good,
+			"pressure 10%",
+		},
+		{
+			"pressure one step above",
+			"memory/pressure",
+			func(h *memory.Host) { h.SomeAvg60 = 11 },
+			health.Bad,
+			"pressure 11% (stalled, 1 min avg)",
+		},
+		{
+			"pressure rounds down to the ceiling",
+			"memory/pressure",
+			func(h *memory.Host) { h.SomeAvg60 = 10.4 },
+			health.Bad,
+			"pressure 10.4% (stalled, 1 min avg)",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			host := memory.Host{Total: total, Available: 500 * gb, SwapTotal: total, SwapFree: total, HasPressure: true}
+			tt.mutate(&host)
+
+			res := memory.New(&fakeSource{host: host}, settings()).Run(context.Background())
+
+			r := find(t, res, tt.key)
+			if r.Verdict != tt.want || r.Text != tt.text {
+				t.Fatalf("reading = %+v, want %v %q", r, tt.want, tt.text)
+			}
+		})
+	}
+}

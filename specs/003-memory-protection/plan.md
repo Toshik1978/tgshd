@@ -117,7 +117,7 @@ pkg/health/
 ├── config/types.go, checks.go,  # + Memory section, Size type, defaults and validation
 │   defaults.go, validate.go
 ├── report/status.go             # + memory block
-└── runner/runner.go             # + PushMode (event with a delivery mode); guard records restored from kv, not saved
+└── runner/runner.go             # + PushMode (event with a delivery mode)
 
 pkg/host/
 ├── procmem/ +                   # /proc/meminfo, /proc/pressure/memory, /proc/*/status top processes,
@@ -130,7 +130,8 @@ pkg/host/
 cmd/
 ├── health_memory.go +           # wiring: sources, name map (Docker list → id→name, refreshed by the
 │                                #   memory check), guard start/stop on the fx lifecycle, reporter → PushMode,
-│                                #   guard writer: kv `memory.guard` via Store.PutKV after each action and on stop
+│                                #   guard writer: kv `memory.guard` via Store.PutKV after each action and on stop;
+│                                #   guard records restored from kv, not saved (guardPersister over runner.KVPersister)
 ├── health.go                    # build the memory check; restore guard records, restore/export growth state
 └── cli.go                       # check --once: memory readings and guard mode
 
