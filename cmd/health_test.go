@@ -24,6 +24,7 @@ import (
 	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/Toshik1978/tgshd/pkg/health"
+	"github.com/Toshik1978/tgshd/pkg/health/check/memory"
 	"github.com/Toshik1978/tgshd/pkg/health/check/network"
 	hcfg "github.com/Toshik1978/tgshd/pkg/health/config"
 	"github.com/Toshik1978/tgshd/pkg/health/memguard"
@@ -1483,10 +1484,13 @@ type guardFakes struct {
 	units      *fakeGuardUnits
 	shield     *fakeShield
 	clock      *stepClock
+	// names is the container id→name map the memory check refreshes.
+	names *containerNames
 }
 
 func newGuardFakes(start time.Time) *guardFakes {
 	return &guardFakes{
+		names:      &containerNames{},
 		mem:        &fakeGuardMemory{},
 		cgroups:    &fakeGuardCgroups{self: "system.slice/tgshd.service"},
 		containers: &fakeGuardContainers{names: map[string]string{webAppID: "web-app"}},
@@ -1499,6 +1503,7 @@ func newGuardFakes(start time.Time) *guardFakes {
 func (f *guardFakes) host() *guardHost {
 	return &guardHost{
 		mem: f.mem, cgroups: f.cgroups, containers: f.containers, units: f.units, shield: f.shield, clock: f.clock,
+		names: f.names,
 	}
 }
 
@@ -1529,12 +1534,16 @@ func waitFor(t *testing.T, what string, cond func() bool) {
 	}
 }
 
-// waitNamed waits until Docker named the containers and the guard has read
-// the services a few times since, so web-app has a history before danger.
+// waitNamed waits until the guard's refresh named the containers and the
+// guard has read the services a few times since, so web-app has a history
+// before danger.
 func waitNamed(t *testing.T, f *guardFakes) {
 	t.Helper()
 
-	waitFor(t, "the container names", func() bool { return f.containers.listed() > 0 })
+	waitFor(t, "the container names", func() bool {
+		name, ok := f.names.name(webAppID)
+		return ok && name == "web-app"
+	})
 	reads := f.cgroups.serviceReads()
 	waitFor(t, "the named services", func() bool { return f.cgroups.serviceReads() >= reads+3 })
 }
@@ -2094,4 +2103,253 @@ func TestMemoryGuardStartsWhileCheckerErrorsHang(t *testing.T) {
 	want := []string{guardShieldKey + "/1", guardShieldKey + "/2", guardSelfKey}
 	waitFor(t, "the checker errors", func() bool { return slices.Equal(r.keys(), want) })
 	lc.RequireStop()
+}
+
+// testMemoryCheckSection is a memory section with its warning levels.
+func testMemoryCheckSection() *hcfg.Memory {
+	m := testMemorySection(hcfg.InterveneReport)
+	m.Interval, m.Threshold, m.PauseInQuietWindows = hcfg.Duration(30*time.Second), hcfg.Duration(time.Minute), true
+	m.WarnAvailablePercent, m.WarnSwapPercent, m.WarnPressurePercent = 15, 80, 10
+	m.GrowthWindow, m.GrowthWarn = hcfg.Duration(time.Hour), 4<<30
+
+	return m
+}
+
+// testMemoryCheck builds the memory check over the fakes.
+func testMemoryCheck(f *guardFakes, logger *zap.Logger) checkSet {
+	src := memorySource{sampler: guardSampler{mem: f.mem, cgroups: f.cgroups, names: f.names}}
+
+	return buildMemoryCheck(testMemoryCheckSection(), src, f.containers, logger)
+}
+
+func TestMemoryChecksBuiltOnlyWithTheSection(t *testing.T) {
+	t.Parallel()
+
+	names := &containerNames{}
+	for name, hs := range map[string]*healthSetup{"disabled": {}, "no section": {Config: &hcfg.Config{}}} {
+		set := memoryChecks(hs, &lazyDocker{}, names, zap.NewNop())
+		if len(set.Checks) != 0 || len(set.Persisters) != 0 || set.Memory != nil {
+			t.Fatalf("%s: set = %+v, want empty", name, set)
+		}
+	}
+
+	set := memoryChecks(&healthSetup{Config: &hcfg.Config{Memory: testMemoryCheckSection()}}, &lazyDocker{}, names,
+		zap.NewNop())
+	if len(set.Checks) != 1 || set.Memory == nil || len(set.Errors) != 0 {
+		t.Fatalf("set = %+v, want the memory check", set)
+	}
+	c := set.Checks[0]
+	if c.Name != memoryCheckName || c.Interval != 30*time.Second || c.Threshold != time.Minute ||
+		c.Mode != health.Mode(hcfg.ModeTLG) || !c.PauseInQuiet || c.NeedsInternet || c.DependsOn != "" {
+		t.Fatalf("check = %+v", c)
+	}
+	if p, ok := set.Persisters[0].(runner.KVPersister); len(set.Persisters) != 1 || !ok || p.Key != "memory.growth" {
+		t.Fatalf("persisters = %+v, want the growth history under kv memory.growth", set.Persisters)
+	}
+}
+
+func TestMemoryCheckRefreshesTheContainerNames(t *testing.T) {
+	t.Parallel()
+
+	core, logs := observer.New(zap.WarnLevel)
+	f := newGuardFakes(guardT0())
+	c := testMemoryCheck(f, zap.New(core)).Checks[0]
+
+	res := c.Run(t.Context())
+	if f.containers.listed() != 1 {
+		t.Fatalf("docker listed %d times, want once per run", f.containers.listed())
+	}
+	if name, ok := f.names.name(webAppID); !ok || name != "web-app" {
+		t.Fatalf("name = %q, %v; want the guard's map refreshed by the run", name, ok)
+	}
+	keys := make([]string, 0, len(res.Readings))
+	for _, r := range res.Readings {
+		keys = append(keys, r.Key)
+	}
+	want := []string{
+		"memory/available", "memory/pressure", "memory/growth/backup.service", "memory/growth/web-app",
+	}
+	if !slices.Equal(keys, want) || res.Err != nil {
+		t.Fatalf("readings = %v, err = %v; want %v (the unnamed container left out)", keys, res.Err, want)
+	}
+
+	// Docker down: the run goes on with the last names, warned once.
+	f.containers.mu.Lock()
+	f.containers.listErr = errors.New("docker down")
+	f.containers.mu.Unlock()
+	for range 2 {
+		if res := c.Run(t.Context()); res.Err != nil || len(res.Readings) != len(want) {
+			t.Fatalf("with docker down: readings = %+v, err = %v", res.Readings, res.Err)
+		}
+	}
+	if name, ok := f.names.name(webAppID); !ok || name != "web-app" {
+		t.Fatalf("name = %q, %v; want the last map kept", name, ok)
+	}
+	if n := logs.FilterMessageSnippet("cannot list containers").Len(); n != 1 {
+		t.Fatalf("warnings = %d, want one while the listing keeps failing", n)
+	}
+}
+
+func TestMemorySourceReadsTheHost(t *testing.T) {
+	t.Parallel()
+
+	f := newGuardFakes(guardT0())
+	f.mem.setDanger(true)
+	src := memorySource{sampler: guardSampler{mem: f.mem, cgroups: f.cgroups, names: f.names}}
+
+	host, err := src.Host(t.Context())
+	want := memory.Host{Total: 100 << 30, Available: 2 << 30, FullAvg10: 50, HasPressure: true}
+	if err != nil || host != want {
+		t.Fatalf("Host() = %+v, %v; want %+v", host, err, want)
+	}
+	top, err := src.TopProcess(t.Context())
+	if wantTop := (memory.Process{Name: "python3", PID: 4242, RSS: 40 << 30}); err != nil || top != wantTop {
+		t.Fatalf("TopProcess() = %+v, %v; want %+v", top, err, wantTop)
+	}
+	svcs, err := src.Services(t.Context())
+	if err != nil || len(svcs) != 1 || svcs[0] != (memory.Service{Name: "backup.service", Anon: 1 << 30}) {
+		t.Fatalf("Services() = %+v, %v; want only the unit before Docker named the containers", svcs, err)
+	}
+
+	f.mem.psiErr = procmem.ErrNoPressure
+	if host, err := src.Host(t.Context()); err != nil || host.HasPressure {
+		t.Fatalf("without PSI: Host() = %+v, %v; want no pressure and no error", host, err)
+	}
+	f.mem.psiErr = errors.New("parse memory pressure: some or full line missing")
+	if _, err := src.Host(t.Context()); err == nil {
+		t.Fatal("an unreadable pressure file must fail the read")
+	}
+}
+
+func TestMemoryGrowthSurvivesARestart(t *testing.T) {
+	t.Parallel()
+
+	f := newGuardFakes(guardT0())
+	set := testMemoryCheck(f, zap.NewNop())
+	set.Checks[0].Run(t.Context())
+	var st store.State
+	if err := set.Persisters[0].Save(&st); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(st.KV["memory.growth"], `"web-app"`) {
+		t.Fatalf("kv = %v, want the growth history", st.KV)
+	}
+
+	restarted := testMemoryCheck(newGuardFakes(guardT0()), zap.NewNop())
+	if err := restarted.Persisters[0].Restore(st); err != nil {
+		t.Fatal(err)
+	}
+	var again store.State
+	if err := restarted.Persisters[0].Save(&again); err != nil || again.KV["memory.growth"] != st.KV["memory.growth"] {
+		t.Fatalf("restored kv = %v, %v; want %v", again.KV, err, st.KV)
+	}
+}
+
+func TestMemoryGuardNamesContainersWithoutTheCheck(t *testing.T) {
+	t.Parallel()
+
+	// The daemon with the guard but no memory check run (paused by a quiet
+	// window, or a long interval): the guard names the containers itself.
+	f := newGuardFakes(guardT0())
+	lc := fxtest.NewLifecycle(t)
+	newHealth(guardHealthParams(t, &fakePublisher{}, lc, testMemorySection(hcfg.InterveneAct), f))
+	lc.RequireStart()
+	waitNamed(t, f)
+	lc.RequireStop()
+}
+
+// tickClock fires every wait at once (after a short real pause).
+type tickClock struct{}
+
+func (tickClock) Now() time.Time { return guardT0() }
+
+func (tickClock) After(time.Duration) <-chan time.Time {
+	time.Sleep(100 * time.Microsecond)
+
+	ch := make(chan time.Time, 1)
+	ch <- guardT0()
+
+	return ch
+}
+
+func TestMemoryGuardRefreshesNamesEveryTick(t *testing.T) {
+	t.Parallel()
+
+	core, logs := observer.New(zap.WarnLevel)
+	f := newGuardFakes(guardT0())
+	host := f.host()
+	host.clock = tickClock{}
+	g := newMemoryGuard(testMemorySection(hcfg.InterveneAct), host, zap.New(core))
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		g.refreshNames(ctx)
+	}()
+
+	waitFor(t, "the first names", func() bool { _, ok := f.names.name(webAppID); return ok })
+	// A container redeployed while no check runs is named by a later tick.
+	f.containers.mu.Lock()
+	f.containers.names = map[string]string{webAppID: "web-app-v2"}
+	f.containers.mu.Unlock()
+	waitFor(t, "the renamed container", func() bool { name, _ := f.names.name(webAppID); return name == "web-app-v2" })
+
+	f.containers.mu.Lock()
+	f.containers.listErr = errors.New("docker down")
+	f.containers.mu.Unlock()
+	listed := f.containers.listed()
+	waitFor(t, "a few failing lists", func() bool { return f.containers.listed() > listed+3 })
+	cancel()
+	<-done
+
+	if name, _ := f.names.name(webAppID); name != "web-app-v2" {
+		t.Fatalf("name = %q, want the last map kept while Docker is down", name)
+	}
+	if n := logs.FilterMessageSnippet("Memory guard cannot list containers").Len(); n != 1 {
+		t.Fatalf("warnings = %d, want one while the listing keeps failing", n)
+	}
+}
+
+func TestMemoryGuardStatus(t *testing.T) {
+	t.Parallel()
+
+	f := newGuardFakes(guardT0())
+	f.cgroups.self = "" // the root cgroup: act falls back to report
+	g := newMemoryGuard(testMemorySection(hcfg.InterveneAct), f.host(), zap.NewNop())
+	if s := g.status(); s.Mode != "act" || s.Last != nil {
+		t.Fatalf("before the start: status = %+v, want the configured mode", s)
+	}
+
+	r := runner.New(runner.Options{
+		Persisters: []runner.Persister{g.persister()}, Concurrency: 1,
+		Telegram: &recordingSender{}, Mode: notify.ModeTelegram, Logger: zap.NewNop(),
+	})
+	lc := fxtest.NewLifecycle(t)
+	g.register(lc, r)
+	lc.RequireStart()
+	waitNamed(t, f)
+	f.mem.setDanger(true)
+	waitFor(t, "the reported action", func() bool { return g.status().Last != nil })
+	lc.RequireStop()
+
+	s := g.status()
+	if s.Mode != "report" || s.Last.Action != "restart" || s.Last.Service != "web-app" || !s.Last.Report ||
+		s.Last.At.IsZero() {
+		t.Fatalf("status = %+v, last = %+v; want the effective mode and the would-restart", s, s.Last)
+	}
+
+	broken := newGuardFakes(guardT0())
+	broken.cgroups.svcErr = errors.New("no system.slice")
+	g = newMemoryGuard(testMemorySection(hcfg.InterveneAct), broken.host(), zap.NewNop())
+	g.run(t.Context(), &blockingRunner{release: closedChan()})
+	if s := g.status(); s.Mode != "not running" {
+		t.Fatalf("status = %+v, want not running", s)
+	}
+}
+
+func closedChan() chan struct{} {
+	c := make(chan struct{})
+	close(c)
+
+	return c
 }

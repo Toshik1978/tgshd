@@ -17,8 +17,10 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/Toshik1978/tgshd/pkg/health"
+	"github.com/Toshik1978/tgshd/pkg/health/check/memory"
 	hcfg "github.com/Toshik1978/tgshd/pkg/health/config"
 	"github.com/Toshik1978/tgshd/pkg/health/memguard"
+	"github.com/Toshik1978/tgshd/pkg/health/report"
 	"github.com/Toshik1978/tgshd/pkg/health/runner"
 	"github.com/Toshik1978/tgshd/pkg/host/cgroupmem"
 	"github.com/Toshik1978/tgshd/pkg/host/procmem"
@@ -30,6 +32,12 @@ const (
 	memoryCheckName = "memory"
 	// memoryGuardKey is the kv key of the guard's intervention records.
 	memoryGuardKey = "memory.guard"
+	// memoryGrowthKey is the kv key of the memory check's growth history.
+	memoryGrowthKey = "memory.growth"
+	// memoryTopServices is how many services the /status memory block lists.
+	memoryTopServices = 3
+	// guardNotRunning is the /status guard mode of a guard that could not start.
+	guardNotRunning = "not running"
 
 	// Checker errors of the guard's start.
 	guardShieldKey = memoryCheckName + "/guard/shield"
@@ -59,10 +67,15 @@ type guardCgroups interface {
 	Kill(cgroupPath string) error
 }
 
+// containerLister lists the containers as an id→name map.
+type containerLister interface {
+	ContainerNames(ctx context.Context) (map[string]string, error)
+}
+
 // guardContainers is what the guard uses of Docker: the id→name map and the
 // actions.
 type guardContainers interface {
-	ContainerNames(ctx context.Context) (map[string]string, error)
+	containerLister
 	Restart(ctx context.Context, name string) error
 	Stop(ctx context.Context, name string) error
 }
@@ -86,12 +99,15 @@ type guardHost struct {
 	units      guardUnits
 	shield     guardShield
 	clock      memguard.Clock
+	// names is the container id→name map the memory check refreshes.
+	names *containerNames
 }
 
 // newGuardHost provides the real host adapters of the memory guard. It reads
 // and touches nothing until the guard starts.
-func newGuardHost(d *lazyDocker) *guardHost {
+func newGuardHost(d *lazyDocker, names *containerNames) *guardHost {
 	return &guardHost{
+		names:      names,
 		mem:        procmem.NewDefault(),
 		cgroups:    cgroupmem.NewDefault(),
 		containers: d,
@@ -122,9 +138,11 @@ type guardRunner interface {
 type memoryGuard struct {
 	cfg   memguard.Config
 	host  *guardHost
-	names *containerNames
 	state *guardState
 	log   *zap.Logger
+	// mode is the mode /status shows: the configured one until the guard
+	// starts, then the one it runs in, or guardNotRunning.
+	mode atomic.Pointer[string]
 }
 
 // newMemoryGuard builds the guard of the memory section; nil without the
@@ -135,7 +153,7 @@ func newMemoryGuard(m *hcfg.Memory, host *guardHost, logger *zap.Logger) *memory
 	}
 	g := m.Guard
 
-	return &memoryGuard{
+	guard := &memoryGuard{
 		cfg: memguard.Config{
 			CulpritWindow:          g.CulpritWindow.Duration(),
 			CulpritMinGrowth:       g.CulpritMinGrowth.Bytes(),
@@ -151,10 +169,26 @@ func newMemoryGuard(m *hcfg.Memory, host *guardHost, logger *zap.Logger) *memory
 			FailedChannel:          health.Mode(g.FailedMode),
 		},
 		host:  host,
-		names: &containerNames{},
 		state: &guardState{log: logger},
 		log:   logger,
 	}
+	guard.setMode(string(guard.cfg.Mode))
+
+	return guard
+}
+
+func (g *memoryGuard) setMode(mode string) { g.mode.Store(&mode) }
+
+// status is the guard line of /status: the mode and the latest intervention.
+func (g *memoryGuard) status() report.Guard {
+	s := report.Guard{Mode: *g.mode.Load()}
+	if rec, ok := g.state.last(); ok {
+		s.Last = &report.GuardAction{
+			Action: string(rec.Action), Service: rec.Name, Report: rec.Mode != memguard.ModeAct, At: rec.At,
+		}
+	}
+
+	return s
 }
 
 // persister keeps the intervention records in the checkpoint as kv
@@ -203,11 +237,12 @@ func (g *memoryGuard) register(lc fx.Lifecycle, r guardRunner) {
 func (g *memoryGuard) run(ctx context.Context, r guardRunner) {
 	errs := g.applyShield()
 
-	sampler := guardSampler{mem: g.host.mem, cgroups: g.host.cgroups, names: g.names}
+	sampler := guardSampler{mem: g.host.mem, cgroups: g.host.cgroups, names: g.host.names}
 	if _, err := g.host.cgroups.Services(); err != nil {
 		errs = append(errs, startError{
 			guardCgroupKey, "no cgroup v2 service cgroups, the memory guard is not started: " + err.Error(),
 		})
+		g.setMode(guardNotRunning)
 		raiseAll(r, errs)
 
 		return
@@ -216,6 +251,7 @@ func (g *memoryGuard) run(ctx context.Context, r guardRunner) {
 		errs = append(errs, startError{
 			guardHostKey, "cannot read host memory, the memory guard is not started: " + err.Error(),
 		})
+		g.setMode(guardNotRunning)
 		raiseAll(r, errs)
 
 		return
@@ -224,6 +260,7 @@ func (g *memoryGuard) run(ctx context.Context, r guardRunner) {
 	if selfErr != nil {
 		errs = append(errs, *selfErr)
 	}
+	g.setMode(string(cfg.Mode))
 
 	var wg sync.WaitGroup
 	defer wg.Wait()
@@ -296,20 +333,13 @@ func (g *memoryGuard) withSelf() (memguard.Config, *startError) {
 }
 
 // refreshNames refreshes the container id→name map from the Docker list at
-// once and then every runner tick, until ctx is done. The memory check takes
-// this over once it exists (T013).
+// once and then every runner tick, until ctx is done. It runs whatever the
+// memory check's schedule: a quiet window pauses the check, never the guard,
+// and containers redeployed in maintenance must be guarded too.
 func (g *memoryGuard) refreshNames(ctx context.Context) {
-	failing := false
+	names := &nameRefresher{names: g.host.names, lister: g.host.containers, log: g.log, who: "Memory guard"}
 	for {
-		err := g.names.refresh(ctx, g.host.containers)
-		if ctx.Err() != nil {
-			return
-		}
-		if err != nil && !failing {
-			g.log.Warn("Memory guard cannot list containers; containers are not guarded until it can",
-				zap.Error(err))
-		}
-		failing = err != nil
+		names.refresh(ctx)
 		select {
 		case <-ctx.Done():
 			return
@@ -318,15 +348,50 @@ func (g *memoryGuard) refreshNames(ctx context.Context) {
 	}
 }
 
+// nameRefresher refreshes the container id→name map from the Docker list,
+// off the guard's decision path, and warns once while the list keeps
+// failing. The guard runs one every tick; the memory check runs one on each
+// of its runs too.
+type nameRefresher struct {
+	names  *containerNames
+	lister containerLister
+	log    *zap.Logger
+	who    string
+
+	mu      sync.Mutex
+	failing bool
+}
+
+// refresh lists the containers now; a failed list keeps the last map.
+func (r *nameRefresher) refresh(ctx context.Context) {
+	err := r.names.refresh(ctx, r.lister)
+	if ctx.Err() != nil {
+		return
+	}
+
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	if err != nil && !r.failing {
+		r.log.Warn(r.who+" cannot list containers; new containers are not named (nor guarded) until it can",
+			zap.Error(err))
+	}
+	r.failing = err != nil
+}
+
 // containerNames maps container ids to names. It is replaced whole and read
 // lock-free by the guard loop.
 type containerNames struct {
 	ids atomic.Pointer[map[string]string]
 }
 
+// newContainerNames provides the container id→name map the memory check
+// refreshes and the guard reads.
+func newContainerNames() *containerNames { return &containerNames{} }
+
 // refresh replaces the map with the containers src lists now; a failed list
 // keeps the last one.
-func (c *containerNames) refresh(ctx context.Context, src guardContainers) error {
+func (c *containerNames) refresh(ctx context.Context, src containerLister) error {
 	names, err := src.ContainerNames(ctx)
 	if err != nil {
 		return fmt.Errorf("refresh container names: %w", err)
@@ -557,6 +622,21 @@ func (s *guardState) Restore(data string) error {
 	return nil
 }
 
+// last returns the latest record held.
+func (s *guardState) last() (memguard.Record, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var latest memguard.Record
+	for _, r := range s.records {
+		if r.At.After(latest.At) {
+			latest = r
+		}
+	}
+
+	return latest, !latest.At.IsZero()
+}
+
 // start marks the loop started and returns the records restored so far.
 func (s *guardState) start() []memguard.Record {
 	s.mu.Lock()
@@ -573,4 +653,100 @@ func (s *guardState) restored() []memguard.Record {
 	defer s.mu.Unlock()
 
 	return s.records
+}
+
+// memoryChecks provides the memory check when the memory section is present.
+// Each run also refreshes the container id→name map the guard reads; the
+// guard refreshes it on its own as well.
+func memoryChecks(hs *healthSetup, d *lazyDocker, names *containerNames, logger *zap.Logger) checkSet {
+	if hs.Config == nil || hs.Config.Memory == nil {
+		return checkSet{}
+	}
+	src := memorySource{sampler: guardSampler{mem: procmem.NewDefault(), cgroups: cgroupmem.NewDefault(), names: names}}
+
+	return buildMemoryCheck(hs.Config.Memory, src, d, logger)
+}
+
+// buildMemoryCheck builds the memory check over src. Its growth history is
+// persisted under memoryGrowthKey and its figures feed /status and the
+// weekly summary.
+func buildMemoryCheck(m *hcfg.Memory, src memorySource, lister containerLister, logger *zap.Logger) checkSet {
+	chk := memory.New(src, memory.Settings{
+		WarnAvailablePercent: m.WarnAvailablePercent,
+		WarnSwapPercent:      m.WarnSwapPercent,
+		WarnPressurePercent:  m.WarnPressurePercent,
+		GrowthWindow:         m.GrowthWindow.Duration(),
+		GrowthWarn:           m.GrowthWarn.Bytes(),
+	})
+	names := &nameRefresher{names: src.sampler.names, lister: lister, log: logger, who: "Memory check"}
+	common := hcfg.Common{
+		Interval: m.Interval, Threshold: m.Threshold, Mode: m.Mode, PauseInQuietWindows: m.PauseInQuietWindows,
+	}
+	run := func(ctx context.Context) health.CheckResult {
+		names.refresh(ctx)
+
+		return chk.Run(ctx)
+	}
+
+	return checkSet{
+		Checks:     []health.Check{newCheck(memoryCheckName, common, run)},
+		Persisters: []runner.Persister{runner.KVPersister{Key: memoryGrowthKey, State: bytesKV{state: chk}}},
+		Memory:     chk,
+	}
+}
+
+// memorySource reads the host for the memory check over procmem and
+// cgroupmem, naming containers as the guard does.
+type memorySource struct {
+	sampler guardSampler
+}
+
+// Host implements memory.Source. A host without PSI has no pressure; any
+// other failure to read it fails the read.
+func (s memorySource) Host(context.Context) (memory.Host, error) {
+	info, err := s.sampler.mem.ReadMemInfo()
+	if err != nil {
+		return memory.Host{}, fmt.Errorf("read host memory: %w", err)
+	}
+	host := memory.Host{
+		Total:     info.Total,
+		Available: info.Available,
+		SwapTotal: info.SwapTotal,
+		SwapFree:  info.SwapFree,
+	}
+	psi, err := s.sampler.mem.ReadPressure()
+	switch {
+	case errors.Is(err, procmem.ErrNoPressure):
+		return host, nil
+	case err != nil:
+		return memory.Host{}, fmt.Errorf("read memory pressure: %w", err)
+	}
+	host.SomeAvg60, host.FullAvg10, host.HasPressure = psi.SomeAvg60, psi.FullAvg10, true
+
+	return host, nil
+}
+
+// Services implements memory.Source: the services the guard samples, by
+// display name.
+func (s memorySource) Services(context.Context) ([]memory.Service, error) {
+	samples, err := s.sampler.Services(nil)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]memory.Service, len(samples))
+	for i, sm := range samples {
+		out[i] = memory.Service{Name: sm.Name, Anon: sm.Anon}
+	}
+
+	return out, nil
+}
+
+// TopProcess implements memory.Source.
+func (s memorySource) TopProcess(context.Context) (memory.Process, error) {
+	top, err := s.sampler.TopProcess()
+	if err != nil {
+		return memory.Process{}, err
+	}
+
+	return memory.Process{Name: top.Name, PID: top.PID, RSS: top.Size}, nil
 }

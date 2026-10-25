@@ -637,3 +637,44 @@ func TestSummaryServicesOmitHardwareChecks(t *testing.T) {
 		t.Errorf("got %q", only)
 	}
 }
+
+func TestSummaryMemoryLine(t *testing.T) {
+	t.Parallel()
+
+	mem := contractMemory()
+	mem.Guard = nil
+	in := func(m *Memory, open ...runner.OpenCondition) SummaryInput {
+		return SummaryInput{
+			Host: "box", Open: open,
+			Services: []ServiceCheck{{Name: "memory", Memory: m}, {Name: "network"}},
+		}
+	}
+
+	cases := []struct {
+		name string
+		in   SummaryInput
+		want string
+	}{
+		{
+			"healthy",
+			in(mem),
+			"memory: 45% available (28 of 62 GB), swap 20% used, stalled 0%; top: web-app 13 GB",
+		},
+		{
+			"problems only",
+			in(mem, runner.OpenCondition{Key: "memory/growth/web-app", Text: "web-app grew 12→31 GB in 40 min"}),
+			"memory: web-app grew 12→31 GB in 40 min\n",
+		},
+		{"unreadable", in(&Memory{Unreadable: true}), "memory: unreadable\n"},
+		{"no figures", in(nil), "memory: ok\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Parallel()
+
+			if got := Summary(tc.in); !strings.Contains(got, tc.want) {
+				t.Fatalf("got\n%s\nwant it to contain %q", got, tc.want)
+			}
+		})
+	}
+}

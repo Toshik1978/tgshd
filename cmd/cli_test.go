@@ -556,6 +556,7 @@ func TestCollectCheckSetsUsesTheDaemonProviders(t *testing.T) {
 		HTTP:         []hcfg.HTTP{{Name: "app", URL: "https://app.example.org/"}},
 		Freshness:    []hcfg.Freshness{{Name: "backup", Path: "/var/lib/example/backup.stamp"}},
 		Command:      []hcfg.Command{{Name: "queue", Run: []string{"/usr/local/bin/queue-ok"}}},
+		Memory:       &hcfg.Memory{},
 	}}
 	cfg := &config{NutIP: "192.0.2.10", NutName: "ups", NutUser: "monitor", NutPassword: "secret"}
 
@@ -571,13 +572,16 @@ func TestCollectCheckSetsUsesTheDaemonProviders(t *testing.T) {
 		names = append(names, c.Name)
 	}
 	want := []string{
-		"command/queue", "containers", "disks", "freshness/backup", "http/app", "kernel", "network", "temps", "ups",
+		"command/queue", "containers", "disks", "freshness/backup", "http/app", "kernel", "memory", "network", "temps",
+		"ups",
 	}
 	if !slices.Equal(names, want) || len(set.Errors) != 0 {
 		t.Fatalf("checks = %v, errors = %+v", names, set.Errors)
 	}
-	// disks, temps, kernel, containers, freshness and command keep state.
-	if len(set.Persisters) != 6 || set.Drives == nil || len(set.Background) != 1 || len(set.Fixes) != 1 {
+	// disks, temps, kernel, containers, freshness, command and memory keep
+	// state.
+	if len(set.Persisters) != 7 || set.Memory == nil || set.Drives == nil || len(set.Background) != 1 ||
+		len(set.Fixes) != 1 {
 		t.Fatalf("persisters = %d, drives = %v, background = %d, fixes = %d",
 			len(set.Persisters), set.Drives, len(set.Background), len(set.Fixes))
 	}

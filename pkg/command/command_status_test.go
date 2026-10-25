@@ -9,6 +9,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/Toshik1978/tgshd/pkg/health/report"
 	"github.com/Toshik1978/tgshd/pkg/health/runner"
 )
 
@@ -29,7 +30,7 @@ func TestStatusCommand(t *testing.T) {
 	at := time.Date(2026, 1, 2, 3, 4, 0, 0, time.UTC)
 	pub := &fakePublisher{}
 	src := &fakeHealth{snap: runner.Snapshot{Open: []runner.OpenCondition{{Key: "disk/a", Text: "hot", Since: at}}}}
-	cmd := NewStatusCommand(zap.NewNop(), pub, src)
+	cmd := NewStatusCommand(zap.NewNop(), pub, src, nil)
 
 	if cmd.Name() != "status" || !cmd.Enabled() {
 		t.Fatalf("Name=%q Enabled=%v", cmd.Name(), cmd.Enabled())
@@ -42,9 +43,37 @@ func TestStatusCommand(t *testing.T) {
 	}
 }
 
+// handleKey marks the context Handle was given.
+type handleKey struct{}
+
+// fakeMemory is the memory block source of /status.
+type fakeMemory struct {
+	mem *report.Memory
+	ctx context.Context //nolint:containedctx // records the context Handle passed
+}
+
+func (f *fakeMemory) MemoryStatus(ctx context.Context) *report.Memory {
+	f.ctx = ctx
+	return f.mem
+}
+
+func TestStatusCommandShowsTheMemoryBlock(t *testing.T) {
+	pub := &fakePublisher{}
+	mem := &fakeMemory{mem: &report.Memory{Unreadable: true, Guard: &report.Guard{Mode: "off"}}}
+	cmd := NewStatusCommand(zap.NewNop(), pub, &fakeHealth{snap: runner.Snapshot{Checks: 1}}, mem)
+
+	ctx := context.WithValue(context.Background(), handleKey{}, "handle")
+	if err := cmd.Handle(ctx, 5, "/status"); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(pub.lastMsg, "\nMemory: unreadable\nGuard: off") || mem.ctx != ctx {
+		t.Errorf("msg = %q (memory read with the handler's context: %v)", pub.lastMsg, mem.ctx == ctx)
+	}
+}
+
 func TestStatusCommandPublishError(t *testing.T) {
 	pub := &errPublisher{err: errors.New("boom")}
-	cmd := NewStatusCommand(zap.NewNop(), pub, &fakeHealth{})
+	cmd := NewStatusCommand(zap.NewNop(), pub, &fakeHealth{}, nil)
 	if err := cmd.Handle(context.Background(), 1, "/status"); !errors.Is(err, pub.err) {
 		t.Errorf("err = %v", err)
 	}

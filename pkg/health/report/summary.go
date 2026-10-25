@@ -43,6 +43,8 @@ type ServiceCheck struct {
 	Freshness *FreshnessStamp
 	// Modem is set for the modem probe: its round-trip state.
 	Modem *ModemState
+	// Memory is set for the memory check: the host's figures now.
+	Memory *Memory
 }
 
 // FreshnessStamp is what a freshness check last saw of its file.
@@ -283,7 +285,8 @@ func summaryServices(in SummaryInput) *section {
 }
 
 // text is the line's body. Problems come first, then the facts of the
-// freshness and modem checks; inside a group a fact is prefixed with its
+// freshness and modem checks (and the memory figures, without memory
+// problems); inside a group a fact is prefixed with its
 // check's name, and a group with nothing to show reads "ok".
 func (g *serviceGroup) text(now time.Time, open []runner.OpenCondition) string {
 	problems := make([]string, 0, len(open))
@@ -297,6 +300,9 @@ func (g *serviceGroup) text(now time.Time, open []runner.OpenCondition) string {
 			facts = append(facts, g.prefixed(m, m.Freshness.ageText(now)))
 		case m.Modem != nil:
 			facts = append(facts, g.prefixed(m, m.Modem.text(now, len(own) > 0)))
+		case m.Memory != nil && len(own) == 0:
+			// The open problems already carry the figures that matter.
+			facts = append(facts, g.prefixed(m, m.Memory.summaryFact()))
 		}
 	}
 
@@ -355,7 +361,7 @@ func (f *FreshnessStamp) ageText(now time.Time) string {
 	case f.Present:
 		return ageText(now.Sub(f.At)) + " ago"
 	case f.ReadOK:
-		return "none"
+		return noneText
 	}
 
 	return "?"

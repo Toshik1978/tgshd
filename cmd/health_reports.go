@@ -12,8 +12,10 @@ import (
 
 	"github.com/Toshik1978/tgshd/pkg/command"
 	"github.com/Toshik1978/tgshd/pkg/health/check/disks"
+	"github.com/Toshik1978/tgshd/pkg/health/check/memory"
 	"github.com/Toshik1978/tgshd/pkg/health/check/modemprobe"
 	"github.com/Toshik1978/tgshd/pkg/health/check/temps"
+	hcfg "github.com/Toshik1978/tgshd/pkg/health/config"
 	"github.com/Toshik1978/tgshd/pkg/health/notify"
 	"github.com/Toshik1978/tgshd/pkg/health/report"
 	"github.com/Toshik1978/tgshd/pkg/health/runner"
@@ -86,6 +88,20 @@ type probeStatus interface {
 	Status() modemprobe.State
 }
 
+// memoryFigures is what the reports read of the memory check; *memory.Check
+// satisfies it.
+type memoryFigures interface {
+	Figures(ctx context.Context, n int) (memory.Figures, error)
+}
+
+var _ memoryFigures = (*memory.Check)(nil)
+
+// guardStatus is the memory guard as /status shows it; *memoryGuard
+// satisfies it.
+type guardStatus interface {
+	status() report.Guard
+}
+
 // reportRunner is the runner as the reports use it; *runner.Runner satisfies it.
 type reportRunner interface {
 	Snapshot() runner.Snapshot
@@ -113,6 +129,11 @@ type healthReports struct {
 	// nil without those checks.
 	stamps freshnessStamps
 	probe  probeStatus
+	// memory feeds the /status memory block and the summary's memory line;
+	// nil without the memory section. guard is the memory guard; nil shows
+	// it off.
+	memory memoryFigures
+	guard  guardStatus
 	host   string
 	// loc is the host's zone retention takes local days in.
 	loc    *time.Location
@@ -139,6 +160,7 @@ func newHealthReports(hs *healthSetup, set checkSet, topology topologyReader, lo
 		groups:   summaryGroups(hs.Config),
 		stamps:   set.Stamps,
 		probe:    set.Probe,
+		memory:   set.Memory,
 		host:     hs.Host,
 		loc:      time.Local, //nolint:gosmopolitan // retention rolls samples up by the host's local day
 		logger:   logger,
@@ -177,6 +199,22 @@ func (h *healthReports) TempSensors() []report.Sensor {
 	}
 
 	return out
+}
+
+// MemoryStatus implements command.MemoryStatusSource: the host's memory
+// figures now with the guard line; nil without the memory section.
+func (h *healthReports) MemoryStatus(ctx context.Context) *report.Memory {
+	m := h.memoryFigures(ctx)
+	if m == nil {
+		return nil
+	}
+	m.Guard = &report.Guard{Mode: string(hcfg.InterveneOff)}
+	if h.guard != nil {
+		g := h.guard.status()
+		m.Guard = &g
+	}
+
+	return m
 }
 
 // drives maps the disks check's status to drives, missing while their
@@ -315,7 +353,7 @@ func (h *healthReports) weekly(ctx context.Context, now time.Time) error {
 		return errNotBound
 	}
 	open := rh.snapshot().Open
-	in := report.SummaryInput{Host: h.host, Services: h.services(), Now: now, Open: open}
+	in := report.SummaryInput{Host: h.host, Services: h.services(ctx), Now: now, Open: open}
 	in.Drives = h.summaryDrives(open)
 	if len(in.Drives) > 0 {
 		in.DriveStats = h.driveStats(ctx, now)
@@ -405,8 +443,9 @@ func isZeroDev(d sysfs.DevNum) bool { return d == sysfs.DevNum{} }
 
 // services maps the configured checks onto the summary's services block,
 // which leaves the hardware checks out itself: each with its summary_group,
-// a freshness check with its stamp and the modem probe with its state.
-func (h *healthReports) services() []report.ServiceCheck {
+// a freshness check with its stamp, the modem probe with its state and the
+// memory check with the host's figures now.
+func (h *healthReports) services(ctx context.Context) []report.ServiceCheck {
 	out := make([]report.ServiceCheck, len(h.checks))
 	for i, name := range h.checks {
 		c := report.ServiceCheck{Name: name, Group: h.groups[name]}
@@ -418,10 +457,40 @@ func (h *healthReports) services() []report.ServiceCheck {
 			st := h.probe.Status()
 			c.Modem = &report.ModemState{LastOK: st.LastOKAt, Outstanding: st.Outstanding()}
 		}
+		if name == memoryCheckName {
+			c.Memory = h.memoryFigures(ctx)
+		}
 		out[i] = c
 	}
 
 	return out
+}
+
+// memoryFigures reads the memory check's figures now; nil without the memory
+// section. An unreadable host shows as unreadable, unreadable services leave
+// the top consumers out.
+func (h *healthReports) memoryFigures(ctx context.Context) *report.Memory {
+	if h.memory == nil {
+		return nil
+	}
+	fig, err := h.memory.Figures(ctx, memoryTopServices)
+	if err != nil {
+		h.logger.Warn("cannot read the memory figures", zap.Error(err))
+	}
+	host := fig.Host
+	if host.Total == 0 {
+		return &report.Memory{Unreadable: true}
+	}
+	m := &report.Memory{
+		Total: host.Total, Available: host.Available,
+		SwapTotal: host.SwapTotal, SwapUsed: host.SwapTotal - min(host.SwapFree, host.SwapTotal),
+		Stalled: host.FullAvg10, HasPressure: host.HasPressure,
+	}
+	for _, s := range fig.Top {
+		m.Top = append(m.Top, report.Consumer{Name: s.Name, Size: s.Anon})
+	}
+
+	return m
 }
 
 // driveStats reads the drive.* metrics, whose wear stands in for a drive not

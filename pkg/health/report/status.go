@@ -15,11 +15,14 @@ const MaxMessageUnits = 4096
 const (
 	ellipsis   = "…"
 	timeLayout = "2006-01-02 15:04"
+	// noneText stands for an empty list.
+	noneText = "none"
 )
 
-// Status renders the /status reply: open problems one per line, or the
-// all-OK line, followed by notes about a degraded store or a quiet window.
-func Status(s runner.Snapshot) string {
+// Status renders the /status reply: notes about a degraded store or a quiet
+// window, the open problems one per line (or the all-OK line), then the
+// memory block when mem is not nil.
+func Status(s runner.Snapshot, mem *Memory) string {
 	var lines []string
 
 	// Notes come first so truncation never drops them.
@@ -40,6 +43,9 @@ func Status(s runner.Snapshot) string {
 		lines = append(lines, fmt.Sprintf("%s: %s (since %s)",
 			escape(c.Key), escape(c.Text), c.Since.Format(timeLayout)))
 	}
+	if mem != nil {
+		lines = append(lines, memoryLines(mem)...)
+	}
 
 	return Truncate(strings.Join(lines, "\n"))
 }
@@ -52,7 +58,7 @@ func quietNote(s runner.Snapshot) string {
 	if !s.HeldSince.IsZero() {
 		reason += ", held since " + s.HeldSince.Format(timeLayout)
 	}
-	paused := "none"
+	paused := noneText
 	if len(s.Paused) > 0 {
 		names := make([]string, 0, len(s.Paused))
 		for _, p := range s.Paused {

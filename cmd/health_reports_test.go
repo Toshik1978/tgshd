@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"slices"
 	"strings"
 	"sync"
@@ -19,6 +20,7 @@ import (
 	"github.com/Toshik1978/tgshd/pkg/command"
 	"github.com/Toshik1978/tgshd/pkg/health"
 	"github.com/Toshik1978/tgshd/pkg/health/check/disks"
+	"github.com/Toshik1978/tgshd/pkg/health/check/memory"
 	"github.com/Toshik1978/tgshd/pkg/health/check/modemprobe"
 	"github.com/Toshik1978/tgshd/pkg/health/check/temps"
 	hcfg "github.com/Toshik1978/tgshd/pkg/health/config"
@@ -688,5 +690,98 @@ func TestHealthReportsTempSensors(t *testing.T) {
 	merged := mergeCheckSets([]checkSet{{}, {Temps: fakeTempSensors{}}})
 	if merged.Temps == nil {
 		t.Fatal("mergeCheckSets dropped the temperatures sensors")
+	}
+}
+
+// fakeMemoryFigures serves fixed memory figures.
+type fakeMemoryFigures struct {
+	fig memory.Figures
+	err error
+	n   *int
+}
+
+func (f fakeMemoryFigures) Figures(_ context.Context, n int) (memory.Figures, error) {
+	if f.n != nil {
+		*f.n = n
+	}
+
+	return f.fig, f.err
+}
+
+// fakeGuardStatus serves a fixed guard line.
+type fakeGuardStatus report.Guard
+
+func (f fakeGuardStatus) status() report.Guard { return report.Guard(f) }
+
+func testMemoryFigures() memory.Figures {
+	return memory.Figures{
+		Host: memory.Host{
+			Total: 62 << 30, Available: 28 << 30, SwapTotal: 8 << 30, SwapFree: 6 << 30, SomeAvg60: 1, FullAvg10: 3,
+			HasPressure: true,
+		},
+		Top: []memory.Service{{Name: "web-app", Anon: 13 << 30}, {Name: "db", Anon: 9 << 30}},
+	}
+}
+
+func TestHealthReportsMemoryStatus(t *testing.T) {
+	t.Parallel()
+
+	if got := (&healthReports{}).MemoryStatus(t.Context()); got != nil {
+		t.Fatalf("without the memory check = %+v, want no block", got)
+	}
+
+	var n int
+	h := newHealthReports(&healthSetup{}, checkSet{Memory: fakeMemoryFigures{fig: testMemoryFigures(), n: &n}}, nil,
+		zap.NewNop())
+	want := &report.Memory{
+		Total: 62 << 30, Available: 28 << 30, SwapTotal: 8 << 30, SwapUsed: 2 << 30, Stalled: 3, HasPressure: true,
+		Top:   []report.Consumer{{Name: "web-app", Size: 13 << 30}, {Name: "db", Size: 9 << 30}},
+		Guard: &report.Guard{Mode: "off"},
+	}
+	if got := h.MemoryStatus(t.Context()); !reflect.DeepEqual(got, want) || n != 3 {
+		t.Fatalf("MemoryStatus = %+v (top %d), want %+v (top 3)", got, n, want)
+	}
+
+	last := &report.GuardAction{Action: "restart", Service: "web-app", Report: true, At: time.Now()}
+	h.guard = fakeGuardStatus{Mode: "report", Last: last}
+	if got := h.MemoryStatus(t.Context()).Guard; got == nil || got.Mode != "report" || got.Last != last {
+		t.Fatalf("guard = %+v, want the guard's own line", got)
+	}
+
+	h.memory = fakeMemoryFigures{err: errors.New("read host memory: no procfs")}
+	if got := h.MemoryStatus(t.Context()); !got.Unreadable || got.Guard == nil {
+		t.Fatalf("host unreadable: %+v, want unreadable with the guard line", got)
+	}
+
+	fig := testMemoryFigures()
+	fig.Top = nil
+	h.memory = fakeMemoryFigures{fig: fig, err: errors.New("read services: no system.slice")}
+	if got := h.MemoryStatus(t.Context()); got.Unreadable || got.Total != 62<<30 || got.Top != nil {
+		t.Fatalf("services unreadable: %+v, want the host figures without top", got)
+	}
+}
+
+func TestHealthReportsWeeklyMemoryLine(t *testing.T) {
+	t.Parallel()
+
+	now := time.Date(2026, 10, 18, 9, 0, 0, 0, time.UTC)
+	r := &fakeRunner{}
+	h := weeklyReports(nil, r, now)
+	h.checks = append(h.checks, memoryCheckName)
+	h.memory = fakeMemoryFigures{fig: testMemoryFigures()}
+	if err := h.weekly(t.Context(), now); err != nil {
+		t.Fatal(err)
+	}
+	want := "\nmemory: 45% available (28 of 62 GB), swap 25% used, stalled 3%; top: web-app 13 GB\n"
+	if len(r.pushed) != 1 || !strings.Contains(r.pushed[0][1], want) {
+		t.Fatalf("pushed = %q, want the memory line %q", r.pushed, want)
+	}
+}
+
+func TestMergeCheckSetsKeepsTheMemoryFigures(t *testing.T) {
+	t.Parallel()
+
+	if merged := mergeCheckSets([]checkSet{{}, {Memory: fakeMemoryFigures{}}}); merged.Memory == nil {
+		t.Fatal("mergeCheckSets dropped the memory figures")
 	}
 }

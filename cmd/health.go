@@ -74,6 +74,9 @@ type checkSet struct {
 	// weekly summary's services block; nil without those checks.
 	Stamps freshnessStamps
 	Probe  probeStatus
+	// Memory (the memory check) feeds /status and the weekly summary its
+	// figures; nil without the memory section.
+	Memory memoryFigures
 }
 
 // healthSetup is the outcome of loading the health configuration and claiming
@@ -176,6 +179,8 @@ func healthCheckProviders() fx.Option {
 		fx.Annotate(httpChecks, fx.ResultTags(healthCheckGroup)),
 		fx.Annotate(freshnessChecks, fx.ResultTags(healthCheckGroup)),
 		fx.Annotate(commandChecks, fx.ResultTags(healthCheckGroup)),
+		newContainerNames,
+		fx.Annotate(memoryChecks, fx.ResultTags(healthCheckGroup)),
 		modemProbeChecks,
 	)
 }
@@ -313,6 +318,9 @@ func newHealth(p healthParams) healthOut {
 		set.Persisters = append(set.Persisters, guard.persister())
 	}
 	reports := newHealthReports(p.Setup, set, p.Uptime, p.Logger)
+	if guard != nil {
+		reports.guard = guard
+	}
 	opts := runnerOptions(p.Setup, d, set, p.Uptime, p.Logger)
 	reports.hook(&opts)
 	r := runner.New(opts)
@@ -335,7 +343,7 @@ func newHealth(p healthParams) healthOut {
 	return healthOut{
 		Workers: []app.Worker{r},
 		Handlers: append([]telegram.Handler{
-			command.NewStatusCommand(p.Logger, p.Publisher, r),
+			command.NewStatusCommand(p.Logger, p.Publisher, r, reports),
 			command.NewClearCommand(p.Logger, p.Publisher, r),
 			retire,
 		}, reports.handlers(p.Logger, p.Publisher)...),
@@ -424,8 +432,9 @@ func registerStart(
 }
 
 // mergeCheckSets joins the check sets, ordering checks by name so the
-// runner's order does not depend on fx's value-group order. Drives, Stamps
-// and Probe are the first set's that has one (only one check type sets each).
+// runner's order does not depend on fx's value-group order. Drives, Stamps,
+// Probe and Memory are the first set's that has one (only one check type sets
+// each).
 func mergeCheckSets(sets []checkSet) checkSet {
 	var out checkSet
 	for i := range sets {
@@ -435,22 +444,23 @@ func mergeCheckSets(sets []checkSet) checkSet {
 		out.Persisters = append(out.Persisters, s.Persisters...)
 		out.Background = append(out.Background, s.Background...)
 		out.Fixes = append(out.Fixes, s.Fixes...)
-		if out.Temps == nil && s.Temps != nil {
-			out.Temps = s.Temps
-		}
-		if out.Drives == nil && s.Drives != nil {
-			out.Drives = s.Drives
-		}
-		if out.Stamps == nil && s.Stamps != nil {
-			out.Stamps = s.Stamps
-		}
-		if out.Probe == nil && s.Probe != nil {
-			out.Probe = s.Probe
-		}
+		setFirst(&out.Temps, s.Temps)
+		setFirst(&out.Drives, s.Drives)
+		setFirst(&out.Stamps, s.Stamps)
+		setFirst(&out.Probe, s.Probe)
+		setFirst(&out.Memory, s.Memory)
 	}
 	slices.SortStableFunc(out.Checks, func(a, b health.Check) int { return strings.Compare(a.Name, b.Name) })
 
 	return out
+}
+
+// setFirst sets *dst to v unless it is already set.
+func setFirst[T comparable](dst *T, v T) {
+	var zero T
+	if *dst == zero {
+		*dst = v
+	}
 }
 
 // configErrors turns configuration entry errors into start errors keyed
