@@ -317,6 +317,13 @@ func TestWarnLevelBoundaries(t *testing.T) {
 			"swap 80.1% used (801 of 1000 GB)",
 		},
 		{
+			"swap just above the ceiling reads one decimal up",
+			"memory/swap",
+			func(h *memory.Host) { h.SwapFree = 1996 * gb / 10 },
+			health.Bad,
+			"swap 80.1% used (800 of 1000 GB)",
+		},
+		{
 			"swap rounds down to the ceiling",
 			"memory/swap",
 			func(h *memory.Host) { h.SwapFree = 196 * gb },

@@ -59,8 +59,10 @@ Top: web-app 13 GB, db 9.1 GB, worker 2.4 GB
 Guard: report — last: would restart web-app 2 Oct 01:12
 ```
 
-When the problem list is too long it is shortened to its head and tail lines
-plus a line `… and N more` (N is the number of problems left out).
+When the problem list is too long for one message it keeps the first problems
+that fit, drops the later ones and ends with a line `… and N more` (N is the
+number of problems left out). The fixed lines around the list (the head lines
+before it and the memory block after it) are always kept.
 
 A reading close to its warn level shows one decimal, cut on the problem side,
 so it never prints as the level itself (14.96% at a floor of 15 reads `14.9%`).
