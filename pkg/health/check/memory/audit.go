@@ -35,7 +35,7 @@ const limitTextUnits = 4096 - 256
 
 // maxAuditRuns bounds the runs whose texts the audit remembers. Past that
 // many dropped runs in a row it falls back to known, the last matched set,
-// so a joiner may be announced twice but is never missed.
+// so the last applied run's joiners are announced once more.
 const maxAuditRuns = 8
 
 // audit decides which counted containers are joiners. The engine alone says
@@ -61,12 +61,13 @@ type auditRun struct {
 
 // applied returns the counted set of the last run the engine applied, found
 // by the engine's text; older runs are forgotten, as the engine will never
-// go back to them. The earliest run with that text is taken, so two runs
-// with one text (possible only past the cut) announce again rather than miss.
-// Without a match it returns known.
+// go back to them. Runs share a text only past the cut, where it can hide
+// different sets; the latest is taken, so a joiner is announced once, and
+// missed only if that latest run was the one dropped. Without a match it
+// returns known.
 func (a *audit) applied(text string) map[string]bool {
-	for i, run := range a.runs {
-		if run.text == text {
+	for i, v := range slices.Backward(a.runs) {
+		if run := v; run.text == text {
 			a.runs = a.runs[i:]
 			a.known = run.names
 
@@ -86,7 +87,7 @@ func (a *audit) remember(text string, names map[string]bool) {
 	}
 }
 
-// reset forgets everything: the set is empty and the condition resolves.
+// reset forgets everything once the engine has no open PROBLEM.
 func (a *audit) reset() {
 	a.known = map[string]bool{}
 	a.runs = nil
@@ -125,8 +126,8 @@ func (c *Check) judgeLimits(ctx context.Context, res *health.CheckResult, top *t
 			Key: keyLimit, Kind: health.State, Verdict: health.Good,
 			Text: "every container runs with a memory limit",
 		})
-		c.audit.reset()
-
+		// The audit is left as it was: if this run is dropped, the engine
+		// still has the PROBLEM open with the previous text.
 		return
 	}
 
@@ -135,7 +136,19 @@ func (c *Check) judgeLimits(ctx context.Context, res *health.CheckResult, top *t
 	res.Readings = append(res.Readings, health.Reading{
 		Key: keyLimit, Kind: health.State, Verdict: health.Bad, Text: text,
 	})
+	c.announceJoiners(res, named, counted, text)
+}
+
+// announceJoiners adds one event per counted container the last applied run
+// did not count, while the engine has the PROBLEM open, and remembers this
+// run's text and set. The caller holds c.audit.mu.
+func (c *Check) announceJoiners(res *health.CheckResult, named []namedContainer, counted map[string]bool, text string) {
 	open, last := c.settings.open(keyLimit)
+	if !open {
+		// No PROBLEM to join (resolved, cleared or still a streak): the one
+		// that opens next names everyone.
+		c.audit.reset()
+	}
 	known := c.audit.applied(last)
 	// An open PROBLEM with no set to compare against (its kv entry lost)
 	// takes the set silently rather than announcing all of it.

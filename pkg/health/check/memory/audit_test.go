@@ -603,3 +603,39 @@ func TestAuditFollowsTheEngineAfterALateLoad(t *testing.T) {
 	src.containers = append(src.containers, kept("cache"))
 	wantEvents(t, "once open", r.run(t), "cache")
 }
+
+// A run that counts nothing and is dropped leaves the open PROBLEM as it
+// was, so the joiner of the next applied run is still announced.
+func TestAuditAnnouncesAJoinerAfterADroppedGoodRun(t *testing.T) {
+	src := &fakeSource{host: healthy(), containers: []memory.Container{kept("web-app")}}
+	r := newRig(src, 0)
+	r.run(t)
+
+	src.containers = nil
+	r.drop()
+	src.containers = []memory.Container{kept("web-app"), kept("queue-ok")}
+	wantEvents(t, "first applied run", r.run(t), "queue-ok")
+	wantEvents(t, "next run", r.run(t))
+}
+
+// Past the cut, two sets can share one text: a joiner hidden behind
+// "… and K more" is announced once, not on every run the text stays.
+func TestAuditAnnouncesAHiddenJoinerOnceWhenCutTextsCollide(t *testing.T) {
+	shown := make([]memory.Container, 0, 40)
+	for i := range 40 {
+		shown = append(shown, kept(fmt.Sprintf("a%02d-%s", i, strings.Repeat("x", 100))))
+	}
+	src := &fakeSource{host: healthy(), containers: append(slices.Clone(shown), kept("z1"), kept("z2"))}
+	r := newRig(src, 0)
+	r.run(t)
+
+	// z1 leaves and z3 joins: the count and the shown names stay the same.
+	src.containers = append(slices.Clone(shown), kept("z2"), kept("z3"))
+	if c, _ := r.eng.Condition(keyLimit); !strings.Contains(c.LastText, "more") {
+		t.Fatalf("text %.80q… is not cut", c.LastText)
+	}
+	wantEvents(t, "the join", r.run(t), "z3")
+	for i := range 3 {
+		wantEvents(t, fmt.Sprintf("run %d after the join", i), r.run(t))
+	}
+}
