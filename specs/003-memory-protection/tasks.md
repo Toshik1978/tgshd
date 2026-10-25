@@ -76,7 +76,7 @@ independently. No new dependency may be added (plan Technical Context).
 
 **Independent Test**: quickstart.md "Memory check" row US3.
 
-- [ ] T016 [US3] Limit audit in pkg/health/check/memory/audit.go: `memory/limit/<container>` opens for a running container with limit 0 not in `audit_exclude`, resolves when it runs with a limit or stops; the check's `Source` gains containers with `HasLimit` from the Docker adapter (T004) in cmd/health_memory.go (depends on T013) (tests in pkg/health/check/memory/audit_test.go: US3-1, US3-2, US3-3, stopped container) (FR-018)
+- [x] T016 [US3] Limit audit in pkg/health/check/memory/audit.go: `memory/limit/<container>` opens for a running container with limit 0 not in `audit_exclude`, resolves when it runs with a limit or stops; the check's `Source` gains containers with `HasLimit` from the Docker adapter (T004) in cmd/health_memory.go (depends on T013) (tests in pkg/health/check/memory/audit_test.go: US3-1, US3-2, US3-3, stopped container) (FR-018)
 
 ---
 

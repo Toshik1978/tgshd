@@ -61,8 +61,21 @@ type Process struct {
 	RSS  uint64
 }
 
+// Container is a Docker container as the limit audit sees it. Name is the
+// container name; HasLimit is true when it runs under a memory limit.
+type Container struct {
+	Name     string
+	Running  bool
+	HasLimit bool
+}
+
+// ErrNoContainers is returned by Source.Containers on a host without a
+// reachable container runtime; the audit then stays silent.
+var ErrNoContainers = errors.New("no container runtime")
+
 // Source reads the host. A zero Process (empty Name) means none was found.
 type Source interface {
+	Containers(ctx context.Context) ([]Container, error)
 	Host(ctx context.Context) (Host, error)
 	Services(ctx context.Context) ([]Service, error)
 	TopProcess(ctx context.Context) (Process, error)
@@ -78,6 +91,9 @@ type Settings struct {
 	// warning is off when either is zero. GrowthWarn is in bytes.
 	GrowthWindow time.Duration
 	GrowthWarn   uint64
+
+	// AuditExclude lists containers allowed to run without a memory limit.
+	AuditExclude []string
 
 	// Now is the clock; time.Now when nil.
 	Now func() time.Time
@@ -96,6 +112,7 @@ type Check struct {
 	source   Source
 	settings Settings
 	growth   growth
+	audit    audit
 }
 
 // New builds the check.
@@ -125,6 +142,7 @@ func (c *Check) Run(ctx context.Context) health.CheckResult {
 		res.Err = errors.Join(res.Err, health.CheckError{Subject: "pressure", Kind: "unavailable", Err: ErrNoPressure})
 	}
 	c.judgeGrowth(ctx, &res)
+	c.judgeLimits(ctx, &res)
 	res.Err = errors.Join(res.Err, top.err())
 
 	return res

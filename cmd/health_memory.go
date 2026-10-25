@@ -17,7 +17,6 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/Toshik1978/tgshd/pkg/health"
-	"github.com/Toshik1978/tgshd/pkg/health/check/memory"
 	hcfg "github.com/Toshik1978/tgshd/pkg/health/config"
 	"github.com/Toshik1978/tgshd/pkg/health/memguard"
 	"github.com/Toshik1978/tgshd/pkg/health/report"
@@ -653,100 +652,4 @@ func (s *guardState) restored() []memguard.Record {
 	defer s.mu.Unlock()
 
 	return s.records
-}
-
-// memoryChecks provides the memory check when the memory section is present.
-// Each run also refreshes the container id→name map the guard reads; the
-// guard refreshes it on its own as well.
-func memoryChecks(hs *healthSetup, d *lazyDocker, names *containerNames, logger *zap.Logger) checkSet {
-	if hs.Config == nil || hs.Config.Memory == nil {
-		return checkSet{}
-	}
-	src := memorySource{sampler: guardSampler{mem: procmem.NewDefault(), cgroups: cgroupmem.NewDefault(), names: names}}
-
-	return buildMemoryCheck(hs.Config.Memory, src, d, logger)
-}
-
-// buildMemoryCheck builds the memory check over src. Its growth history is
-// persisted under memoryGrowthKey and its figures feed /status and the
-// weekly summary.
-func buildMemoryCheck(m *hcfg.Memory, src memorySource, lister containerLister, logger *zap.Logger) checkSet {
-	chk := memory.New(src, memory.Settings{
-		WarnAvailablePercent: m.WarnAvailablePercent,
-		WarnSwapPercent:      m.WarnSwapPercent,
-		WarnPressurePercent:  m.WarnPressurePercent,
-		GrowthWindow:         m.GrowthWindow.Duration(),
-		GrowthWarn:           m.GrowthWarn.Bytes(),
-	})
-	names := &nameRefresher{names: src.sampler.names, lister: lister, log: logger, who: "Memory check"}
-	common := hcfg.Common{
-		Interval: m.Interval, Threshold: m.Threshold, Mode: m.Mode, PauseInQuietWindows: m.PauseInQuietWindows,
-	}
-	run := func(ctx context.Context) health.CheckResult {
-		names.refresh(ctx)
-
-		return chk.Run(ctx)
-	}
-
-	return checkSet{
-		Checks:     []health.Check{newCheck(memoryCheckName, common, run)},
-		Persisters: []runner.Persister{runner.KVPersister{Key: memoryGrowthKey, State: bytesKV{state: chk}}},
-		Memory:     chk,
-	}
-}
-
-// memorySource reads the host for the memory check over procmem and
-// cgroupmem, naming containers as the guard does.
-type memorySource struct {
-	sampler guardSampler
-}
-
-// Host implements memory.Source. A host without PSI has no pressure; any
-// other failure to read it fails the read.
-func (s memorySource) Host(context.Context) (memory.Host, error) {
-	info, err := s.sampler.mem.ReadMemInfo()
-	if err != nil {
-		return memory.Host{}, fmt.Errorf("read host memory: %w", err)
-	}
-	host := memory.Host{
-		Total:     info.Total,
-		Available: info.Available,
-		SwapTotal: info.SwapTotal,
-		SwapFree:  info.SwapFree,
-	}
-	psi, err := s.sampler.mem.ReadPressure()
-	switch {
-	case errors.Is(err, procmem.ErrNoPressure):
-		return host, nil
-	case err != nil:
-		return memory.Host{}, fmt.Errorf("read memory pressure: %w", err)
-	}
-	host.SomeAvg60, host.FullAvg10, host.HasPressure = psi.SomeAvg60, psi.FullAvg10, true
-
-	return host, nil
-}
-
-// Services implements memory.Source: the services the guard samples, by
-// display name.
-func (s memorySource) Services(context.Context) ([]memory.Service, error) {
-	samples, err := s.sampler.Services(nil)
-	if err != nil {
-		return nil, err
-	}
-	out := make([]memory.Service, len(samples))
-	for i, sm := range samples {
-		out[i] = memory.Service{Name: sm.Name, Anon: sm.Anon}
-	}
-
-	return out, nil
-}
-
-// TopProcess implements memory.Source.
-func (s memorySource) TopProcess(context.Context) (memory.Process, error) {
-	top, err := s.sampler.TopProcess()
-	if err != nil {
-		return memory.Process{}, err
-	}
-
-	return memory.Process{Name: top.Name, PID: top.PID, RSS: top.Size}, nil
 }

@@ -20,6 +20,7 @@ import (
 	"github.com/Toshik1978/tgshd/pkg/health/check/containers"
 	"github.com/Toshik1978/tgshd/pkg/health/check/freshness"
 	"github.com/Toshik1978/tgshd/pkg/health/check/httpcheck"
+	"github.com/Toshik1978/tgshd/pkg/health/check/memory"
 	"github.com/Toshik1978/tgshd/pkg/health/check/network"
 	hcfg "github.com/Toshik1978/tgshd/pkg/health/config"
 	"github.com/Toshik1978/tgshd/pkg/health/runner"
@@ -560,6 +561,25 @@ func (d *lazyDocker) ContainerNames(ctx context.Context) (map[string]string, err
 	}
 
 	return names, nil
+}
+
+// AuditContainers lists every container with whether it runs under a memory
+// limit, for the memory check's limit audit.
+func (d *lazyDocker) AuditContainers(ctx context.Context) ([]memory.Container, error) {
+	api, err := d.client()
+	if err != nil {
+		return nil, err
+	}
+	list, err := api.List(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("docker: %w", err)
+	}
+	out := make([]memory.Container, len(list))
+	for i := range list {
+		out[i] = memory.Container{Name: list[i].Name, Running: list[i].Running, HasLimit: list[i].MemoryLimit > 0}
+	}
+
+	return out, nil
 }
 
 // Close closes the client when it was built.

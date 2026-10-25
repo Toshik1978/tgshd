@@ -2353,3 +2353,57 @@ func closedChan() chan struct{} {
 
 	return c
 }
+
+// fakeAuditor is the container list of the limit audit.
+type fakeAuditor struct {
+	list []memory.Container
+	err  error
+}
+
+func (f fakeAuditor) AuditContainers(context.Context) ([]memory.Container, error) {
+	return f.list, f.err
+}
+
+func TestMemoryCheckAuditsContainerLimits(t *testing.T) {
+	t.Parallel()
+
+	f := newGuardFakes(guardT0())
+	section := testMemoryCheckSection()
+	section.AuditExclude = []string{"scratch-job"}
+	src := memorySource{
+		sampler: guardSampler{mem: f.mem, cgroups: f.cgroups, names: f.names},
+		containers: fakeAuditor{list: []memory.Container{
+			{Name: "web-app", Running: true}, {Name: "scratch-job", Running: true},
+		}},
+	}
+	c := buildMemoryCheck(section, src, f.containers, zap.NewNop()).Checks[0]
+
+	res := c.Run(t.Context())
+
+	var got []health.Reading
+	for _, r := range res.Readings {
+		if strings.HasPrefix(r.Key, "memory/limit/") {
+			got = append(got, r)
+		}
+	}
+	if len(got) != 1 || got[0].Key != "memory/limit/web-app" || got[0].Verdict != health.Bad {
+		t.Fatalf("limit readings = %+v, want only web-app open (scratch-job excluded)", got)
+	}
+}
+
+func TestMemorySourceContainers(t *testing.T) {
+	t.Parallel()
+
+	if _, err := (memorySource{}).Containers(t.Context()); !errors.Is(err, memory.ErrNoContainers) {
+		t.Fatalf("no auditor: err = %v, want ErrNoContainers", err)
+	}
+	gone := memorySource{containers: fakeAuditor{err: fmt.Errorf("%w: boom", errDockerUnavailable)}}
+	if _, err := gone.Containers(t.Context()); !errors.Is(err, memory.ErrNoContainers) {
+		t.Fatalf("docker unavailable: err = %v, want ErrNoContainers", err)
+	}
+	other := errors.New("engine error")
+	failing := memorySource{containers: fakeAuditor{err: other}}
+	if _, err := failing.Containers(t.Context()); !errors.Is(err, other) || errors.Is(err, memory.ErrNoContainers) {
+		t.Fatalf("engine error: err = %v, want it passed through", err)
+	}
+}

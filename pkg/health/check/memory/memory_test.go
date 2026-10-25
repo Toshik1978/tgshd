@@ -19,6 +19,9 @@ type fakeSource struct {
 	process  memory.Process
 	procErr  error
 	svcCalls int
+
+	containers []memory.Container
+	ctrErr     error
 }
 
 func (f *fakeSource) Host(context.Context) (memory.Host, error) { return f.host, f.hostErr }
@@ -29,6 +32,10 @@ func (f *fakeSource) Services(context.Context) ([]memory.Service, error) {
 }
 
 func (f *fakeSource) TopProcess(context.Context) (memory.Process, error) { return f.process, f.procErr }
+
+func (f *fakeSource) Containers(context.Context) ([]memory.Container, error) {
+	return f.containers, f.ctrErr
+}
 
 func settings() memory.Settings {
 	return memory.Settings{WarnAvailablePercent: 15, WarnSwapPercent: 80, WarnPressurePercent: 10}

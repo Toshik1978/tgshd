@@ -30,6 +30,7 @@ import (
 	"github.com/Toshik1978/tgshd/pkg/health/check/command"
 	"github.com/Toshik1978/tgshd/pkg/health/check/freshness"
 	"github.com/Toshik1978/tgshd/pkg/health/check/httpcheck"
+	"github.com/Toshik1978/tgshd/pkg/health/check/memory"
 	hcfg "github.com/Toshik1978/tgshd/pkg/health/config"
 	"github.com/Toshik1978/tgshd/pkg/health/runner"
 	"github.com/Toshik1978/tgshd/pkg/health/store"
@@ -1052,6 +1053,35 @@ func TestLazyDockerForTheMemoryGuard(t *testing.T) {
 		t.Fatalf("no client: err = %v, want errDockerUnavailable", err)
 	}
 	if err := broken.Stop(t.Context(), "web-app"); !errors.Is(err, errDockerUnavailable) {
+		t.Fatalf("no client: err = %v, want errDockerUnavailable", err)
+	}
+}
+
+func TestLazyDockerAuditsMemoryLimits(t *testing.T) {
+	t.Parallel()
+
+	api := &fakeDocker{containers: map[string]docker.Container{
+		"web-app": {Name: "web-app", Running: true},
+		"db":      {Name: "db", Running: true, MemoryLimit: 4 << 30},
+		"backup":  {Name: "backup", Running: false},
+	}}
+	d := lazyOver(api, nil)
+
+	list, err := d.AuditContainers(t.Context())
+	slices.SortFunc(list, func(a, b memory.Container) int { return strings.Compare(a.Name, b.Name) })
+	want := []memory.Container{
+		{Name: "backup"}, {Name: "db", Running: true, HasLimit: true}, {Name: "web-app", Running: true},
+	}
+	if err != nil || !slices.Equal(list, want) {
+		t.Fatalf("AuditContainers() = %+v, %v; want %+v", list, err, want)
+	}
+
+	api.err = errors.New("engine error")
+	if _, err := d.AuditContainers(t.Context()); !errors.Is(err, api.err) {
+		t.Fatalf("failed list: err = %v", err)
+	}
+	broken := lazyOver(nil, errors.New("bad DOCKER_HOST"))
+	if _, err := broken.AuditContainers(t.Context()); !errors.Is(err, errDockerUnavailable) {
 		t.Fatalf("no client: err = %v, want errDockerUnavailable", err)
 	}
 }
