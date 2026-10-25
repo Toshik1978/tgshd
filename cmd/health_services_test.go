@@ -50,8 +50,8 @@ func (f *fakeDocker) List(context.Context) ([]docker.Container, error) {
 		return nil, f.err
 	}
 	out := make([]docker.Container, 0, len(f.containers))
-	for _, c := range f.containers {
-		out = append(out, c)
+	for name := range f.containers {
+		out = append(out, f.containers[name])
 	}
 
 	return out, nil

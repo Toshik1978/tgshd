@@ -17,6 +17,7 @@ type Config struct {
 	Freshness    []Freshness
 	Command      []Command
 	ModemProbe   *ModemProbe
+	Memory       *Memory
 }
 
 // General holds daemon-wide settings. It is always present.

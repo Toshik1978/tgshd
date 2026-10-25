@@ -116,3 +116,33 @@ func defaultModemProbe() ModemProbe {
 func defaultFix() Fix {
 	return Fix{After: 2, MaxPerHour: 3, GraceAfterStart: Duration(2 * time.Minute)}
 }
+
+func defaultMemory() Memory {
+	return Memory{
+		Interval:            Duration(time.Minute),
+		Threshold:           Duration(5 * time.Minute),
+		Mode:                ModeTLG,
+		PauseInQuietWindows: true,
+
+		WarnAvailablePercent: 15,
+		WarnSwapPercent:      80,
+		WarnPressurePercent:  10,
+		GrowthWindow:         Duration(time.Hour),
+		GrowthWarn:           4 << 30,
+		AuditExclude:         []string{},
+
+		Guard: Guard{
+			Intervene:              InterveneReport,
+			NeverTouch:             []string{},
+			DangerAvailablePercent: 5,
+			DangerPressurePercent:  20,
+			DangerFor:              Duration(30 * time.Second),
+			CulpritWindow:          Duration(10 * time.Minute),
+			CulpritMinGrowth:       1 << 30,
+			RepeatWindow:           Duration(6 * time.Hour),
+			RecoveryWindow:         Duration(2 * time.Minute),
+			ActionTimeout:          Duration(time.Minute),
+			FailedMode:             ModeSMS,
+		},
+	}
+}

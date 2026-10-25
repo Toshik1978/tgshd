@@ -533,12 +533,20 @@ func (r *Runner) CheckerError(key, text string) {
 // an event keyed by check with the one-line record instead of text, at the
 // next checkpoint.
 func (r *Runner) Push(ctx context.Context, check, text, record string) {
+	r.PushMode(ctx, check, check, text, record, health.ModeDefault)
+}
+
+// PushMode is Push for an event with its own key, distinct from the check's,
+// and a delivery mode (health.ModeDefault uses the notifier's default).
+func (r *Runner) PushMode(ctx context.Context, check, key, text, record string, mode health.Mode) {
 	// Notify queues a failed delivery and retries it; its error is always nil.
-	_ = r.notifier.Notify(ctx, notify.Message{Kind: notify.KindEvent, Check: check, Key: check, Text: text})
+	_ = r.notifier.Notify(ctx, notify.Message{
+		Kind: notify.KindEvent, Check: check, Key: key, Text: text, Mode: notify.Mode(mode),
+	})
 
 	r.mu.Lock()
 	r.logged = append(r.logged, store.Alert{
-		At: r.opts.Now(), Kind: store.KindEvent, Check: check, Key: check, Text: record,
+		At: r.opts.Now(), Kind: store.KindEvent, Check: check, Key: key, Text: record,
 	})
 	r.mu.Unlock()
 }

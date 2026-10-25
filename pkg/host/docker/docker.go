@@ -22,6 +22,7 @@ var ErrNotFound = errors.New("container not found")
 
 // Container is the safe subset of container state.
 type Container struct {
+	ID            string // full 64-hex id, as in the docker-<id>.scope cgroup name
 	Name          string
 	RestartPolicy string
 	Running       bool
@@ -29,6 +30,7 @@ type Container struct {
 	Health        string
 	RestartCount  int
 	StartedAt     time.Time
+	MemoryLimit   int64 // HostConfig.Memory in bytes; 0 means no limit
 }
 
 // engine is the subset of the Engine API client the adapter uses.
@@ -40,6 +42,9 @@ type engine interface {
 	ContainerRestart(
 		ctx context.Context, id string, options client.ContainerRestartOptions,
 	) (client.ContainerRestartResult, error)
+	ContainerStop(
+		ctx context.Context, id string, options client.ContainerStopOptions,
+	) (client.ContainerStopResult, error)
 	Close() error
 }
 
@@ -123,6 +128,18 @@ func (c *Client) Restart(ctx context.Context, name string) error {
 	return nil
 }
 
+// Stop stops the named container.
+func (c *Client) Stop(ctx context.Context, name string) error {
+	ctx, cancel := context.WithTimeout(ctx, 2*callTimeout)
+	defer cancel()
+
+	if _, err := c.api.ContainerStop(ctx, name, client.ContainerStopOptions{}); err != nil {
+		return fmt.Errorf("stop container %q: %w", name, err)
+	}
+
+	return nil
+}
+
 // missing reports whether a list filtered by name proves the container does
 // not exist. The name filter matches substrings, so the names are compared
 // exactly. A failing re-list proves nothing.
@@ -172,11 +189,13 @@ func (c *Client) inspect(ctx context.Context, id string) (container.InspectRespo
 // mapContainer copies the allowed fields out of an inspect response.
 func mapContainer(in container.InspectResponse) Container {
 	out := Container{
+		ID:           in.ID,
 		Name:         strings.TrimPrefix(in.Name, "/"),
 		RestartCount: in.RestartCount,
 	}
 	if in.HostConfig != nil {
 		out.RestartPolicy = string(in.HostConfig.RestartPolicy.Name)
+		out.MemoryLimit = in.HostConfig.Memory
 	}
 	if in.State != nil {
 		out.Running = in.State.Running

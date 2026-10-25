@@ -482,3 +482,57 @@ func cmpDefault(v, def int) int {
 
 	return v
 }
+
+var memoryNamePattern = regexp.MustCompile(`^[A-Za-z0-9_.@-]+$`)
+
+func validateMemory(m *Memory, p *problems) {
+	p.interval("interval", m.Interval)
+	p.nonNegative("threshold", m.Threshold)
+	p.oneOf("mode", string(m.Mode), string(ModeTLG), string(ModeSMS), string(ModeTLGOrSMS))
+
+	p.percent("warn_available_percent", m.WarnAvailablePercent, 99)
+	p.percent("warn_swap_percent", m.WarnSwapPercent, 100)
+	p.percent("warn_pressure_percent", m.WarnPressurePercent, 100)
+	p.durationRange("growth_window", m.GrowthWindow, 10*time.Minute, 24*time.Hour)
+	validateMemoryNames(p, "audit_exclude", m.AuditExclude)
+
+	g := &m.Guard
+	p.oneOf("intervene", string(g.Intervene), string(InterveneOff), string(InterveneReport), string(InterveneAct))
+	validateMemoryNames(p, "never_touch", g.NeverTouch)
+	p.percent("danger_available_percent", g.DangerAvailablePercent, 50)
+	p.percent("danger_pressure_percent", g.DangerPressurePercent, 100)
+
+	if g.DangerAvailablePercent >= m.WarnAvailablePercent {
+		p.addf("danger_available_percent %d must be below warn_available_percent %d",
+			g.DangerAvailablePercent, m.WarnAvailablePercent)
+	}
+
+	p.durationRange("danger_for", g.DangerFor, 5*time.Second, 5*time.Minute)
+	p.durationRange("culprit_window", g.CulpritWindow, time.Minute, time.Hour)
+	p.nonNegative("repeat_window", g.RepeatWindow)
+	p.durationRange("recovery_window", g.RecoveryWindow, 30*time.Second, 30*time.Minute)
+	p.durationRange("action_timeout", g.ActionTimeout, 10*time.Second, 5*time.Minute)
+	p.oneOf("failed_mode", string(g.FailedMode), string(ModeTLG), string(ModeSMS), string(ModeTLGOrSMS))
+}
+
+// percent requires a percentage within 1-hi.
+func (p *problems) percent(key string, v, hi int) {
+	if v < 1 || v > hi {
+		p.addf("%s %d must be within 1-%d", key, v, hi)
+	}
+}
+
+func (p *problems) durationRange(key string, d Duration, lo, hi time.Duration) {
+	if d.Duration() < lo || d.Duration() > hi {
+		p.addf("%s %v must be within %v-%v", key, d.Duration(), lo, hi)
+	}
+}
+
+// validateMemoryNames requires container or systemd unit names.
+func validateMemoryNames(p *problems, key string, names []string) {
+	for _, n := range names {
+		if !memoryNamePattern.MatchString(n) {
+			p.addf("%s entry %q must match [A-Za-z0-9_.@-]+", key, n)
+		}
+	}
+}

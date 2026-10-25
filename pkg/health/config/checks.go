@@ -89,3 +89,45 @@ type ModemProbe struct {
 	MaxSilence  Duration     `yaml:"max_silence"`
 	Weekday     time.Weekday `yaml:"-"`
 }
+
+// Memory is the memory check and, nested under Guard, the independent memory
+// guard. It takes the common keys that apply to a warning check, but not
+// needs_internet, depends_on or summary_group, so it does not embed Common.
+type Memory struct {
+	Interval  Duration `yaml:"interval"`
+	Threshold Duration `yaml:"threshold"`
+	Mode      Mode     `yaml:"mode"`
+	// PauseInQuietWindows holds the warnings back during quiet windows; the
+	// guard never pauses.
+	PauseInQuietWindows bool `yaml:"pause_in_quiet_windows"`
+
+	WarnAvailablePercent int      `yaml:"warn_available_percent"`
+	WarnSwapPercent      int      `yaml:"warn_swap_percent"`
+	WarnPressurePercent  int      `yaml:"warn_pressure_percent"`
+	GrowthWindow         Duration `yaml:"growth_window"`
+	GrowthWarn           Size     `yaml:"growth_warn"`
+	// AuditExclude lists containers allowed to run without a memory limit.
+	AuditExclude []string `yaml:"audit_exclude"`
+
+	Guard Guard `yaml:"guard"`
+}
+
+// Guard configures the memory guard. FailedMode is the delivery of reports
+// that tgshd could not fix the problem.
+type Guard struct {
+	Intervene Intervene `yaml:"intervene"`
+	// NeverTouch lists container names or systemd unit names that the guard
+	// never stops or restarts.
+	NeverTouch []string `yaml:"never_touch"`
+
+	DangerAvailablePercent int      `yaml:"danger_available_percent"`
+	DangerPressurePercent  int      `yaml:"danger_pressure_percent"`
+	DangerFor              Duration `yaml:"danger_for"`
+	CulpritWindow          Duration `yaml:"culprit_window"`
+	CulpritMinGrowth       Size     `yaml:"culprit_min_growth"`
+	// RepeatWindow 0 disables the stop rule (always restart).
+	RepeatWindow   Duration `yaml:"repeat_window"`
+	RecoveryWindow Duration `yaml:"recovery_window"`
+	ActionTimeout  Duration `yaml:"action_timeout"`
+	FailedMode     Mode     `yaml:"failed_mode"`
+}

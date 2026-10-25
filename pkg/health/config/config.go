@@ -35,6 +35,16 @@ const (
 	ModeTLGOrSMS Mode = "tlg-or-sms"
 )
 
+// Intervene selects what the memory guard does about a dangerous situation.
+type Intervene string
+
+// Memory guard intervention levels.
+const (
+	InterveneOff    Intervene = "off"
+	InterveneReport Intervene = "report"
+	InterveneAct    Intervene = "act"
+)
+
 // Content selects how a freshness file is interpreted.
 type Content string
 
@@ -131,6 +141,7 @@ func Parse(data []byte, file string) (*Config, []EntryError) {
 	cfg.Kernel = section(r, top, "kernel", defaultKernel(), validateKernel)
 	cfg.Containers = section(r, top, "containers", defaultContainers(), validateContainers)
 	cfg.ModemProbe = section(r, top, "modem_probe", defaultModemProbe(), validateModemProbe)
+	cfg.Memory = section(r, top, "memory", defaultMemory(), validateMemory)
 	cfg.HTTP = list(r, top, "http", defaultHTTP, ignoreNode(validateHTTP))
 	cfg.Freshness = list(r, top, "freshness", defaultFreshness, validateFreshness)
 	cfg.Command = list(r, top, "command", defaultCommand, ignoreNode(validateCommand))
@@ -143,7 +154,7 @@ func Parse(data []byte, file string) (*Config, []EntryError) {
 // reportUnknownSections reports every unknown top-level key as its own entry
 // error so one typo does not disable the other checks.
 func reportUnknownSections(r *reporter, top map[string]yaml.Node) {
-	known := append([]string{"general", "summary"}, checkKinds()...)
+	known := append([]string{"general", "summary", "memory"}, checkKinds()...)
 
 	var unknown []string
 

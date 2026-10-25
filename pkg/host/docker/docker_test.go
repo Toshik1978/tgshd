@@ -18,6 +18,7 @@ func TestMapContainer(t *testing.T) {
 		{
 			name: "running healthy",
 			in: container.InspectResponse{
+				ID:           "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
 				Name:         "/web",
 				RestartCount: 3,
 				Path:         "/secret-binary",
@@ -25,6 +26,7 @@ func TestMapContainer(t *testing.T) {
 				Config:       &container.Config{Env: []string{"PASSWORD=x"}, Labels: map[string]string{"a": "b"}},
 				HostConfig: &container.HostConfig{
 					RestartPolicy: container.RestartPolicy{Name: container.RestartPolicyAlways},
+					Memory:        536870912,
 				},
 				State: &container.State{
 					Status: container.StateRunning, Running: true,
@@ -33,7 +35,8 @@ func TestMapContainer(t *testing.T) {
 				},
 			},
 			want: Container{
-				Name: "web", RestartPolicy: "always", Running: true, Status: "running",
+				ID:   "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+				Name: "web", MemoryLimit: 536870912, RestartPolicy: "always", Running: true, Status: "running",
 				Health: "healthy", RestartCount: 3, StartedAt: started,
 			},
 		},

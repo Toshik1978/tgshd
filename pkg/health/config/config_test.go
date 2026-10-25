@@ -954,3 +954,244 @@ func TestExampleConfigIsValid(t *testing.T) {
 		t.Fatalf("entry errors: %+v", errs)
 	}
 }
+
+func TestMemoryDefaults(t *testing.T) {
+	if cfg := mustParse(t, ""); cfg.Memory != nil {
+		t.Fatalf("absent memory must be nil: %+v", cfg.Memory)
+	}
+
+	m := mustParse(t, "memory:\n").Memory
+	if m == nil {
+		t.Fatal("present memory section must not be nil")
+	}
+
+	if m.Interval.Duration() != time.Minute || m.Threshold.Duration() != 5*time.Minute ||
+		m.Mode != config.ModeTLG || !m.PauseInQuietWindows {
+		t.Errorf("common defaults = %+v", m)
+	}
+	if m.WarnAvailablePercent != 15 || m.WarnSwapPercent != 80 || m.WarnPressurePercent != 10 ||
+		m.GrowthWindow.Duration() != time.Hour || m.GrowthWarn != 4<<30 ||
+		len(m.AuditExclude) != 0 {
+		t.Errorf("warning defaults = %+v", m)
+	}
+
+	g := m.Guard
+	if g.Intervene != config.InterveneReport || len(g.NeverTouch) != 0 || g.DangerAvailablePercent != 5 ||
+		g.DangerPressurePercent != 20 || g.DangerFor.Duration() != 30*time.Second ||
+		g.CulpritWindow.Duration() != 10*time.Minute || g.CulpritMinGrowth != 1<<30 ||
+		g.RepeatWindow.Duration() != 6*time.Hour || g.RecoveryWindow.Duration() != 2*time.Minute ||
+		g.ActionTimeout.Duration() != time.Minute || g.FailedMode != config.ModeSMS {
+		t.Errorf("guard defaults = %+v", g)
+	}
+}
+
+func TestMemoryParsed(t *testing.T) {
+	m := mustParse(t, `
+memory:
+  interval: 2m
+  threshold: 0s
+  mode: tlg-or-sms
+  pause_in_quiet_windows: false
+  warn_available_percent: 20
+  warn_swap_percent: 90
+  warn_pressure_percent: 15
+  growth_window: 2h
+  growth_warn: 512MB
+  audit_exclude: [scratch-job, "a.b@c_d-e"]
+  guard:
+    intervene: act
+    never_touch: [db, backup.service]
+    danger_available_percent: 8
+    danger_pressure_percent: 30
+    danger_for: 1m
+    culprit_window: 20m
+    culprit_min_growth: 2GB
+    repeat_window: 0
+    recovery_window: 5m
+    action_timeout: 2m
+    failed_mode: tlg
+`).Memory
+	if m.Interval.Duration() != 2*time.Minute || m.Mode != config.ModeTLGOrSMS || m.PauseInQuietWindows ||
+		m.WarnAvailablePercent != 20 || m.WarnSwapPercent != 90 || m.WarnPressurePercent != 15 ||
+		m.GrowthWindow.Duration() != 2*time.Hour || m.GrowthWarn != 512<<20 ||
+		len(m.AuditExclude) != 2 || m.AuditExclude[0] != "scratch-job" {
+		t.Errorf("memory = %+v", m)
+	}
+
+	g := m.Guard
+	if g.Intervene != config.InterveneAct || len(g.NeverTouch) != 2 || g.NeverTouch[1] != "backup.service" ||
+		g.DangerAvailablePercent != 8 || g.DangerPressurePercent != 30 || g.DangerFor.Duration() != time.Minute ||
+		g.CulpritWindow.Duration() != 20*time.Minute || g.CulpritMinGrowth != 2<<30 || g.RepeatWindow != 0 ||
+		g.RecoveryWindow.Duration() != 5*time.Minute || g.ActionTimeout.Duration() != 2*time.Minute ||
+		g.FailedMode != config.ModeTLG {
+		t.Errorf("guard = %+v", g)
+	}
+
+	for _, v := range []string{"off", "report", "act"} {
+		got := mustParse(t, "memory: {guard: {intervene: "+v+"}}\n").Memory.Guard.Intervene
+		if string(got) != v {
+			t.Errorf("intervene %q parsed as %q", v, got)
+		}
+	}
+}
+
+// TestMemoryRanges: every range accepts its edges and rejects one step outside.
+func TestMemoryRanges(t *testing.T) {
+	tests := []struct {
+		key, section string
+		ok, bad      []string
+	}{
+		{"warn_available_percent", "", []string{"6", "99"}, []string{"0", "100"}},
+		{"warn_swap_percent", "", []string{"1", "100"}, []string{"0", "101"}},
+		{"warn_pressure_percent", "", []string{"1", "100"}, []string{"0", "101"}},
+		{"growth_window", "", []string{"10m", "24h"}, []string{"9m59s", "24h1s"}},
+		{"danger_available_percent", "guard", []string{"1", "14"}, []string{"0", "15"}},
+		{"danger_pressure_percent", "guard", []string{"1", "100"}, []string{"0", "101"}},
+		{"danger_for", "guard", []string{"5s", "5m"}, []string{"4s", "5m1s"}},
+		{"culprit_window", "guard", []string{"1m", "1h"}, []string{"59s", "1h1s"}},
+		{"repeat_window", "guard", []string{"0", "1s", "6h"}, []string{"-1s"}},
+		{"recovery_window", "guard", []string{"30s", "30m"}, []string{"29s", "30m1s"}},
+		{"action_timeout", "guard", []string{"10s", "5m"}, []string{"9s", "5m1s"}},
+		{"interval", "", []string{"30s"}, []string{"29s"}},
+		{"threshold", "", []string{"0s"}, []string{"-1s"}},
+	}
+
+	doc := func(section, key, v string) string {
+		if section == "" {
+			return "memory: {" + key + ": " + v + "}\n"
+		}
+
+		return "memory: {" + section + ": {" + key + ": " + v + "}}\n"
+	}
+
+	for _, tt := range tests {
+		for _, v := range tt.ok {
+			cfg, errs := config.Parse([]byte(doc(tt.section, tt.key, v)), "health.yaml")
+			if len(errs) != 0 || cfg.Memory == nil {
+				t.Errorf("%s=%s must be valid: %+v", tt.key, v, errs)
+			}
+		}
+
+		for _, v := range tt.bad {
+			cfg, errs := config.Parse([]byte(doc(tt.section, tt.key, v)), "health.yaml")
+			if len(errs) != 1 || errs[0].Entry != "memory" || !strings.Contains(errs[0].Reason, tt.key) {
+				t.Errorf("%s=%s must be one memory error naming the key: %+v", tt.key, v, errs)
+			}
+			if cfg.Memory != nil {
+				t.Errorf("%s=%s: invalid section must be skipped", tt.key, v)
+			}
+		}
+	}
+}
+
+func TestMemoryDangerBelowWarn(t *testing.T) {
+	tests := []struct {
+		doc string
+		ok  bool
+	}{
+		{"memory: {warn_available_percent: 10, guard: {danger_available_percent: 9}}", true},
+		{"memory: {warn_available_percent: 10, guard: {danger_available_percent: 10}}", false},
+		{"memory: {warn_available_percent: 3}", false}, // default danger 5
+		{"memory: {warn_available_percent: 6}", true},
+		{"memory: {warn_available_percent: 99, guard: {danger_available_percent: 50}}", true},
+	}
+	for _, tt := range tests {
+		_, errs := config.Parse([]byte(tt.doc+"\n"), "health.yaml")
+		if tt.ok && len(errs) != 0 {
+			t.Errorf("%s: unexpected %+v", tt.doc, errs)
+		}
+		if !tt.ok && (len(errs) != 1 || !strings.Contains(errs[0].Reason, "danger_available_percent")) {
+			t.Errorf("%s: want danger_available_percent error: %+v", tt.doc, errs)
+		}
+	}
+}
+
+func TestMemorySizes(t *testing.T) {
+	tests := []struct {
+		in   string
+		want uint64
+		ok   bool
+	}{
+		{"1B", 1, true},
+		{"1KB", 1 << 10, true},
+		{"512MB", 512 << 20, true},
+		{"4GB", 4 << 30, true},
+		{"2TB", 2 << 40, true},
+		{"16777215TB", 16777215 << 40, true},
+		{"16777216TB", 0, false}, // overflows uint64
+		{"0GB", 0, false},        // not positive
+		{"0", 0, false},
+		{"4", 0, false}, // unit required
+		{"GB", 0, false},
+		{"-1GB", 0, false},
+		{"1.5GB", 0, false},
+		{"4PB", 0, false},
+		{"4gb", 0, false},
+		{"", 0, false},
+	}
+	for _, tt := range tests {
+		for _, key := range []string{"growth_warn", "guard: {culprit_min_growth"} {
+			doc := "memory: {" + key + ": \"" + tt.in + "\"}}\n"
+			if key == "growth_warn" {
+				doc = "memory: {growth_warn: \"" + tt.in + "\"}\n"
+			}
+
+			cfg, errs := config.Parse([]byte(doc), "health.yaml")
+			if tt.ok {
+				if len(errs) != 0 {
+					t.Errorf("%s %q: unexpected %+v", key, tt.in, errs)
+
+					continue
+				}
+				got := cfg.Memory.GrowthWarn
+				if key != "growth_warn" {
+					got = cfg.Memory.Guard.CulpritMinGrowth
+				}
+				if uint64(got) != tt.want {
+					t.Errorf("%s %q = %d, want %d", key, tt.in, got, tt.want)
+				}
+			} else if len(errs) != 1 || errs[0].Entry != "memory" {
+				t.Errorf("%s %q must be one memory error: %+v", key, tt.in, errs)
+			}
+		}
+	}
+
+	if _, errs := config.Parse([]byte("memory: {growth_warn: [1]}\n"), "health.yaml"); len(errs) != 1 {
+		t.Errorf("non-scalar size must be rejected: %+v", errs)
+	}
+}
+
+func TestMemoryErrors(t *testing.T) {
+	tests := []struct {
+		name, doc, reason string
+	}{
+		{"unknown key", "memory: {bogus: 1}", "bogus"},
+		{"unknown guard key", "memory: {guard: {bogus: 1}}", "bogus"},
+		{"needs_internet", "memory: {needs_internet: true}", "needs_internet"},
+		{"depends_on", "memory: {depends_on: http/a}", "depends_on"},
+		{"summary_group", "memory: {summary_group: x}", "summary_group"},
+		{"mode", "memory: {mode: email}", "mode"},
+		{"failed_mode", "memory: {guard: {failed_mode: email}}", "failed_mode"},
+		{"intervene", "memory: {guard: {intervene: maybe}}", "intervene"},
+		{"empty intervene", "memory: {guard: {intervene: \"\"}}", "intervene"},
+		{"never_touch space", "memory: {guard: {never_touch: [\"a b\"]}}", "never_touch"},
+		{"never_touch empty", "memory: {guard: {never_touch: [\"\"]}}", "never_touch"},
+		{"never_touch slash", "memory: {guard: {never_touch: [a/b]}}", "never_touch"},
+		{"audit_exclude glob", "memory: {audit_exclude: [\"runner-*\"]}", "audit_exclude"},
+		{"audit_exclude empty", "memory: {audit_exclude: [\"\"]}", "audit_exclude"},
+	}
+	for _, tt := range tests {
+		cfg, errs := config.Parse([]byte(tt.doc+"\n"), "health.yaml")
+		if len(errs) != 1 || errs[0].Entry != "memory" || !strings.Contains(errs[0].Reason, tt.reason) {
+			t.Errorf("%s: want one memory error naming %q: %+v", tt.name, tt.reason, errs)
+		}
+		if cfg.Memory != nil {
+			t.Errorf("%s: invalid section must be skipped", tt.name)
+		}
+	}
+
+	cfg, errs := config.Parse([]byte("memory: {bogus: 1}\nups:\n"), "health.yaml")
+	if len(errs) != 1 || cfg.UPS == nil {
+		t.Errorf("an invalid memory section must not disable the others: %+v", errs)
+	}
+}

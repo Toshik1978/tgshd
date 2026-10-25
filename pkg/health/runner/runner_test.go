@@ -1951,3 +1951,59 @@ func TestNetworkStateKeptWhilePaused(t *testing.T) {
 		})
 	}
 }
+
+// TestPushModeDeliversBySMS: an event pushed with the SMS mode goes to SMS
+// only, and the alert log keeps the check, the distinct key and the record.
+func TestPushModeDeliversBySMS(t *testing.T) {
+	f := newFixture(t, &fakeStore{})
+
+	f.r.PushMode(
+		context.Background(),
+		"memory",
+		"memory/guard/web-app",
+		"restarted web-app",
+		"restart record",
+		health.ModeSMS,
+	)
+	f.tick(t)
+
+	if got := f.sms.texts(); !slices.Equal(got, []string{host + ": restarted web-app"}) {
+		t.Fatalf("sms = %q, want the event", got)
+	}
+	if got := f.tlg.texts(); len(got) != 0 {
+		t.Fatalf("telegram = %q, want nothing", got)
+	}
+	if len(f.st.alerts) != 1 {
+		t.Fatalf("alert log = %+v, want one record", f.st.alerts)
+	}
+	a := f.st.alerts[0]
+	if a.Kind != store.KindEvent || a.Check != "memory" || a.Key != "memory/guard/web-app" ||
+		a.Text != "restart record" {
+		t.Fatalf("record = %+v", a)
+	}
+}
+
+// TestPushModeQueuesWhenTelegramFails: a failed Telegram delivery is queued
+// and retried by a later tick.
+func TestPushModeQueuesWhenTelegramFails(t *testing.T) {
+	f := newFixture(t, &fakeStore{})
+	f.tlg.setFail(true)
+
+	f.r.PushMode(context.Background(), "memory", "memory/guard/db", "stopped db", "stop record", health.ModeTelegram)
+	f.tick(t)
+
+	if got := f.tlg.texts(); len(got) != 0 {
+		t.Fatalf("telegram = %q, want nothing while it fails", got)
+	}
+	if len(f.st.state.Queue) != 1 {
+		t.Fatalf("queue = %+v, want the event queued", f.st.state.Queue)
+	}
+
+	f.tlg.setFail(false)
+	f.next(t)
+	f.next(t)
+
+	if got := f.tlg.texts(); !slices.Equal(got, []string{host + ": stopped db"}) {
+		t.Fatalf("telegram = %q, want the queued event delivered", got)
+	}
+}

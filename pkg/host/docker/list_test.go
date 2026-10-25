@@ -19,6 +19,8 @@ type fakeEngine struct {
 	filterErr  error
 	nameMatch  []container.Summary // returned by a list filtered by name
 	nameErr    error
+	stopped    []string
+	stopErr    error
 }
 
 func (f *fakeEngine) ContainerList(
@@ -61,6 +63,14 @@ func (*fakeEngine) ContainerRestart(
 	context.Context, string, client.ContainerRestartOptions,
 ) (client.ContainerRestartResult, error) {
 	return client.ContainerRestartResult{}, nil
+}
+
+func (f *fakeEngine) ContainerStop(
+	_ context.Context, id string, _ client.ContainerStopOptions,
+) (client.ContainerStopResult, error) {
+	f.stopped = append(f.stopped, id)
+
+	return client.ContainerStopResult{}, f.stopErr
 }
 
 func (*fakeEngine) Close() error { return nil }
@@ -187,5 +197,23 @@ func TestInspectNotFound(t *testing.T) {
 				t.Errorf("the engine error is not wrapped: %v", err)
 			}
 		})
+	}
+}
+
+func TestStop(t *testing.T) {
+	errBoom := errors.New("boom")
+
+	f := &fakeEngine{}
+	if err := (&Client{api: f}).Stop(context.Background(), "web-app"); err != nil {
+		t.Fatalf("Stop() error = %v", err)
+	}
+	if !slices.Equal(f.stopped, []string{"web-app"}) {
+		t.Errorf("stopped = %v, want [web-app]", f.stopped)
+	}
+
+	f = &fakeEngine{stopErr: errBoom}
+	err := (&Client{api: f}).Stop(context.Background(), "web-app")
+	if !errors.Is(err, errBoom) {
+		t.Errorf("Stop() error = %v, want wrapping %v", err, errBoom)
 	}
 }
