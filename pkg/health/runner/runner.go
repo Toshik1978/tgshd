@@ -59,6 +59,7 @@ const (
 	keyUptime      = "health/uptime/read"
 	keyLoad        = "health/store/load"
 	keySave        = "health/store/write"
+	keyOverrun     = "health/tick/overrun"
 )
 
 // Heartbeat writes the heartbeat file; lockfile.WriteTick bound to a path.
@@ -243,7 +244,10 @@ type cycle struct {
 	cleared []store.Alert // silent clears (CheckResult.Forget), logged after the alerts
 	samples []store.SampleRow
 	fixes   []Fix
-	errs    [][2]string // checker errors as key, text
+	errs    []checkerErr
+	// overruns are the checks that ran out of the tick deadline, as check
+	// name and error text; raiseOverruns reports them.
+	overruns [][2]string
 	// before are the conditions at the start of the tick's runs; kept only
 	// when there are fix sources (see saveInterruptedFixes).
 	before []health.Condition
@@ -652,8 +656,45 @@ func (r *Runner) runChecks(ctx context.Context, c *cycle, quiet bool) bool {
 		}
 		r.apply(c, r.opts.Checks[idx], results[i].res)
 	}
+	r.raiseOverruns(c)
 
 	return true
+}
+
+// tickDeadlineError fails a run that did not finish, or was not started,
+// before the tick deadline.
+type tickDeadlineError struct {
+	started bool
+	budget  time.Duration
+}
+
+func (e tickDeadlineError) Error() string {
+	if e.started {
+		return fmt.Sprintf("run did not finish before the tick deadline (%s)", e.budget)
+	}
+
+	return fmt.Sprintf("run not started before the tick deadline (%s)", e.budget)
+}
+
+// raiseOverruns reports the checks that ran out of the tick deadline. One is
+// reported as its own checker error; several are one symptom (a host too
+// overloaded to run its checks), so one checker error names them all.
+func (r *Runner) raiseOverruns(c *cycle) {
+	switch len(c.overruns) {
+	case 0:
+	case 1:
+		check, text := c.overruns[0][0], c.overruns[0][1]
+		c.failCheck(check, check+"/run/error", text)
+	default:
+		names := make([]string, len(c.overruns))
+		for i, o := range c.overruns {
+			names[i] = o[0]
+		}
+		c.fail(keyOverrun, fmt.Sprintf(
+			"%d checks did not finish before the tick deadline (%s), the host may be overloaded: %s",
+			len(names), r.opts.RunBudget, strings.Join(names, ", "),
+		))
+	}
 }
 
 // unjudged reports whether a network run left connectivity unknown: it
@@ -716,9 +757,7 @@ func (r *Runner) paused(idx int, quiet bool) bool {
 func (r *Runner) runBatch(tickCtx context.Context, batch []int) []outcome {
 	out := make([]outcome, len(batch))
 	sem := make(chan struct{}, r.opts.Concurrency)
-	notStarted := health.CheckResult{
-		Err: fmt.Errorf("run not started before the tick deadline (%s)", r.opts.RunBudget),
-	}
+	notStarted := health.CheckResult{Err: tickDeadlineError{budget: r.opts.RunBudget}}
 
 	var wg sync.WaitGroup
 	for i, idx := range batch {
@@ -754,9 +793,7 @@ func (r *Runner) runOne(tickCtx context.Context, idx int) health.CheckResult {
 
 	res := RunBounded(tickCtx, chk, chk.Interval, func() { r.running[idx].Store(false) })
 	if errors.Is(res.Err, ErrContextDone) {
-		return health.CheckResult{
-			Err: fmt.Errorf("run did not finish before the tick deadline (%s)", r.opts.RunBudget),
-		}
+		return health.CheckResult{Err: tickDeadlineError{started: true, budget: r.opts.RunBudget}}
 	}
 
 	return res
@@ -777,7 +814,7 @@ func (r *Runner) apply(c *cycle, chk health.Check, res health.CheckResult) {
 		if text == "" {
 			text = rd.Key + " could not be read"
 		}
-		c.fail(rd.Key+"/unreadable", text)
+		c.failCheck(chk.Name, rd.Key+"/unreadable", text)
 	}
 	for _, a := range r.engine.Apply(c.now, chk.Name, chk.Interval, chk.Threshold, res.Readings) {
 		if a.Mode == health.ModeDefault {
@@ -799,12 +836,17 @@ func (r *Runner) failErr(c *cycle, check string, err error) {
 	if err == nil {
 		return
 	}
+	if de := (tickDeadlineError{}); errors.As(err, &de) {
+		c.overruns = append(c.overruns, [2]string{check, err.Error()})
+
+		return
+	}
 	checks, plain := health.SplitErrors(err)
 	for _, ce := range checks {
-		c.fail(ce.Key(check), ce.Error())
+		c.failCheck(check, ce.Key(check), ce.Error())
 	}
 	if len(plain) > 0 {
-		c.fail(check+"/run/error", errors.Join(plain...).Error())
+		c.failCheck(check, check+"/run/error", errors.Join(plain...).Error())
 	}
 }
 
@@ -850,7 +892,7 @@ func (r *Runner) dispatch(ctx context.Context, c *cycle) {
 
 func (r *Runner) raise(c *cycle) {
 	for _, e := range c.errs {
-		r.CheckerError(e[0], e[1])
+		r.checker.ReportCheck(e.check, e.key, e.text)
 	}
 }
 
@@ -1019,8 +1061,20 @@ func (r *Runner) logDrop(m notify.QueuedMessage) {
 		zap.Time("created_at", m.CreatedAt), zap.Int("attempts", m.Attempts))
 }
 
+// checkerErr is a checker error raised in a tick; check labels its message.
+type checkerErr struct {
+	check, key, text string
+}
+
+// fail raises a checker error labelled with the first segment of key.
 func (c *cycle) fail(key, text string) {
-	c.errs = append(c.errs, [2]string{key, text})
+	check, _, _ := strings.Cut(key, "/")
+	c.failCheck(check, key, text)
+}
+
+// failCheck raises a checker error of check, labelled with its whole name.
+func (c *cycle) failCheck(check, key, text string) {
+	c.errs = append(c.errs, checkerErr{check: check, key: key, text: text})
 }
 
 func messageKind(k health.AlertKind) notify.Kind {

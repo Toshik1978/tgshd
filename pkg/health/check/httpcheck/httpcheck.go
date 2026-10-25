@@ -87,6 +87,7 @@ type Options struct {
 
 // Check is one configured HTTP endpoint check.
 type Check struct {
+	name       string
 	key        string
 	url        string
 	timeout    time.Duration
@@ -145,6 +146,7 @@ func New(entry config.HTTP, opts Options) (*Check, error) {
 	}
 
 	c := &Check{
+		name:       entry.Name,
 		key:        "http/" + entry.Name,
 		url:        entry.URL,
 		timeout:    timeout,
@@ -324,8 +326,12 @@ func (c *Check) result(parts ...outcome) health.CheckResult {
 	return res
 }
 
+// reading names the entry first ("http <name>: …"), like the command and
+// freshness checks, so an alert says which endpoint it is about.
 func (c *Check) reading(v health.Verdict, texts []string) health.Reading {
-	return health.Reading{Key: c.key, Verdict: v, Kind: health.State, Text: strings.Join(texts, "; ")}
+	text := "http " + c.name + ": " + strings.Join(texts, "; ")
+
+	return health.Reading{Key: c.key, Verdict: v, Kind: health.State, Text: text}
 }
 
 // checkOptions verifies that the collaborators the entry needs are present.

@@ -89,7 +89,7 @@ http/api: status 502, expected 200-399 (since 08:12)
 <host>: PROBLEM: <text> (since HH:MM)
 <host>: RESOLVED: <text>
 <host>: <event text>
-<host>: CHECKER ERROR: <check>: <text>        # at most once per 24 h per <check>/<subject>/<kind> (FR-028)
+<host>: CHECKER ERROR: <check>: <text>        # at most once per 24 h per <check>/<subject>/<kind> (FR-028); <check> is the whole check name, e.g. command/<name>
 <host>: CHECKER OK: health: state can be saved again       # once, after a reported save failure (FR-032)
 ```
 
@@ -106,6 +106,8 @@ New and changed texts:
 | kernel | `Kernel: uncorrectable memory errors on <mc> rose <a>→<b>` (every rise) | FR-024 |
 | kernel | `Kernel: <class> still happening (<n> records since <time>). Last: <line>` (also without a new record) | FR-022 |
 | temps | `<sensor> gone` only when it had an open problem | FR-019 |
+| http | `http <name>: <outcome>[; container <c> …]`, e.g. `PROBLEM: http web-app: no answer within 15s`; the entry name leads, like command and freshness texts | — |
+| health | `CHECKER ERROR: health: <n> checks did not finish before the tick deadline (<budget>), the host may be overloaded: <check>, …` (key `health/tick/overrun`) when two or more checks of one tick ran out of the tick deadline; a single one keeps `CHECKER ERROR: <check>: run did not finish/not started before the tick deadline (<budget>)` | — |
 | delivery | prefix on the next delivered Telegram message: `Undelivered earlier:`, then one `PROBLEM: <text> (since …), no longer open` line per listed PROBLEM that fits, then `… and N more undelivered PROBLEMs` when more were listed than the list holds (that line is always shown); lines that do not fit wait for the next delivered message, and a PROBLEM leaves the list only once a delivered message has shown it | FR-031 |
 
 Checker errors added (key ⇒ text):

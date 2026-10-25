@@ -65,6 +65,24 @@ func newCheckerFixture(t *testing.T, withMail bool) *checkerFixture {
 	return cf
 }
 
+func TestReportCheckLabelsWithTheCheckName(t *testing.T) {
+	cf := newCheckerFixture(t, true)
+
+	cf.ce.ReportCheck("http/web-app", "http/web-app/run/error", "run not started")
+
+	if len(cf.tlg.sent) != 1 || cf.tlg.sent[0] != "host1.example.org: CHECKER ERROR: http/web-app: run not started" {
+		t.Fatalf("telegram = %q", cf.tlg.sent)
+	}
+
+	if len(cf.mail.subjects) != 1 || cf.mail.subjects[0] != "host1.example.org: CHECKER ERROR: http/web-app" {
+		t.Fatalf("subject = %q", cf.mail.subjects)
+	}
+
+	if alerts := cf.ce.Drain(); len(alerts) != 1 || alerts[0].Check != "http/web-app" {
+		t.Fatalf("alerts = %+v", alerts)
+	}
+}
+
 func TestCheckerErrorSendsAndRecords(t *testing.T) {
 	cf := newCheckerFixture(t, true)
 

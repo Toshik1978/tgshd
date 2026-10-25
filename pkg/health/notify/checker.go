@@ -100,9 +100,18 @@ func (c *CheckerErrors) CheckerError(key, text string) {
 // Report is CheckerError that tells whether the error went out on a channel:
 // handed to the notifier for Telegram (which queues and retries it), or
 // delivered by email; not when its rate limit held it back or its email
-// failed. Only such an error is recorded for Drain.
+// failed. Only such an error is recorded for Drain. The message is labelled
+// with the first segment of key; ReportCheck names the check.
 func (c *CheckerErrors) Report(key, text string) bool {
 	check, _, _ := strings.Cut(key, "/")
+
+	return c.ReportCheck(check, key, text)
+}
+
+// ReportCheck is Report labelled with check, the whole check name (e.g.
+// "command/backup"), so that errors of checks sharing a first key
+// segment are told apart.
+func (c *CheckerErrors) ReportCheck(check, key, text string) bool {
 	now := c.opts.Now()
 
 	c.opts.Logger.Warn("checker error", zap.String("check", check), zap.String("key", key), zap.String("text", text))

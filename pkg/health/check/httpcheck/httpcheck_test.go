@@ -378,6 +378,37 @@ func TestStatusRange(t *testing.T) {
 	}
 }
 
+// TestReadingNamesTheEndpoint: the PROBLEM and RESOLVED texts start with the
+// entry's name, like the command and freshness checks', so an alert says which
+// endpoint it is about.
+func TestReadingNamesTheEndpoint(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name   string
+		status int
+		want   string
+	}{
+		{"good", http.StatusOK, "http web-app: status 200; container web is healthy"},
+		{"bad", http.StatusServiceUnavailable, "http web-app: status 503, expected 200-399"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			srv := newHTTPServer(t, statusHandler(&recorder{}, tt.status))
+			e := entry(srv.URL + "/health")
+			e.Container = "web"
+
+			res := mustNew(t, e, httpcheck.Options{Containers: &fakeContainers{healthy: true}}).Run(t.Context())
+			if r := only(t, res); r.Text != tt.want {
+				t.Fatalf("text = %q, want %q", r.Text, tt.want)
+			}
+		})
+	}
+}
+
 func TestPlainHTTPConnectToKeepsHost(t *testing.T) {
 	t.Parallel()
 

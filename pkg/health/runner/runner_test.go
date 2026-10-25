@@ -495,6 +495,28 @@ func TestCheckErrIsCheckerErrorWithoutStateChange(t *testing.T) {
 	}
 }
 
+// TestCheckerErrorNamesTheCheck: a checker error of a check with a subject in
+// its name (command/<name>, http/<name>) is labelled with the whole name, so
+// errors of different commands are told apart.
+func TestCheckerErrorNamesTheCheck(t *testing.T) {
+	auth := newFakeCheck(nil, "command/queue-ok", health.CheckResult{Err: errors.New("exit status 1")})
+	embed := newFakeCheck(nil, "command/db-dump", health.CheckResult{Err: health.CheckError{
+		Subject: "probe", Kind: "spawn", Err: errors.New("no such file"),
+	}})
+	f := newFixture(t, &fakeStore{}, checkOf(auth), checkOf(embed))
+	f.tick(t)
+
+	tlg := f.tlg.texts()
+	if countContaining(tlg, "CHECKER ERROR: command/queue-ok: exit status 1") != 1 ||
+		countContaining(tlg, "CHECKER ERROR: command/db-dump: probe/spawn: no such file") != 1 {
+		t.Fatalf("telegram = %q, want each command named in its checker error", tlg)
+	}
+	if len(f.st.alerts) != 2 || f.st.alerts[0].Check != "command/queue-ok" ||
+		f.st.alerts[1].Check != "command/db-dump" {
+		t.Fatalf("alert log = %+v, want the full check names", f.st.alerts)
+	}
+}
+
 func TestPartialFailureAppliesReadings(t *testing.T) {
 	c := newFakeCheck(nil, "temps", health.CheckResult{Readings: []health.Reading{
 		{Key: "temps/cpu", Verdict: health.Bad, Text: "cpu hot"},
@@ -838,17 +860,20 @@ func TestTickDeadlineCoversAllRuns(t *testing.T) {
 			if elapsed := time.Since(start); elapsed > 2*time.Second {
 				t.Fatalf("tick took %v, want it bounded by the 100ms tick budget", elapsed)
 			}
-			texts := tlg.texts()
-			if len(texts) != len(checks) {
-				t.Fatalf("telegram = %q, want one checker error per check", texts)
+			// The checks that ran out of the tick deadline, started or not,
+			// are one symptom of an overloaded host: one checker error names
+			// them all, network first.
+			names := make([]string, 0, len(checks))
+			if tt.network {
+				names = append(names, "network")
 			}
-			for _, chk := range checks {
-				if countContaining(texts, "CHECKER ERROR: "+chk.Name+": ") != 1 {
-					t.Fatalf("telegram = %q, want a timeout or not-started error for %s", texts, chk.Name)
-				}
+			for _, chk := range checks[:5] {
+				names = append(names, chk.Name)
 			}
-			if n := countContaining(texts, "not started"); n == 0 {
-				t.Fatalf("telegram = %q, want checks queued behind the limit reported as not started", texts)
+			want := []string{fmt.Sprintf("%s: CHECKER ERROR: health: %d checks did not finish before the "+
+				"tick deadline (100ms), the host may be overloaded: %s", host, len(checks), strings.Join(names, ", "))}
+			if texts := tlg.texts(); !slices.Equal(texts, want) {
+				t.Fatalf("telegram = %q, want %q", texts, want)
 			}
 		})
 	}
