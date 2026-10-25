@@ -12,13 +12,19 @@ PROBLEM: memory: 9% available (5.6 of 62 GB); top: web-app 31 GB (since 01:10)
 PROBLEM: memory: swap 85% used (6.8 of 8 GB); top: web-app 31 GB
 PROBLEM: memory: pressure 12% (stalled, 1 min avg); top: web-app 31 GB
 PROBLEM: memory: web-app grew 12→31 GB in 40 min; top: web-app 31 GB
-PROBLEM: memory: container web-app has no memory limit; top: web-app 31 GB
+PROBLEM: memory: 3 containers run without a memory limit: web-app 31 GB, worker 3 GB, cache 1.2 GB; top: web-app 31 GB
 RESOLVED: memory: 45% available
 RESOLVED: memory: swap 20% used
 RESOLVED: memory: pressure 0%
 RESOLVED: memory: web-app at 13 GB
-RESOLVED: memory: container web-app has a memory limit      # or: "… stopped"
+RESOLVED: memory: every container runs with a memory limit
 ```
+
+The limit audit is one condition, key `memory/limit`. It names every counted container, largest
+first; only when the text would not fit one message are the last names cut to `… and K more`. A
+container that joins the set while the problem is open is announced once, as an event on the
+check's `mode`: `memory: container queue-ok runs without a memory limit`. A container leaving
+the set changes the open problem's text only.
 
 A percentage is whole, except where rounding would land on the warn level itself: a problem reads
 `14.6% available` (floor 15), never `15% available`. A span under a minute reads `1 min`.

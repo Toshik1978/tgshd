@@ -106,7 +106,9 @@ type Memory struct {
 	WarnPressurePercent  int      `yaml:"warn_pressure_percent"`
 	GrowthWindow         Duration `yaml:"growth_window"`
 	GrowthWarn           Size     `yaml:"growth_warn"`
-	// AuditExclude lists containers allowed to run without a memory limit.
+	// AuditExclude lists container names or path.Match globs allowed to run
+	// without a memory limit. The audit counts only running containers whose
+	// restart policy is always or unless-stopped, in one rolled-up problem.
 	AuditExclude []string `yaml:"audit_exclude"`
 
 	Guard Guard `yaml:"guard"`
@@ -116,8 +118,9 @@ type Memory struct {
 // that tgshd could not fix the problem.
 type Guard struct {
 	Intervene Intervene `yaml:"intervene"`
-	// NeverTouch lists container names or systemd unit names that the guard
-	// never stops or restarts. A unit may be named without ".service".
+	// NeverTouch lists container or systemd unit names, or path.Match
+	// globs, the guard never stops or restarts. A unit may be named without
+	// ".service": an entry matches a unit's full name or its short name.
 	NeverTouch []string `yaml:"never_touch"`
 
 	DangerAvailablePercent int      `yaml:"danger_available_percent"`

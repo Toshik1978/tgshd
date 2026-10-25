@@ -14,10 +14,10 @@ memory:
   warn_pressure_percent: 10          # some avg60, 1-100
   growth_window: 1h                  # 10m-24h
   growth_warn: 4GB                   # size: B, KB, MB, GB, TB (powers of 1024)
-  audit_exclude: [ "scratch-job" ]   # containers allowed to run without a memory limit
+  audit_exclude: [ "scratch-job", "runner-*" ]   # containers allowed to run without a memory limit (globs)
   guard:
     intervene: report                # off | report | act   (default report)
-    never_touch: [ "db", "backup.service" ]   # container names or systemd unit names
+    never_touch: [ "db", "db-*", "backup.service" ]   # container or systemd unit names (globs)
     danger_available_percent: 5      # 1-50, must be below warn_available_percent
     danger_pressure_percent: 20      # full avg10, 1-100
     danger_for: 30s                  # 5s-5m
@@ -30,8 +30,10 @@ memory:
 ```
 
 Validation: percentages in range; `danger_available_percent < warn_available_percent`;
-durations in range; sizes positive; names in `never_touch` and `audit_exclude` match
-`[A-Za-z0-9_.@-]+`. `pause_in_quiet_windows` applies to warnings only (default `true`); the guard
+durations in range; sizes positive; entries in `never_touch` and `audit_exclude` are names or
+`path.Match` glob patterns (as `containers.exclude`), non-empty and valid patterns. A bare unit
+name or pattern in `never_touch` also matches its `.service` unit. The audit covers only
+containers whose restart policy is `always` or `unless-stopped`. `pause_in_quiet_windows` applies to warnings only (default `true`); the guard
 never pauses (spec edge cases). `needs_internet`, `depends_on` and `summary_group` are not
 accepted.
 

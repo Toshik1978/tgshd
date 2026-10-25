@@ -307,11 +307,26 @@ there is no memory check and no guard.
 - **The check** (every `interval`) warns early, in `mode`: available memory
   below `warn_available_percent`, swap above `warn_swap_percent`, pressure
   above `warn_pressure_percent`, a service that grew by `growth_warn` within
-  `growth_window`, and a container running without a memory limit (except
-  those in `audit_exclude`). Messages name the biggest consumer, for example
+  `growth_window`, and containers running without a memory limit. Messages
+  name the biggest consumer, for example
   `PROBLEM: memory: 9% available (5.6 of 62 GB); top: web-app 31 GB`. A
   service that is big but flat (a database) or a cache that swings up and down
   does not trigger the growth warning.
+- **The limit audit** is part of the check. It counts only running containers
+  that Docker keeps running (restart policy `always` or `unless-stopped`) and
+  that have no memory limit, except those in `audit_exclude`; one-off
+  containers (`docker run` without a restart policy) are not counted. Only the
+  container's own Docker restart policy counts, so Swarm task containers
+  (restarted by Swarm, not by their own policy) are not audited. A container
+  Docker is restarting (crash-loop backoff) stays counted. One
+  problem names them all, largest first, e.g.
+  `PROBLEM: memory: 3 containers run without a memory limit: web-app 31 GB, worker 3 GB, cache 1.2 GB; top: web-app 31 GB`
+  (only a list too long for one message ends with `… and K more`). It
+  resolves when none is left (`every container runs with a memory limit`).
+  Once the PROBLEM is open (after `threshold`), a container that joins is
+  announced once (`memory: container queue-ok runs without a memory limit`);
+  one that leaves only changes the open problem's text, and leaving and
+  rejoining counts as a new join.
 - **The guard** reads the kernel directly, about once a second, and does not
   wait for the check's schedule. When available memory is below
   `danger_available_percent` **and** the full-stall pressure is at or above
@@ -334,8 +349,12 @@ there is no memory check and no guard.
 - **`never_touch` names** are container names (`db`) or systemd unit names,
   either in full (`backup.service`) or, as `systemctl` accepts them, without
   `.service` (`backup` protects `backup.service` too). A bare name protects
-  both a container and a unit of that name. Names are matched exactly, with
-  no globs.
+  both a container and a unit of that name. Entries may also be
+  `path.Match` globs, as in `containers.exclude` (`db-*` protects container
+  `db-main` and unit `db-main.service`); a malformed pattern is rejected when
+  the config loads. A glob is matched against a unit's full name and its
+  name without `.service`, so `*-main` protects `db-main.service` too.
+  `audit_exclude` accepts the same globs, matched against container names.
 
 The guard never pauses in quiet windows (`pause_in_quiet_windows` applies to
 the warnings only). Its reports are queued and retried like other alerts and

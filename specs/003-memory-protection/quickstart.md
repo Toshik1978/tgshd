@@ -30,7 +30,9 @@ with `task test` (or `task test:coverage` for the gate). Messages must match
 | US2-2, SC-003 | `web-app` +20 GB/h on 64 GB host | growth PROBLEM ≥ 30 min before 5 % available |
 | US2-3 | back to normal | RESOLVED |
 | US2-5, SC-006 | sawtooth cache 2→8→2 GB hourly; 40 GB flat db | no PROBLEM |
-| US3-1/2/3 | containers with / without limit / excluded | limit PROBLEMs and RESOLVED as listed |
+| US3-1/2/3/4 | containers with / without limit / excluded / restart policy `no` | one `memory/limit` PROBLEM naming the counted ones largest first; RESOLVED when none is left |
+| US3-5 | a container joins the open set; tgshd restarts | one event for the joiner, not repeated after the restart; none before `threshold` |
+| edge | a list too long for one message | the last names cut to `… and K more` |
 | edge | `SwapTotal 0` | no swap condition |
 | edge | PSI file missing | checker error once; other judgements continue |
 
@@ -52,8 +54,9 @@ with `task test` (or `task test:coverage` for the gate). Messages must match
 ## **Host** validation (manual, on a test host — never on a production host)
 
 1. Configure `memory.guard.intervene: report`, `danger_for: 10s`, a tiny `culprit_min_growth`.
-2. Run a throwaway container that allocates memory steadily (e.g. a loop appending to a buffer)
-   without a memory limit; watch the `would restart` report and the limit-audit PROBLEM.
+2. Run a throwaway container with `--restart unless-stopped` that allocates memory steadily
+   (e.g. a loop appending to a buffer) without a memory limit; watch the `would restart` report
+   and the limit-audit PROBLEM (a container without a restart policy is not audited).
 3. Switch to `act`; repeat; the container is restarted within 60 s of danger and one Telegram
    message arrives. Repeat once more inside 6 h: it is stopped and an SMS arrives.
 4. While the host is in danger, confirm `grep VmLck /proc/$(pidof tgshd)/status` is non-zero and

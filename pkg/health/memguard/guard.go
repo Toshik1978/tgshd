@@ -5,7 +5,7 @@
 package memguard
 
 import (
-	"slices"
+	"path"
 	"strings"
 	"time"
 
@@ -96,9 +96,9 @@ type Sample struct {
 // services; tgshd's own, the core units and systemd-* are never eligible;
 // never_touch names are protected.
 func (c Config) Service(kind Kind, name, cgroupPath string) Service {
-	path := strings.Trim(cgroupPath, "/")
+	cgPath := strings.Trim(cgroupPath, "/")
 	s := Service{ID: string(kind) + ":" + name, Kind: kind, Name: name, CgroupPath: cgroupPath}
-	if !isServiceCgroup(path) || c.holdsSelf(path) || (kind == KindUnit && isCoreUnit(name)) {
+	if !isServiceCgroup(cgPath) || c.holdsSelf(cgPath) || (kind == KindUnit && isCoreUnit(name)) {
 		return s
 	}
 	if c.neverTouch(kind, name) {
@@ -111,23 +111,32 @@ func (c Config) Service(kind Kind, name, cgroupPath string) Service {
 	return s
 }
 
-// neverTouch reports whether never_touch names the service. A unit is named
-// by its full name or, as systemctl accepts it, without ".service": "backup"
-// protects backup.service. A container is named by its name only.
+// neverTouch reports whether never_touch names the service. Entries are names
+// or path.Match globs. A unit is named by its full name or, as systemctl
+// accepts it, without ".service": "backup" and "back*" protect backup.service.
+// A container is named by its name only. Patterns are validated at config load;
+// a malformed one here matches nothing.
 func (c Config) neverTouch(kind Kind, name string) bool {
-	if slices.Contains(c.NeverTouch, name) {
-		return true
-	}
 	short, ok := strings.CutSuffix(name, ".service")
+	for _, entry := range c.NeverTouch {
+		if matched, _ := path.Match(entry, name); matched {
+			return true
+		}
+		if kind == KindUnit && ok {
+			if matched, _ := path.Match(entry, short); matched {
+				return true
+			}
+		}
+	}
 
-	return kind == KindUnit && ok && slices.Contains(c.NeverTouch, short)
+	return false
 }
 
-// isServiceCgroup reports whether path is a service or scope under
+// isServiceCgroup reports whether cgPath is a service or scope under
 // system.slice. A slice is never a service: acting on it would hit every
 // service inside.
-func isServiceCgroup(path string) bool {
-	rest, ok := strings.CutPrefix(path, "system.slice/")
+func isServiceCgroup(cgPath string) bool {
+	rest, ok := strings.CutPrefix(cgPath, "system.slice/")
 	if !ok {
 		return false
 	}
@@ -136,12 +145,12 @@ func isServiceCgroup(path string) bool {
 	return strings.HasSuffix(last, ".service") || strings.HasSuffix(last, ".scope")
 }
 
-func (c Config) holdsSelf(path string) bool {
+func (c Config) holdsSelf(cgPath string) bool {
 	self := strings.Trim(c.SelfCgroup, "/")
 	if self == "" {
 		return false
 	}
-	rest, ok := strings.CutPrefix(self, path)
+	rest, ok := strings.CutPrefix(self, cgPath)
 
 	return ok && (rest == "" || rest[0] == '/')
 }

@@ -483,8 +483,6 @@ func cmpDefault(v, def int) int {
 	return v
 }
 
-var memoryNamePattern = regexp.MustCompile(`^[A-Za-z0-9_.@-]+$`)
-
 func validateMemory(m *Memory, p *problems) {
 	p.interval("interval", m.Interval)
 	p.nonNegative("threshold", m.Threshold)
@@ -535,11 +533,17 @@ func (p *problems) durationRange(key string, d Duration, lo, hi time.Duration) {
 	}
 }
 
-// validateMemoryNames requires container or systemd unit names.
+// validateMemoryNames requires non-empty container or systemd unit names or
+// valid path.Match globs, as containers.exclude does. never_touch is a safety
+// list, so a malformed pattern is rejected rather than left to match nothing.
 func validateMemoryNames(p *problems, key string, names []string) {
 	for _, n := range names {
-		if !memoryNamePattern.MatchString(n) {
-			p.addf("%s entry %q must match [A-Za-z0-9_.@-]+", key, n)
+		if n == "" {
+			p.addf("%s entry must not be empty", key)
+			continue
+		}
+		if _, err := path.Match(n, ""); err != nil {
+			p.addf("%s entry %q is not a valid pattern: %v", key, n, err)
 		}
 	}
 }

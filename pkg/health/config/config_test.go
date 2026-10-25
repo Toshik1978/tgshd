@@ -999,10 +999,10 @@ memory:
   warn_pressure_percent: 15
   growth_window: 2h
   growth_warn: 512MB
-  audit_exclude: [scratch-job, "a.b@c_d-e"]
+  audit_exclude: [scratch-job, "a.b@c_d-e", "runner-*"]
   guard:
     intervene: act
-    never_touch: [db, backup.service]
+    never_touch: [db, "db-*", backup.service]
     danger_available_percent: 8
     danger_pressure_percent: 30
     danger_for: 1m
@@ -1016,12 +1016,12 @@ memory:
 	if m.Interval.Duration() != 2*time.Minute || m.Mode != config.ModeTLGOrSMS || m.PauseInQuietWindows ||
 		m.WarnAvailablePercent != 20 || m.WarnSwapPercent != 90 || m.WarnPressurePercent != 15 ||
 		m.GrowthWindow.Duration() != 2*time.Hour || m.GrowthWarn != 512<<20 ||
-		len(m.AuditExclude) != 2 || m.AuditExclude[0] != "scratch-job" {
+		len(m.AuditExclude) != 3 || m.AuditExclude[2] != "runner-*" {
 		t.Errorf("memory = %+v", m)
 	}
 
 	g := m.Guard
-	if g.Intervene != config.InterveneAct || len(g.NeverTouch) != 2 || g.NeverTouch[1] != "backup.service" ||
+	if g.Intervene != config.InterveneAct || len(g.NeverTouch) != 3 || g.NeverTouch[1] != "db-*" ||
 		g.DangerAvailablePercent != 8 || g.DangerPressurePercent != 30 || g.DangerFor.Duration() != time.Minute ||
 		g.CulpritWindow.Duration() != 20*time.Minute || g.CulpritMinGrowth != 2<<30 || g.RepeatWindow != 0 ||
 		g.RecoveryWindow.Duration() != 5*time.Minute || g.ActionTimeout.Duration() != 2*time.Minute ||
@@ -1185,10 +1185,9 @@ func TestMemoryErrors(t *testing.T) {
 		{"failed_mode", "memory: {guard: {failed_mode: email}}", "failed_mode"},
 		{"intervene", "memory: {guard: {intervene: maybe}}", "intervene"},
 		{"empty intervene", "memory: {guard: {intervene: \"\"}}", "intervene"},
-		{"never_touch space", "memory: {guard: {never_touch: [\"a b\"]}}", "never_touch"},
+		{"never_touch bad glob", "memory: {guard: {never_touch: [\"[\"]}}", "never_touch"},
 		{"never_touch empty", "memory: {guard: {never_touch: [\"\"]}}", "never_touch"},
-		{"never_touch slash", "memory: {guard: {never_touch: [a/b]}}", "never_touch"},
-		{"audit_exclude glob", "memory: {audit_exclude: [\"runner-*\"]}", "audit_exclude"},
+		{"audit_exclude bad glob", "memory: {audit_exclude: [\"runner-[\"]}", "audit_exclude"},
 		{"audit_exclude empty", "memory: {audit_exclude: [\"\"]}", "audit_exclude"},
 	}
 	for _, tt := range tests {

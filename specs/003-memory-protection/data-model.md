@@ -25,6 +25,7 @@ Derived: `AvailablePct = Available/Total·100`, `SwapPct = (SwapTotal−SwapFree
 | `Eligible` | false for never-touch, core, tgshd's own unit (research R5) |
 | `Protected` | true when excluded by `never_touch` (reported as "protected", not silently skipped) |
 | `HasLimit` | containers only: Docker `HostConfig.Memory > 0`; audit input |
+| `RestartPolicy` | containers only: Docker `HostConfig.RestartPolicy.Name`; the audit counts only `always` and `unless-stopped` |
 
 ## Service memory sample
 
@@ -64,8 +65,14 @@ no_culprit, action_failed}`. `restarted` and `would_*` use `mode`; the rest use 
 
 ## Limit audit known set (persisted, kv `memory.audit`)
 
-`[]string` — the container names the audit last judged, so a `memory/limit/<container>`
-condition for a container removed while the daemon was down resolves after the restart.
+`{known []string, bad_for, last, open}` — the container names the audit counted on its last run
+(running or restarting, restart policy `always` or `unless-stopped`, no memory limit, not in
+`audit_exclude`), and the current streak's observed bad time, mirrored from the engine (a run adds
+the time since the previous one, at most 1.5 intervals), with whether it has reached `threshold`
+(the PROBLEM is open). Only while it is open is a counted container missing from `known`
+announced, once. A container that leaves the set and rejoins while the problem stays open is a new
+join and is announced again. Persisting it means a tgshd restart neither announces the open
+problem's containers again nor treats a streak younger than `threshold` as open.
 
 ## Conditions and samples (existing engine and store)
 
@@ -75,7 +82,8 @@ condition for a container removed while the daemon was down resolves after the r
 | `memory/swap` | state | `SwapPct > warn_swap_percent` for `threshold` (hosts with swap) |
 | `memory/pressure` | state | `SomeAvg60 > warn_pressure_percent` for `threshold` |
 | `memory/growth/<service>` | state | research R12 |
-| `memory/limit/<container>` | state | running container without a limit, not in `audit_exclude` |
+| `memory/limit` | state | a running container with restart policy `always` or `unless-stopped`, without a limit, not in `audit_exclude`; one problem names them all, largest first |
+| `memory/limit/<container>` | event | a container joins the counted set while the `memory/limit` PROBLEM is open |
 | `memory/guard/<service>` | event | every guard outcome |
 | `kernel/oom` | event | every out-of-memory kill (R13) |
 

@@ -59,6 +59,9 @@ const (
 	// Docker health states (container.HealthStatus).
 	dockerHealthy  = "healthy"
 	dockerNoHealth = "none"
+
+	// dockerRestarting is the container state while Docker restarts it.
+	dockerRestarting = "restarting"
 )
 
 // containersChecks provides the containers check when its section is present.
@@ -563,7 +566,7 @@ func (d *lazyDocker) ContainerNames(ctx context.Context) (map[string]string, err
 }
 
 // AuditContainers lists every container with whether it runs under a memory
-// limit, for the memory check's limit audit.
+// limit and its restart policy, for the memory check's limit audit.
 func (d *lazyDocker) AuditContainers(ctx context.Context) ([]memory.Container, error) {
 	api, err := d.client()
 	if err != nil {
@@ -575,7 +578,11 @@ func (d *lazyDocker) AuditContainers(ctx context.Context) ([]memory.Container, e
 	}
 	out := make([]memory.Container, len(list))
 	for i := range list {
-		out[i] = memory.Container{Name: list[i].Name, Running: list[i].Running, HasLimit: list[i].MemoryLimit > 0}
+		c := &list[i]
+		out[i] = memory.Container{
+			Name: c.Name, Running: c.Running, Restarting: c.Status == dockerRestarting,
+			HasLimit: c.MemoryLimit > 0, RestartPolicy: c.RestartPolicy,
+		}
 	}
 
 	return out, nil

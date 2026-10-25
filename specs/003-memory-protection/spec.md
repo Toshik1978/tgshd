@@ -32,6 +32,11 @@ advance, and it must keep working while the host is starving.
 - Q: Should the automatic intervention also restart leaking host services that run outside Docker (systemd units), or only containers? → A: Containers and systemd services, both restarted by the same rules; stray processes outside any service are only reported.
 - Q: When the memory section is first added, should tgshd begin in report-only mode until switched to act? → A: Yes. One intervention setting with three values — `off`, `report`, `act` — defaulting to `report` when the memory section is present.
 
+### Session 2026-10-26
+
+- Q: Which containers does the memory-limit audit cover, and how is it reported on a host where most containers have no limit yet? → A: Only containers Docker keeps running (restart policy `always` or `unless-stopped`, the set the containers check watches), minus the audit exclusions; one rolled-up problem lists every such container, largest first, and resolves when none is left; a container that joins the set later is announced once.
+- Q: Do the audit exclusions and the never-touch list accept patterns? → A: Yes, the same glob patterns the containers check's exclude list accepts.
+
 ## User Scenarios & Testing *(mandatory)*
 
 ### User Story 1 - A runaway service is restarted before the host starves (Priority: P1)
@@ -106,9 +111,11 @@ verify which warnings open and resolve.
 
 **Acceptance Scenarios**:
 
-1. **Given** a running container without a memory limit that is not excluded from the audit, **When** the check runs, **Then** one problem names it.
-2. **Given** that problem is open, **When** the container is recreated with a limit, **Then** the problem resolves.
-3. **Given** a container the operator excluded from the audit, **When** it runs without a limit, **Then** no problem opens.
+1. **Given** several running containers that Docker keeps running (restart policy `always` or `unless-stopped`) without a memory limit and not excluded from the audit, **When** the check runs, **Then** one problem names all of them, largest first.
+2. **Given** that problem is open, **When** the last of them is recreated with a limit or stops, **Then** the problem resolves.
+3. **Given** a container the operator excluded from the audit, by name or by a matching pattern, **When** it runs without a limit, **Then** it is not counted.
+4. **Given** a one-off container started without a restart policy (e.g. `docker run` by a tool), **When** it runs without a limit, **Then** it is not counted.
+5. **Given** the problem is open, **When** another container joins the set, **Then** one message announces that container, and the open problem is not repeated.
 
 ---
 
@@ -174,7 +181,7 @@ a container's limit, current and previous boot) and verify the texts.
 
 #### Audit and kernel kills
 
-- **FR-018**: The `memory` check MUST raise a problem for each running container that has no memory limit, except containers excluded from the audit; it resolves when the container runs with a limit or stops. *Why: a limit is the safety net that works even when tgshd cannot.*
+- **FR-018**: The `memory` check MUST raise one problem naming every running container that Docker keeps running (restart policy `always` or `unless-stopped`) and that has no memory limit, largest first, except containers excluded from the audit by name or glob pattern; it resolves when no such container is left, and a container that joins the set while the problem is open MUST be announced once. *Why: a limit is the safety net that works even when tgshd cannot; one-off helper containers are not services, and one rolled-up problem keeps a host with many unlimited containers from flooding the operator.*
 - **FR-019**: The kernel check MUST report out-of-memory kills from the current and the previous boot, naming the killed process, its container (when it belonged to one), the memory it held, and whether the kill came from a container reaching its own limit or from the host running out. *Why: kernel kills are today reported only through their side effects.* (Extends 002's kernel classes.)
 
 #### Configuration
@@ -205,7 +212,7 @@ a container's limit, current and previous boot) and verify the texts.
 ## Assumptions
 
 - Intervention acts on containers and systemd services. Processes outside both are named in reports but never killed.
-- The container runtime is the one the containers check already uses; containers are identified by name, systemd services by unit name, and the never-touch list may name either.
+- The container runtime is the one the containers check already uses; containers are identified by name, systemd services by unit name, and the never-touch list may name either; never-touch and audit-exclusion entries may be glob patterns, as in the containers check's exclude list.
 - A report in `report` mode is phrased as what would have happened (`would restart …`) so it can never be mistaken for an action.
 - Default thresholds (adjustable; the plan finalises them): warning floor 15% available, swap warning 80%, danger floor 5% available, danger pressure sustained for 30 s, growth window 1 h for warnings and 10 min for culprit choice, repeat window 6 h, recovery window 2 min.
 - Restarting a container resets its memory; services that need a graceful stop get the container runtime's normal stop timeout, bounded by FR-010.

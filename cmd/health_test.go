@@ -1732,6 +1732,41 @@ func TestGuardSamplerMapsContainerIDsToNames(t *testing.T) {
 	}
 }
 
+// TestGuardEligibilityIgnoresTheRestartPolicy pins that the guard can restart a
+// growing one-off container (restart policy "no"): the limit audit counts only
+// always/unless-stopped containers, but the sampler names every running
+// container from the Docker id->name map and the guard judges it by its cgroup
+// path and name, never by a restart policy.
+func TestGuardEligibilityIgnoresTheRestartPolicy(t *testing.T) {
+	t.Parallel()
+
+	f := newGuardFakes(guardT0())
+	// nightly-import is a one-off container started with --restart=no.
+	f.containers.names = map[string]string{webAppID: "nightly-import"}
+	names := &containerNames{}
+	if err := names.refresh(t.Context(), f.containers); err != nil {
+		t.Fatal(err)
+	}
+	s := guardSampler{mem: f.mem, cgroups: f.cgroups, names: names}
+
+	got, err := s.Services(nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	i := slices.IndexFunc(got, func(x memguard.Sample) bool { return x.Name == "nightly-import" })
+	if i < 0 {
+		t.Fatalf("samples = %+v, want the one-off container sampled", got)
+	}
+	if got[i].Kind != memguard.KindContainer {
+		t.Fatalf("kind = %v, want %v", got[i].Kind, memguard.KindContainer)
+	}
+
+	svc := memguard.Config{NeverTouch: []string{"db"}}.Service(got[i].Kind, got[i].Name, got[i].CgroupPath)
+	if !svc.Eligible || svc.Protected {
+		t.Fatalf("service = %+v, want eligible and not protected whatever its restart policy", svc)
+	}
+}
+
 func TestGuardSamplerHostAndTopProcess(t *testing.T) {
 	t.Parallel()
 
@@ -2869,7 +2904,8 @@ func TestMemoryCheckAuditsContainerLimits(t *testing.T) {
 	src := memorySource{
 		sampler: guardSampler{mem: f.mem, cgroups: f.cgroups, names: f.names},
 		containers: fakeAuditor{list: []memory.Container{
-			{Name: "web-app", Running: true}, {Name: "scratch-job", Running: true},
+			{Name: "web-app", Running: true, RestartPolicy: "always"},
+			{Name: "scratch-job", Running: true, RestartPolicy: "always"},
 		}},
 	}
 	c := buildMemoryCheck(section, src, f.containers, zap.NewNop()).Checks[0]
@@ -2878,12 +2914,14 @@ func TestMemoryCheckAuditsContainerLimits(t *testing.T) {
 
 	var got []health.Reading
 	for _, r := range res.Readings {
-		if strings.HasPrefix(r.Key, "memory/limit/") {
+		if strings.HasPrefix(r.Key, "memory/limit") {
 			got = append(got, r)
 		}
 	}
-	if len(got) != 1 || got[0].Key != "memory/limit/web-app" || got[0].Verdict != health.Bad {
-		t.Fatalf("limit readings = %+v, want only web-app open (scratch-job excluded)", got)
+	want := "1 container runs without a memory limit: web-app"
+	if len(got) != 1 || got[0].Key != "memory/limit" || got[0].Verdict != health.Bad ||
+		!strings.HasPrefix(got[0].Text, want) {
+		t.Fatalf("limit readings = %+v, want one problem naming only web-app (scratch-job excluded)", got)
 	}
 }
 

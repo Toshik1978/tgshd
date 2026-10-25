@@ -70,6 +70,9 @@ func TestEligibility(t *testing.T) {
 		{"nested unit by its short name", KindUnit, "db.service", "system.slice/apps.slice/db.service", false, true},
 		{"short name matches the whole name", KindUnit, "db2.service", "system.slice/db2.service", true, false},
 		{"short name is for units only", KindContainer, "db.service", "system.slice/docker-fed.scope", true, false},
+		{"never-touch glob container", KindContainer, "db-main", "system.slice/docker-a1.scope", false, true},
+		{"never-touch glob unit", KindUnit, "db-main.service", "system.slice/db-main.service", false, true},
+		{"never-touch glob misses", KindContainer, "dbx", "system.slice/docker-a2.scope", true, false},
 		{"own unit", KindUnit, "tgshd.service", "system.slice/tgshd.service", false, false},
 		{"own cgroup with leading slash", KindUnit, "tgshd.service", "/system.slice/tgshd.service", false, false},
 		{"docker", KindUnit, "docker.service", "system.slice/docker.service", false, false},
@@ -92,7 +95,7 @@ func TestEligibility(t *testing.T) {
 		{"core beats never-touch", KindUnit, "dbus.service", "system.slice/dbus.service", false, false},
 	}
 	cfg := testConfig()
-	cfg.NeverTouch = append(cfg.NeverTouch, "dbus.service")
+	cfg.NeverTouch = append(cfg.NeverTouch, "dbus.service", "db-*")
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			s := cfg.Service(tc.kind, tc.svc, tc.path)

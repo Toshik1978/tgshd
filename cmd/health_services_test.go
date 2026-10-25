@@ -1076,20 +1076,41 @@ func TestLazyDockerForTheMemoryGuard(t *testing.T) {
 	}
 }
 
+// TestLazyDockerNamesContainersWhateverTheirRestartPolicy pins that the guard's
+// id->name map holds every container, so a one-off (restart policy "no") is
+// as guardable as one under always or unless-stopped.
+func TestLazyDockerNamesContainersWhateverTheirRestartPolicy(t *testing.T) {
+	t.Parallel()
+
+	api := &fakeDocker{containers: map[string]docker.Container{
+		"nightly-import": {ID: "aaaa", Name: "nightly-import", Running: true, RestartPolicy: "no"},
+		"web-app":        {ID: "bbbb", Name: "web-app", Running: true, RestartPolicy: "always"},
+	}}
+	names, err := lazyOver(api, nil).ContainerNames(t.Context())
+	want := map[string]string{"aaaa": "nightly-import", "bbbb": "web-app"}
+	if err != nil || !maps.Equal(names, want) {
+		t.Fatalf("ContainerNames() = %v, %v; want %v", names, err, want)
+	}
+}
+
 func TestLazyDockerAuditsMemoryLimits(t *testing.T) {
 	t.Parallel()
 
 	api := &fakeDocker{containers: map[string]docker.Container{
-		"web-app": {Name: "web-app", Running: true},
-		"db":      {Name: "db", Running: true, MemoryLimit: 4 << 30},
-		"backup":  {Name: "backup", Running: false},
+		"web-app": {Name: "web-app", Running: true, RestartPolicy: "unless-stopped"},
+		"db":      {Name: "db", Running: true, RestartPolicy: "always", MemoryLimit: 4 << 30},
+		"backup":  {Name: "backup", Running: false, RestartPolicy: "no"},
+		"worker":  {Name: "worker", Running: false, Status: "restarting", RestartPolicy: "always"},
 	}}
 	d := lazyOver(api, nil)
 
 	list, err := d.AuditContainers(t.Context())
 	slices.SortFunc(list, func(a, b memory.Container) int { return strings.Compare(a.Name, b.Name) })
 	want := []memory.Container{
-		{Name: "backup"}, {Name: "db", Running: true, HasLimit: true}, {Name: "web-app", Running: true},
+		{Name: "backup", RestartPolicy: "no"},
+		{Name: "db", Running: true, HasLimit: true, RestartPolicy: "always"},
+		{Name: "web-app", Running: true, RestartPolicy: "unless-stopped"},
+		{Name: "worker", Restarting: true, RestartPolicy: "always"},
 	}
 	if err != nil || !slices.Equal(list, want) {
 		t.Fatalf("AuditContainers() = %+v, %v; want %+v", list, err, want)

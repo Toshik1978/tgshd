@@ -260,7 +260,10 @@ func TestGrowthServicesErrorIsCheckerError(t *testing.T) {
 
 func TestGrowthProblemTopLookupHappensOncePerRun(t *testing.T) {
 	c := &clock{now: start0()}
-	src := &fakeSource{host: healthy(), containers: []memory.Container{{Name: "db", Running: true}}}
+	src := &fakeSource{
+		host:       healthy(),
+		containers: []memory.Container{{Name: "db", Running: true, RestartPolicy: "always"}},
+	}
 	chk := memory.New(src, growthSettings(c))
 
 	var res health.CheckResult
@@ -277,7 +280,7 @@ func TestGrowthProblemTopLookupHappensOncePerRun(t *testing.T) {
 			t.Errorf("%s reading = %+v", name, r)
 		}
 	}
-	if r := find(t, res, "memory/limit/db"); r.Verdict != health.Bad || !strings.Contains(r.Text, "; top: ") {
+	if r := find(t, res, "memory/limit"); r.Verdict != health.Bad || !strings.Contains(r.Text, "; top: ") {
 		t.Errorf("limit reading = %+v", r)
 	}
 	// One read for the growth history, one shared top lookup for every problem.

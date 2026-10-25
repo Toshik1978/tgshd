@@ -158,7 +158,7 @@ func TestNoSwapHost(t *testing.T) {
 	host := healthy()
 	host.SwapTotal, host.SwapFree = 0, 0
 
-	res := memory.New(&fakeSource{host: host}, settings()).Run(context.Background())
+	res := memory.New(&fakeSource{host: host, ctrErr: memory.ErrNoContainers}, settings()).Run(context.Background())
 
 	for _, r := range res.Readings {
 		if r.Key == "memory/swap" {

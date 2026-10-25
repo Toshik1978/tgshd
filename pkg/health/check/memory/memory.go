@@ -63,11 +63,16 @@ type Process struct {
 }
 
 // Container is a Docker container as the limit audit sees it. Name is the
-// container name; HasLimit is true when it runs under a memory limit.
+// container name; Restarting is true while Docker restarts it (crash-loop
+// backoff, when Running may be false); HasLimit is true when it runs under a
+// memory limit; RestartPolicy is the container's own Docker policy name
+// ("always", "unless-stopped", "no", "on-failure").
 type Container struct {
-	Name     string
-	Running  bool
-	HasLimit bool
+	Name          string
+	Running       bool
+	Restarting    bool
+	HasLimit      bool
+	RestartPolicy string
 }
 
 // ErrNoContainers is returned by Source.Containers on a host without a
@@ -93,8 +98,15 @@ type Settings struct {
 	GrowthWindow time.Duration
 	GrowthWarn   uint64
 
-	// AuditExclude lists containers allowed to run without a memory limit.
+	// AuditExclude lists container names or path.Match globs allowed to run
+	// without a memory limit.
 	AuditExclude []string
+
+	// Interval and Threshold are the check's own: the limit audit mirrors the
+	// engine's observed bad time to know when its PROBLEM is open, and only
+	// then announces joiners.
+	Interval  time.Duration
+	Threshold time.Duration
 
 	// Now is the clock; time.Now when nil.
 	Now func() time.Time
@@ -200,6 +212,9 @@ type topLookup struct {
 	done bool
 	name string
 	errs []error
+
+	read bool
+	list []Service
 }
 
 // suffix is "; top: <consumer>", or empty when no consumer is known.
@@ -217,16 +232,26 @@ func (t *topLookup) suffix() string {
 
 func (t *topLookup) err() error { return errors.Join(t.errs...) }
 
+// services reads the services once per run; a failed read is one checker
+// error and an empty list.
+func (t *topLookup) services() []Service {
+	if !t.read {
+		t.read = true
+		list, err := t.source.Services(t.ctx)
+		if err != nil {
+			t.errs = append(t.errs, health.CheckError{Subject: "services", Kind: kindUnreadable, Err: err})
+		}
+		t.list = list
+	}
+
+	return t.list
+}
+
 // find returns "web-app 31 GB" for a service holding most of the used memory,
 // otherwise "python3 (pid 4242) 40 GB" for the largest process.
 func (t *topLookup) find() string {
-	services, err := t.source.Services(t.ctx)
-	if err != nil {
-		t.errs = append(t.errs, health.CheckError{Subject: "services", Kind: kindUnreadable, Err: err})
-	}
-
 	var best Service
-	for _, s := range services {
+	for _, s := range t.services() {
 		if s.Anon > best.Anon {
 			best = s
 		}

@@ -89,11 +89,13 @@ memory:                                     # absent => no memory check and no g
   warn_pressure_percent: 10                 # 1-100: PSI "some" avg60, share of time tasks waited for memory
   growth_window: 1h                         # 10m-24h: a service growing by growth_warn within it is a PROBLEM
   growth_warn: 4GB                          # B, KB, MB, GB, TB (powers of 1024)
-  audit_exclude: [ "scratch-job" ]          # containers allowed to run without a memory limit
+  audit_exclude: [ "scratch-job", "runner-*" ] # containers (names or globs) allowed to run without a memory limit.
+                                            # The audit counts only running containers with restart policy
+                                            # always or unless-stopped: one PROBLEM names them all, largest first
   guard:                                    # the fast guard: runs on its own, not on the check interval
     intervene: report                       # off | report | act. Start in report, check the "would restart"
                                             # messages name the right service, then switch to act
-    never_touch: [ "db", "backup.service" ] # container names or systemd unit names the guard never stops or restarts;
+    never_touch: [ "db", "backup.service" ] # container or unit names, or globs ("db-*"), the guard never stops or restarts;
                                             # a unit may be named without .service ("backup" = backup.service)
     danger_available_percent: 5             # 1-50, must be below warn_available_percent
     danger_pressure_percent: 20             # 1-100: PSI "full" avg10, share of time every task waited

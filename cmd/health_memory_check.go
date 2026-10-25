@@ -42,6 +42,8 @@ func buildMemoryCheck(m *hcfg.Memory, src memorySource, lister containerLister, 
 		GrowthWindow:         m.GrowthWindow.Duration(),
 		GrowthWarn:           m.GrowthWarn.Bytes(),
 		AuditExclude:         m.AuditExclude,
+		Interval:             m.Interval.Duration(),
+		Threshold:            m.Threshold.Duration(),
 	})
 	names := &nameRefresher{names: src.sampler.names, lister: lister, log: logger, who: "Memory check"}
 	common := hcfg.Common{
