@@ -22,6 +22,40 @@ func needBin(t *testing.T, names ...string) {
 	}
 }
 
+// waitDead fails with msg (formatted with pid) unless the process is dead
+// within 2 s. A killed child of a command that already exited is reparented
+// to PID 1 and stays a zombie until PID 1 reaps it, which a busy host can
+// put off for seconds; kill(pid, 0) still finds a zombie, so it counts as
+// dead here.
+func waitDead(t *testing.T, pid int, msg string) {
+	t.Helper()
+
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if syscall.Kill(pid, 0) != nil || zombie(pid) {
+			return
+		}
+
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	t.Fatalf(msg, pid)
+}
+
+// zombie reports whether /proc shows pid as a zombie (state Z): dead, not
+// yet reaped.
+func zombie(pid int) bool {
+	stat, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
+	if err != nil {
+		return false
+	}
+	// The state follows the command name, which is in parentheses and may
+	// itself hold spaces or parentheses: "31685 (sleep) Z 1 …".
+	line := string(stat)
+
+	return strings.HasPrefix(line[strings.LastIndexByte(line, ')')+1:], " Z")
+}
+
 func TestRun(t *testing.T) {
 	needBin(t, "true", "false")
 
@@ -75,16 +109,7 @@ func TestTimeoutKillsChildren(t *testing.T) {
 		t.Fatal(perr)
 	}
 
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if syscall.Kill(pid, 0) != nil {
-			return
-		}
-
-		time.Sleep(20 * time.Millisecond)
-	}
-
-	t.Fatalf("child %d survived the timeout", pid)
+	waitDead(t, pid, "child %d survived the timeout")
 }
 
 // TestBackgroundChildHoldingOutput: a command that exits while a background
@@ -117,16 +142,7 @@ func TestBackgroundChildHoldingOutput(t *testing.T) {
 		t.Fatal(perr)
 	}
 
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if syscall.Kill(pid, 0) != nil {
-			return
-		}
-
-		time.Sleep(20 * time.Millisecond)
-	}
-
-	t.Fatalf("background child %d survived", pid)
+	waitDead(t, pid, "background child %d survived")
 }
 
 func TestRunCapturesOutput(t *testing.T) {
