@@ -209,6 +209,70 @@ func TestGrowthServiceGoneResolves(t *testing.T) {
 	}
 }
 
+func TestGrowthExcludedServiceNeverWarns(t *testing.T) {
+	c := &clock{now: start0()}
+	src := &fakeSource{host: healthy()}
+	s := growthSettings(c)
+	s.GrowthExclude = []string{"github-runner-*", "build"}
+	chk := memory.New(src, s)
+
+	var res health.CheckResult
+	for i := range 6 { // the runner and the build unit climb 0→20 GB; web-app too
+		size := uint64(4*i) * gb
+		res = step(chk, src, c, 10*time.Minute, map[string]uint64{
+			"github-runner-easymoney": size, "build.service": size, "web-app": size,
+		})
+	}
+
+	for _, r := range res.Readings {
+		if r.Key == "memory/growth/github-runner-easymoney" || r.Key == "memory/growth/build.service" {
+			t.Fatalf("excluded service judged: %+v", r)
+		}
+	}
+	if growthReading(t, res, "web-app").Verdict != health.Bad {
+		t.Fatal("web-app not judged")
+	}
+	data, err := chk.Export()
+	if err != nil || strings.Contains(string(data), "runner") || strings.Contains(string(data), "build") {
+		t.Fatalf("export = %s, %v", data, err)
+	}
+}
+
+func TestGrowthExcludedAfterRestoreResolvesOnce(t *testing.T) {
+	c := &clock{now: start0()}
+	src := &fakeSource{host: healthy()}
+	chk := memory.New(src, growthSettings(c))
+
+	step(chk, src, c, time.Minute, map[string]uint64{"github-runner-x": gb})
+	res := step(chk, src, c, 10*time.Minute, map[string]uint64{"github-runner-x": 17 * gb})
+	if growthReading(t, res, "github-runner-x").Verdict != health.Bad {
+		t.Fatal("not open")
+	}
+	data, err := chk.Export()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	s := growthSettings(c)
+	s.GrowthExclude = []string{"github-runner-*"}
+	fresh := memory.New(src, s)
+	if err := fresh.Restore(data); err != nil {
+		t.Fatal(err)
+	}
+	res = step(fresh, src, c, time.Minute, map[string]uint64{"github-runner-x": 17 * gb})
+	r := growthReading(t, res, "github-runner-x")
+	if r.Verdict != health.Good || r.Text != "memory: github-runner-x excluded from the growth warning" {
+		t.Fatalf("reading = %+v", r)
+	}
+
+	res = step(fresh, src, c, time.Minute, map[string]uint64{"github-runner-x": 17 * gb})
+	for _, rd := range res.Readings {
+		if rd.Key == "memory/growth/github-runner-x" {
+			t.Fatalf("excluded service judged again: %+v", rd)
+		}
+	}
+}
+
 func TestGrowthExportRestore(t *testing.T) {
 	c := &clock{now: start0()}
 	src := &fakeSource{host: healthy()}

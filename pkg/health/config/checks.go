@@ -106,6 +106,9 @@ type Memory struct {
 	WarnPressurePercent  int      `yaml:"warn_pressure_percent"`
 	GrowthWindow         Duration `yaml:"growth_window"`
 	GrowthWarn           Size     `yaml:"growth_warn"`
+	// GrowthExclude lists container or unit names, or path.Match globs, left
+	// out of the growth warning (a CI runner's memory follows its builds).
+	GrowthExclude []string `yaml:"growth_exclude"`
 	// AuditExclude lists container names or path.Match globs allowed to run
 	// without a memory limit. The audit counts only running containers whose
 	// restart policy is always or unless-stopped, in one rolled-up problem.

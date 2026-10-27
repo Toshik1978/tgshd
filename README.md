@@ -166,7 +166,7 @@ is set.
 | `disks` | SMART health of NVMe, SATA and SAS drives (smartmontools) | `15m` / `0` | `wear_percent` (`80`), `selftest_max_age` (`40d` since a passed self-test was last seen), `spare_floor_percent` (`20`, NVMe), `force_read_after` (`24h`, at least `1h`), `include_serials` (USB and other hot-pluggable drives are skipped unless listed), `exclude_serials`, `extra_counters` and `extra_counters_by_serial` (extra ATA attribute ids, 1–255) |
 | `temperatures` | One package sensor per CPU, GPUs (nvidia-smi), listed board sensors; drive limits are judged by `disks` | `15m` / `0` | `limits` in °C, a PROBLEM at or above: `cpu: 90`, `drive_nvme: 60`, `drive_sata: 60` (also SAS), `gpu: 85`, `board: 75`; `limits_by_serial` (per drive); `board_sensors` (`{chip, label, limit}`, `*` globs; only listed board sensors are judged) |
 | `kernel` | EDAC memory error counters and the kernel log (read continuously) | `15m` / `0` | — |
-| `memory` | Available memory, swap, memory pressure, service growth and containers without a memory limit; its `guard` restarts a runaway service (see [Memory protection](#memory-protection)) | `1m` / `5m` | `warn_available_percent` (`15`), `warn_swap_percent` (`80`), `warn_pressure_percent` (`10`), `growth_window` (`1h`), `growth_warn` (`4GB`), `audit_exclude`, `guard` |
+| `memory` | Available memory, swap, memory pressure, service growth and containers without a memory limit; its `guard` restarts a runaway service (see [Memory protection](#memory-protection)) | `1m` / `5m` | `warn_available_percent` (`15`), `warn_swap_percent` (`80`), `warn_pressure_percent` (`10`), `growth_window` (`1h`), `growth_warn` (`4GB`), `growth_exclude`, `audit_exclude`, `guard` |
 | `containers` | Docker container health | `5m` / `15m` | `exclude` (globs on the container name) |
 | `http` (list) | One endpoint per entry | `10m` / `10m` | `name`, `url`, `timeout` (`15s`, at most `20s`), `status` (`[200, 399]`), `connect_to` or `doh`, `header`, `follow_redirects` (`false`: a redirect is judged by its own status), `auth_refusal` (`down` or `checker_error`: what a 401/403 means), `depends_on`, `container` (also require this container healthy) |
 | `freshness` (list) | Age of a status stamp: a file's mtime or a Unix time in a file or at a URL | `15m` / `0` | `name`, `path` or `url` (exactly one), `content` (`epoch` or `mtime`), `max_age`, `future_tolerance` (`1h`), and for `url`: `timeout` (`15s`, at most `20s`) and `header` |
@@ -307,7 +307,9 @@ there is no memory check and no guard.
 - **The check** (every `interval`) warns early, in `mode`: available memory
   below `warn_available_percent`, swap above `warn_swap_percent`, pressure
   above `warn_pressure_percent`, a service that grew by `growth_warn` within
-  `growth_window`, and containers running without a memory limit. Messages
+  `growth_window` (unless named in `growth_exclude`, for services whose
+  memory follows their workload, like a CI runner during a build), and
+  containers running without a memory limit. Messages
   name the biggest consumer, for example
   `PROBLEM: memory: 9% available (5.6 of 62 GB); top: web-app 31 GB`. A
   service that is big but flat (a database) or a cache that swings up and down
@@ -355,7 +357,8 @@ there is no memory check and no guard.
   `db-main` and unit `db-main.service`); a malformed pattern is rejected when
   the config loads. A glob is matched against a unit's full name and its
   name without `.service`, so `*-main` protects `db-main.service` too.
-  `audit_exclude` accepts the same globs, matched against container names.
+  `audit_exclude` accepts the same globs, matched against container names;
+  `growth_exclude` matches containers and units as `never_touch` does.
 
 The guard never pauses in quiet windows (`pause_in_quiet_windows` applies to
 the warnings only). Its reports are queued and retried like other alerts and

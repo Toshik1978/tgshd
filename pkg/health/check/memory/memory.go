@@ -101,6 +101,11 @@ type Settings struct {
 	GrowthWindow time.Duration
 	GrowthWarn   uint64
 
+	// GrowthExclude lists container or unit names, or path.Match globs,
+	// left out of the growth warning: services whose memory follows their
+	// workload by design (a CI runner during a build).
+	GrowthExclude []string
+
 	// AuditExclude lists container names or path.Match globs allowed to run
 	// without a memory limit.
 	AuditExclude []string

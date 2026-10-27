@@ -492,6 +492,7 @@ func validateMemory(m *Memory, p *problems) {
 	p.percent("warn_swap_percent", m.WarnSwapPercent, 100)
 	p.percent("warn_pressure_percent", m.WarnPressurePercent, 100)
 	p.durationRange("growth_window", m.GrowthWindow, 10*time.Minute, 24*time.Hour)
+	validateMemoryNames(p, "growth_exclude", m.GrowthExclude)
 	validateMemoryNames(p, "audit_exclude", m.AuditExclude)
 
 	g := &m.Guard
