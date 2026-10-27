@@ -7,7 +7,9 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"path"
 	"slices"
+	"strings"
 	"sync"
 	"time"
 
@@ -57,22 +59,39 @@ func (c *Check) judgeGrowth(ctx context.Context, res *health.CheckResult, top *t
 
 	seen := make(map[string]bool, len(services))
 	for _, s := range services {
+		if growthExcluded(c.settings.GrowthExclude, s.Name) {
+			continue
+		}
 		seen[s.Name] = true
 		c.growth.rings[s.Name] = append(c.growth.rings[s.Name], point{At: now, Anon: s.Anon})
 	}
 	c.pruneLocked(now)
 
 	for _, name := range slices.Sorted(maps.Keys(c.growth.rings)) {
-		reading := health.Reading{Key: keyGrowthPrefix + name, Kind: health.State}
-		if seen[name] {
-			reading.Verdict, reading.Text = c.judgeService(name, top)
-		} else {
-			// Gone from the host: resolve whatever was open.
-			delete(c.growth.opened, name)
-			reading.Verdict, reading.Text = health.Good, name+" is gone"
-		}
-		res.Readings = append(res.Readings, reading)
+		res.Readings = append(res.Readings, c.serviceReading(name, seen[name], top))
 	}
+}
+
+// serviceReading is the growth reading of one service with history. Called
+// with the lock held.
+func (c *Check) serviceReading(name string, seen bool, top *topLookup) health.Reading {
+	reading := health.Reading{Key: keyGrowthPrefix + name, Kind: health.State}
+	switch {
+	case seen:
+		reading.Verdict, reading.Text = c.judgeService(name, top)
+	case growthExcluded(c.settings.GrowthExclude, name):
+		// Excluded since its history was kept (a config change across a
+		// restart): resolve whatever was open and forget it.
+		delete(c.growth.rings, name)
+		delete(c.growth.opened, name)
+		reading.Verdict, reading.Text = health.Good, subject+name+" excluded from the growth warning"
+	default:
+		// Gone from the host: resolve whatever was open.
+		delete(c.growth.opened, name)
+		reading.Verdict, reading.Text = health.Good, name+" is gone"
+	}
+
+	return reading
 }
 
 // judgeService applies research R12 to one service's ring. A condition that is
@@ -125,6 +144,25 @@ func (c *Check) pruneLocked(now time.Time) {
 		}
 		c.growth.rings[name] = ring
 	}
+}
+
+// growthExcluded reports whether name matches a growth_exclude name or
+// path.Match glob. A unit also matches by its name without ".service", as
+// never_touch does. Patterns are validated at config load.
+func growthExcluded(exclude []string, name string) bool {
+	short, unit := strings.CutSuffix(name, ".service")
+	for _, glob := range exclude {
+		if ok, _ := path.Match(glob, name); ok {
+			return true
+		}
+		if unit {
+			if ok, _ := path.Match(glob, short); ok {
+				return true
+			}
+		}
+	}
+
+	return false
 }
 
 // span is "40 min", or "3 h" from two hours.

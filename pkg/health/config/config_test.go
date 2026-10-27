@@ -999,6 +999,7 @@ memory:
   warn_pressure_percent: 15
   growth_window: 2h
   growth_warn: 512MB
+  growth_exclude: [build, "runner-*"]
   audit_exclude: [scratch-job, "a.b@c_d-e", "runner-*"]
   guard:
     intervene: act
@@ -1016,6 +1017,7 @@ memory:
 	if m.Interval.Duration() != 2*time.Minute || m.Mode != config.ModeTLGOrSMS || m.PauseInQuietWindows ||
 		m.WarnAvailablePercent != 20 || m.WarnSwapPercent != 90 || m.WarnPressurePercent != 15 ||
 		m.GrowthWindow.Duration() != 2*time.Hour || m.GrowthWarn != 512<<20 ||
+		len(m.GrowthExclude) != 2 || m.GrowthExclude[1] != "runner-*" ||
 		len(m.AuditExclude) != 3 || m.AuditExclude[2] != "runner-*" {
 		t.Errorf("memory = %+v", m)
 	}
@@ -1187,6 +1189,8 @@ func TestMemoryErrors(t *testing.T) {
 		{"empty intervene", "memory: {guard: {intervene: \"\"}}", "intervene"},
 		{"never_touch bad glob", "memory: {guard: {never_touch: [\"[\"]}}", "never_touch"},
 		{"never_touch empty", "memory: {guard: {never_touch: [\"\"]}}", "never_touch"},
+		{"growth_exclude bad glob", "memory: {growth_exclude: [\"runner-[\"]}", "growth_exclude"},
+		{"growth_exclude empty", "memory: {growth_exclude: [\"\"]}", "growth_exclude"},
 		{"audit_exclude bad glob", "memory: {audit_exclude: [\"runner-[\"]}", "audit_exclude"},
 		{"audit_exclude empty", "memory: {audit_exclude: [\"\"]}", "audit_exclude"},
 	}
@@ -1225,8 +1229,8 @@ func TestExampleConfigDocumentsMemory(t *testing.T) {
 		t.Errorf("example intervene = %q, want report", m.Guard.Intervene)
 	}
 
-	m.AuditExclude, m.Guard.NeverTouch = nil, nil
-	want.AuditExclude, want.Guard.NeverTouch = nil, nil
+	m.GrowthExclude, m.AuditExclude, m.Guard.NeverTouch = nil, nil, nil
+	want.GrowthExclude, want.AuditExclude, want.Guard.NeverTouch = nil, nil, nil
 	if !reflect.DeepEqual(m, want) {
 		t.Errorf("example memory values differ from the defaults:\n got %+v\nwant %+v", m, want)
 	}

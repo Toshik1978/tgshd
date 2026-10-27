@@ -89,6 +89,8 @@ memory:                                     # absent => no memory check and no g
   warn_pressure_percent: 10                 # 1-100: PSI "some" avg60, share of time tasks waited for memory
   growth_window: 1h                         # 10m-24h: a service growing by growth_warn within it is a PROBLEM
   growth_warn: 4GB                          # B, KB, MB, GB, TB (powers of 1024)
+  growth_exclude: [ "runner-*" ]            # containers or units (names or globs) left out of the growth
+                                            # warning: memory that follows a workload, like a CI runner's builds
   audit_exclude: [ "scratch-job", "runner-*" ]
                                             # containers (names or globs) allowed to run without a memory limit.
                                             # The audit counts only running containers with restart policy

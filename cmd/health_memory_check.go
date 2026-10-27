@@ -48,6 +48,7 @@ func buildMemoryCheck(
 		WarnPressurePercent:  m.WarnPressurePercent,
 		GrowthWindow:         m.GrowthWindow.Duration(),
 		GrowthWarn:           m.GrowthWarn.Bytes(),
+		GrowthExclude:        m.GrowthExclude,
 		AuditExclude:         m.AuditExclude,
 		Open:                 open.Problem,
 	})

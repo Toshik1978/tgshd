@@ -133,6 +133,7 @@ func defaultMemory() Memory {
 		WarnPressurePercent:  10,
 		GrowthWindow:         Duration(time.Hour),
 		GrowthWarn:           4 << 30,
+		GrowthExclude:        []string{},
 		AuditExclude:         []string{},
 
 		Guard: Guard{
