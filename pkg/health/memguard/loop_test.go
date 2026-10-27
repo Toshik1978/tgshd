@@ -355,16 +355,17 @@ func (s *loopSim) run(d time.Duration) {
 }
 
 // settle waits until the action just dispatched finished or hangs in the
-// actuator.
+// actuator. A finished action is seen by its result, which settle takes and
+// puts back for the next step to collect: the channel holds one result and
+// only one action runs. It must not wait on l.actions from another
+// goroutine: when the action hangs, that waiter outlives settle, and the
+// next action's Add, once the hung one times out, panics the WaitGroup
+// ("reused before previous Wait has returned").
 func (s *loopSim) settle() {
 	s.t.Helper()
-	done := make(chan struct{})
-	go func() {
-		s.l.actions.Wait()
-		close(done)
-	}()
 	select {
-	case <-done:
+	case r := <-s.l.results:
+		s.l.results <- r
 	case <-s.act.blocked:
 	case <-time.After(failsafe):
 		s.t.Fatal("action neither finished nor blocked")
