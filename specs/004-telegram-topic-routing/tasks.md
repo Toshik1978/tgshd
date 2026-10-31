@@ -82,9 +82,9 @@ replies become silent.
 
 ## Phase 5: Polish & Cross-Cutting Concerns
 
-- [ ] T014 [P] Document the feature generically in README.md and .env.dist: the three `TELEGRAM_TOPIC_*` settings and their fall-back, the routing table (topic and sound per message), the group access rule (sender must be in `TELEGRAM_ALLOWED_IDS`), `/sms` limited to `TELEGRAM_CHAT_ID`, replies in the originating topic, `TELEGRAM_THREAD_ID` for the custom script, and that the bot must be an administrator of the group; placeholder ids only (FR-019)
-- [ ] T015 [P] Update .claude/CLAUDE.md: package map row for `pkg/telegram/route`, the `telegram.Handler` signature with `route.Origin`, and `./pkg/telegram/route` in the coverage-gate list
-- [ ] T016 Run quickstart.md's automated checks — `task lint` (0 issues), `task test:coverage` (80 % floor), `CGO_ENABLED=0 task build` — and scan the unpushed diff for real chat ids, topic ids, group names, hostnames and phone numbers (Constitution II, IV, VI)
+- [x] T014 [P] Document the feature generically in README.md and .env.dist: the three `TELEGRAM_TOPIC_*` settings and their fall-back, the routing table (topic and sound per message), the group access rule (sender must be in `TELEGRAM_ALLOWED_IDS`), `/sms` limited to `TELEGRAM_CHAT_ID`, replies in the originating topic, `TELEGRAM_THREAD_ID` for the custom script, and that the bot must be an administrator of the group; placeholder ids only (FR-019)
+- [x] T015 [P] Update .claude/CLAUDE.md: package map row for `pkg/telegram/route`, the `telegram.Handler` signature with `route.Origin`, and `./pkg/telegram/route` in the coverage-gate list
+- [x] T016 Run quickstart.md's automated checks — `task lint` (0 issues), `task test:coverage` (80 % floor), `CGO_ENABLED=0 task build` — and scan the unpushed diff for real chat ids, topic ids, group names, hostnames and phone numbers (Constitution II, IV, VI)
 
 ---
 

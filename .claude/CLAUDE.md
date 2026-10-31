@@ -32,7 +32,7 @@ an fx lifecycle:
    incoming command to a handler, and publishes replies.
 2. **Command handlers** (`pkg/command`) — one per command, collected into the fx
    result group `command_handler`. Each implements `telegram.Handler`
-   (`Name() string`, `Enabled() bool`, `Handle(ctx, senderID, cmd) error`).
+   (`Name() string`, `Enabled() bool`, `Handle(ctx, origin route.Origin, cmd string) error`).
 3. **Background workers** (`pkg/sms`, …) — collected into the fx result group
    `worker`. Each implements `app.Worker` (`Name`, `Duration`, `Do`) and is run
    on a schedule by `cmd/app` via gocron.
@@ -70,7 +70,8 @@ group, gated behind an env-var check in `main()`.
 | `cmd` | `main.go`: fx composition root, config, env-gated wiring; `cli.go`: `check --once` and `heartbeat` subcommands |
 | `cmd` (health) | `health.go`, `health_adapters.go`, `health_hardware.go`, `health_services.go`, `health_sms.go`, `health_reports.go`, `health_memory.go`, `health_memory_check.go`: health wiring, adapters and report/summary providers |
 | `cmd/app` | `Application` lifecycle, gocron worker scheduler |
-| `pkg/telegram` | Telegram consumer (routing, `access.go` allow-list) + publisher (replies) |
+| `pkg/telegram` | Telegram consumer (long-poll, dispatch to handlers) + publisher (replies) |
+| `pkg/telegram/route` | Pure Telegram destinations and routing: `Route`/`Topic` and `TELEGRAM_TOPIC_*` parsing, command `Origin`, `AccessList` allow-list and group rule, `CommandName` (`/name@bot`), thread-rejection fallback (`ThreadRejected`/`SendWithFallback`) |
 | `pkg/command` | Command handlers (`/ping`, `/power`, `/speed`, `/5g` `/4g` `/3g`, `/sms`, `/status`, `/clear`, `/retire`, `/history`, `/temp`, `/disks`, script) |
 | `pkg/ping` | ICMP ping (pro-bing) |
 | `pkg/power` | UPS voltage via NUT |
@@ -119,7 +120,7 @@ project constitution, `.specify/memory/constitution.md`, which wins on any confl
 The CI coverage gate (80% floor) measures the packages that can be cleanly
 unit-tested. The scope is the `COVERPKG` variable in `Taskfile.yml`, repeated
 as `-coverpkg` in `.github/workflows/ci.yml` (keep the two in sync):
-`pkg/command/...`, `pkg/sms`, `pkg/script`, `cmd/app` and `pkg/health/...`.
+`pkg/command/...`, `pkg/sms`, `pkg/script`, `cmd/app`, `pkg/health/...` and `pkg/telegram/route`.
 Everything that only runs against real hardware/services is excluded from the
 gate: the I/O adapters (`pkg/ping`, `pkg/power`, `pkg/speedtest`, the Telegram
 transport), the host adapters (`pkg/host/...`, `pkg/mail`, `pkg/doh`), the ZTE

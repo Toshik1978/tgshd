@@ -41,8 +41,14 @@ monitoring and control.
 **Access control**
 
 Only `TELEGRAM_CHAT_ID` and the optional `TELEGRAM_ALLOWED_IDS` may command the
-bot; updates from any other chat are ignored and logged. `/sms` stays limited
-to `TELEGRAM_CHAT_ID`.
+bot; updates from any other chat are ignored and logged. In a group, the chat
+must be allowed **and** the sender's user ID must be listed in
+`TELEGRAM_ALLOWED_IDS`; a refused command gets no reply and one warning in the
+log. `/name@<this bot>` is the same command as `/name`; `/name@<another bot>` is
+ignored. `/sms` works only in the `TELEGRAM_CHAT_ID` chat.
+
+**Topics.** When `TELEGRAM_CHAT_ID` is a forum supergroup, tgshd can post to
+three topics (see [Telegram topics](#telegram-topics)).
 
 Every hardware/service-backed feature is **optional**: if it isn't configured,
 that feature is simply inactive and the daemon still runs.
@@ -88,9 +94,12 @@ Configuration is read from the environment (a local `.env` is auto-loaded; see
 | :--- | :--- |
 | `APP_ENV` | `development` (pretty logs) or `production` |
 | `TELEGRAM_TOKEN` | Telegram bot token |
-| `TELEGRAM_CHAT_ID` | Operator chat/user ID — reply target and the only sender allowed to run `/sms` |
-| `TELEGRAM_ALLOWED_IDS` | Optional comma-separated extra chat IDs allowed to command the bot in addition to `TELEGRAM_CHAT_ID`; updates from any other chat are ignored and logged |
-| `TELEGRAM_UNKNOWN_SCRIPT` | Path to a script that lists/executes custom commands |
+| `TELEGRAM_CHAT_ID` | Chat tgshd posts to (a forum supergroup, a channel or a private chat) and the only chat where `/sms` works |
+| `TELEGRAM_ALLOWED_IDS` | Optional comma-separated extra chat IDs allowed to command the bot in addition to `TELEGRAM_CHAT_ID`; in a group it also lists the user IDs allowed to run commands. Updates from any other chat are ignored and logged |
+| `TELEGRAM_TOPIC_ALERTS` | Optional thread ID of the alerts topic |
+| `TELEGRAM_TOPIC_SMS` | Optional thread ID of the SMS topic |
+| `TELEGRAM_TOPIC_SYSTEM` | Optional thread ID of the system topic |
+| `TELEGRAM_UNKNOWN_SCRIPT` | Path to a script that lists/executes custom commands; it receives `TELEGRAM_THREAD_ID` when the command came from a topic |
 | `BOT_PING_HOSTS` | Comma-separated hosts for `/ping` |
 | `BOT_NUT_IP` | NUT server address |
 | `BOT_NUT_NAME` | UPS name in NUT |
@@ -105,6 +114,41 @@ Configuration is read from the environment (a local `.env` is auto-loaded; see
 | `BOT_SMTP_FROM` / `BOT_SMTP_TO` | Envelope and header addresses; required with `BOT_SMTP_ADDR` |
 | `BOT_SMTP_USER` / `BOT_SMTP_PASS` | Optional SMTP PLAIN authentication |
 | `BOT_SMS_PHONE` | Operator phone number for SMS alerts; required for the `sms` and `tlg-or-sms` modes (needs gammu) |
+
+## Telegram topics
+
+With `TELEGRAM_CHAT_ID` set to a forum supergroup (for example
+`-1000000000000`), tgshd sorts its messages into three topics. Set the thread ID
+of each topic: `TELEGRAM_TOPIC_ALERTS=2`, `TELEGRAM_TOPIC_SMS=3`,
+`TELEGRAM_TOPIC_SYSTEM=4`. The bot must be an administrator of the group.
+
+If none of the three is set, nothing is routed to a topic and there is no
+warning. If any is set, each one that is missing or not a positive whole number
+falls back to no topic (the General topic) and logs one startup warning naming
+it.
+
+| Message | Topic | Silent |
+| :--- | :--- | :--- |
+| PROBLEM, CHECKER ERROR | alerts | no |
+| RESOLVED, checker recovered | alerts | yes |
+| Fix action, memory-guard action, drive retired | alerts | no |
+| Delivery-channel failure notice, message with the "Undelivered earlier:" backlog | alerts | no |
+| Incoming SMS (gammu inbox, modem) | SMS | no |
+| Weekly summary | system | yes |
+| Command reply, usage text, error reply, "Script succeeded!" | the chat and topic the command came from | yes |
+
+Silent messages are delivered without a notification sound. If Telegram reports
+that a topic was not found, closed or deleted, the message is sent once more to
+the General topic, still with the same sound setting, and a warning is logged.
+
+Commands in a group are accepted only from user IDs listed in
+`TELEGRAM_ALLOWED_IDS` (for example `100`), and the reply goes to the topic of
+the command, or to General. `/sms` works only in the `TELEGRAM_CHAT_ID` chat.
+
+The custom script (`TELEGRAM_UNKNOWN_SCRIPT`) still gets the whole message as its
+single argument. When the command came from a topic, its environment also holds
+`TELEGRAM_THREAD_ID=<thread id>`; the variable is not set for commands from
+General, a private chat or a channel. A script that ignores it works unchanged.
 
 ## Host health monitoring
 
@@ -434,7 +478,8 @@ or locks memory.
 ## Incoming SMS through gammu
 
 With `BOT_GAMMU_DSN` set, tgshd reads the gammu-smsd `inbox` table every 15
-seconds, forwards each received SMS to `TELEGRAM_CHAT_ID` (multi-part texts
+seconds, forwards each received SMS to `TELEGRAM_CHAT_ID` (to the SMS topic when
+`TELEGRAM_TOPIC_SMS` is set; multi-part texts
 joined; parts still missing after 10 minutes are forwarded as incomplete) and
 marks its rows `Processed`. This runs with or without health monitoring. If
 PostgreSQL is unreachable the daemon still starts; each poll logs an error and
