@@ -174,15 +174,24 @@ func (c *consumer) handleCommands(ctx context.Context, handlers map[string]Handl
 	if !c.permitted(tctx) {
 		return nil
 	}
-	fields := strings.Fields(tctx.Text())
-	if len(fields) == 0 {
+	name, ok := route.CommandName(tctx.Text(), c.username())
+	if !ok {
 		return nil
 	}
-	if handler, ok := handlers[fields[0]]; ok {
+	if handler, ok := handlers[name]; ok {
 		return c.handleCommand(ctx, handler, tctx)
 	}
 
 	return nil
+}
+
+// username is the bot's own username, known once getMe has answered.
+func (c *consumer) username() string {
+	if c.bot == nil || c.bot.Me == nil {
+		return ""
+	}
+
+	return c.bot.Me.Username
 }
 
 func (c *consumer) handleCommand(ctx context.Context, handler Handler, tctx telebot.Context) error {
@@ -233,22 +242,38 @@ func originOf(message *telebot.Message) route.Origin {
 	return origin
 }
 
-// permitted reports whether the update comes from an allowed chat. Other
-// updates are dropped silently, with one warning carrying chat and sender IDs.
+// chatKindOf maps a Telegram chat type to the kind the access rule knows.
+func chatKindOf(chat *telebot.Chat) (route.ChatKind, bool) {
+	switch chat.Type {
+	case telebot.ChatChannel, telebot.ChatChannelPrivate:
+		return route.ChatChannel, true
+	case telebot.ChatPrivate:
+		return route.ChatPrivate, true
+	case telebot.ChatGroup, telebot.ChatSuperGroup:
+		return route.ChatGroup, true
+	default:
+		return 0, false
+	}
+}
+
+// permitted reports whether the update may command the bot: a channel or a
+// private chat must be allowed, a group must be allowed and the sender too.
+// Other updates are dropped silently, with one warning carrying chat and
+// sender IDs.
 func (c *consumer) permitted(tctx telebot.Context) bool {
 	chat := tctx.Chat()
-	if chat != nil && c.access.Allowed(chat.ID) {
-		return true
-	}
-
 	var chatID, senderID int64
-	if chat != nil {
-		chatID = chat.ID
-	}
 	if message := tctx.Message(); message != nil && message.Sender != nil {
 		senderID = message.Sender.ID
 	}
-	c.logger.Warn("Update from a chat that is not allowed was dropped",
+	if chat != nil {
+		chatID = chat.ID
+		if kind, ok := chatKindOf(chat); ok && c.access.Permit(kind, chatID, senderID) {
+			return true
+		}
+	}
+
+	c.logger.Warn("Update that is not allowed was dropped",
 		zap.Int64("chat_id", chatID), zap.Int64("sender_id", senderID))
 
 	return false

@@ -118,6 +118,9 @@ func TestSmsUsageOnBadArgs(t *testing.T) {
 	if pub.count != 1 {
 		t.Error("expected a usage reply")
 	}
+	if want := (route.Destination{ChatID: 100, ThreadID: 3, Silent: true}); pub.lastDest != want {
+		t.Errorf("usage reply went to %+v, want %+v", pub.lastDest, want)
+	}
 	if !strings.Contains(pub.lastMsg, "&lt;") || strings.Contains(pub.lastMsg, "<phone") {
 		t.Errorf("usage reply must be HTML-escaped, got %q", pub.lastMsg)
 	}
@@ -140,5 +143,42 @@ func TestSmsSendFailureReported(t *testing.T) {
 	}
 	if !strings.Contains(pub.lastMsg, "&lt;failed&gt;") {
 		t.Errorf("failure reply must contain escaped error, got %q", pub.lastMsg)
+	}
+}
+
+func TestSmsOriginRule(t *testing.T) {
+	const group int64 = -1000000000000
+	cases := []struct {
+		name     string
+		origin   route.Origin
+		accepted bool
+	}{
+		{"group topic", route.Origin{ChatID: group, ThreadID: 2, SenderID: 100}, true},
+		{"group General", route.Origin{ChatID: group, ThreadID: 0, SenderID: 100}, true},
+		{"private chat of an allowed user", route.Origin{ChatID: 100, SenderID: 100}, false},
+		{"channel", route.Origin{ChatID: -1000000000001, SenderID: 200}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			sender := &fakeSender{}
+			pub := &fakePublisher{}
+			cmd := NewSmsCommand(zap.NewNop(), pub, sender, group)
+
+			if err := cmd.Handle(context.Background(), c.origin, "/sms +123 hi"); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if sender.called != c.accepted {
+				t.Errorf("sender called = %v, want %v", sender.called, c.accepted)
+			}
+			if !c.accepted {
+				if pub.count != 0 {
+					t.Errorf("ignored command must not reply, got %d replies", pub.count)
+				}
+				return
+			}
+			if want := c.origin.Reply(); pub.count != 1 || pub.lastDest != want {
+				t.Errorf("reply count=%d dest=%+v, want one to %+v", pub.count, pub.lastDest, want)
+			}
+		})
 	}
 }

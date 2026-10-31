@@ -57,10 +57,27 @@ func TestConsumerAccessFilter(t *testing.T) {
 		wantCalls int
 		wantWarn  bool
 	}{
-		{"allowed chat", &telebot.Chat{ID: 100}, &telebot.User{ID: 5}, 1, false},
-		{"allowed extra", &telebot.Chat{ID: 200}, nil, 1, false},
-		{"stranger private", &telebot.Chat{ID: 999}, &telebot.User{ID: 999}, 0, true},
-		{"stranger group", &telebot.Chat{ID: -999}, &telebot.User{ID: 100}, 0, true},
+		{"allowed private", &telebot.Chat{ID: 100, Type: telebot.ChatPrivate}, &telebot.User{ID: 5}, 1, false},
+		{"allowed channel", &telebot.Chat{ID: 200, Type: telebot.ChatChannel}, nil, 1, false},
+		{"allowed private channel", &telebot.Chat{ID: 200, Type: telebot.ChatChannelPrivate}, nil, 1, false},
+		{
+			"group with allowed sender",
+			&telebot.Chat{ID: 100, Type: telebot.ChatSuperGroup},
+			&telebot.User{ID: 200},
+			1,
+			false,
+		},
+		{
+			"plain group with allowed sender",
+			&telebot.Chat{ID: 100, Type: telebot.ChatGroup},
+			&telebot.User{ID: 200},
+			1,
+			false,
+		},
+		{"group with stranger", &telebot.Chat{ID: 100, Type: telebot.ChatSuperGroup}, &telebot.User{ID: 999}, 0, true},
+		{"stranger private", &telebot.Chat{ID: 999, Type: telebot.ChatPrivate}, &telebot.User{ID: 999}, 0, true},
+		{"stranger group", &telebot.Chat{ID: -999, Type: telebot.ChatSuperGroup}, &telebot.User{ID: 100}, 0, true},
+		{"unknown chat type", &telebot.Chat{ID: 100}, &telebot.User{ID: 100}, 0, true},
 		{"no chat", nil, &telebot.User{ID: 100}, 0, true},
 	}
 	for _, tt := range tests {
@@ -117,6 +134,37 @@ func TestOriginOf(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := originOf(tt.msg); got != tt.want {
 				t.Fatalf("originOf() = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestHandleCommandsBotName(t *testing.T) {
+	tests := []struct {
+		name      string
+		text      string
+		username  string
+		wantCalls int
+	}{
+		{"plain", "/ping", "tgshd_test_bot", 1},
+		{"own bot", "/ping@tgshd_test_bot", "tgshd_test_bot", 1},
+		{"other bot", "/ping@other_bot", "tgshd_test_bot", 0},
+		{"username unknown", "/ping@tgshd_test_bot", "", 0},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := &fakeHandler{}
+			c, _ := newTestConsumer(h)
+			if tt.username != "" {
+				c.bot = &telebot.Bot{Me: &telebot.User{Username: tt.username}}
+			}
+			chat := &telebot.Chat{ID: 100, Type: telebot.ChatChannel}
+			tctx := fakeContext{msg: &telebot.Message{Chat: chat, Sender: &telebot.User{ID: 5}, Text: tt.text}}
+			if err := c.handleCommands(context.Background(), map[string]Handler{"/ping": h}, tctx); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if h.calls != tt.wantCalls {
+				t.Fatalf("handler calls = %d, want %d", h.calls, tt.wantCalls)
 			}
 		})
 	}

@@ -16,7 +16,7 @@ const scriptNameTimeout = 10 * time.Second
 
 type Script interface {
 	Name(ctx context.Context) (string, error)
-	Execute(ctx context.Context, cmd string) error
+	Execute(ctx context.Context, cmd string, threadID int) error
 }
 
 type unknownCommand struct {
@@ -59,7 +59,7 @@ func (c *unknownCommand) Enabled() bool {
 func (c *unknownCommand) Handle(ctx context.Context, origin route.Origin, cmd string) error {
 	c.logger.Debug("Unknown command received")
 
-	if err := c.runner.Execute(ctx, cmd); err != nil {
+	if err := c.runner.Execute(ctx, cmd, origin.ThreadID); err != nil {
 		return fmt.Errorf("failed to run script: %w", err)
 	}
 

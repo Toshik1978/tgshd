@@ -17,6 +17,7 @@ type fakeScript struct {
 	executeErr error
 	executed   bool
 	lastCmd    string
+	lastThread int
 }
 
 func (f *fakeScript) Name(_ context.Context) (string, error) {
@@ -24,8 +25,9 @@ func (f *fakeScript) Name(_ context.Context) (string, error) {
 	return f.name, f.nameErr
 }
 
-func (f *fakeScript) Execute(_ context.Context, cmd string) error {
+func (f *fakeScript) Execute(_ context.Context, cmd string, threadID int) error {
 	f.executed = true
+	f.lastThread = threadID
 	f.lastCmd = cmd
 	return f.executeErr
 }
@@ -94,6 +96,9 @@ func TestUnknownHandleHappyPath(t *testing.T) {
 			script.executed,
 			script.lastCmd,
 		)
+	}
+	if script.lastThread != 3 {
+		t.Errorf("expected Execute called with thread 3, got %d", script.lastThread)
 	}
 	if pub.count != 1 || pub.lastDest != (route.Destination{ChatID: 55, ThreadID: 3, Silent: true}) {
 		t.Errorf("expected one reply to sender 55, got count=%d dest=%+v", pub.count, pub.lastDest)

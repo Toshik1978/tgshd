@@ -35,3 +35,33 @@ func TestAccessListEmpty(t *testing.T) {
 		t.Fatal("list with an ID must not be empty")
 	}
 }
+
+func TestAccessListPermit(t *testing.T) {
+	const group = int64(-1000000000000)
+	access := NewAccessList(100, []int64{group, 200})
+
+	tests := []struct {
+		name     string
+		kind     ChatKind
+		chatID   int64
+		senderID int64
+		want     bool
+	}{
+		{"channel allowed", ChatChannel, group, 0, true},
+		{"channel not allowed", ChatChannel, -999, 0, false},
+		{"private allowed", ChatPrivate, 100, 100, true},
+		{"private not allowed", ChatPrivate, 999, 999, false},
+		{"group with allowed sender", ChatGroup, group, 200, true},
+		{"group with stranger", ChatGroup, group, 999, false},
+		{"group without sender", ChatGroup, group, 0, false},
+		{"group not allowed, sender allowed", ChatGroup, -999, 200, false},
+		{"unknown kind", ChatKind(99), group, 200, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := access.Permit(tt.kind, tt.chatID, tt.senderID); got != tt.want {
+				t.Fatalf("Permit(%v, %d, %d) = %v, want %v", tt.kind, tt.chatID, tt.senderID, got, tt.want)
+			}
+		})
+	}
+}
