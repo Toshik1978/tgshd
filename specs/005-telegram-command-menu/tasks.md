@@ -70,9 +70,9 @@ T003–T005.
 
 ## Phase 4: Polish & Cross-Cutting Concerns
 
-- [ ] T010 Add a "Command menu" section to README.md: tgshd replaces any default (BotFather) menu at every start, who sees it (allowed users in private chats and inside allowed groups; others none), that Telegram cannot limit it to one topic, that commands sent from the menu arrive without parameters, and the `curl` from contracts/telegram.md (placeholder ids) to clear the menu of a user removed from the allow-list (FR-014, R9)
-- [ ] T011 [P] Update .claude/CLAUDE.md: the `telegram.Handler` interface is now `Commands() []route.BotCommand`, `Enabled() bool`, `Handle(…)`; the `pkg/telegram/route` package-map entry mentions `BotCommand`, `BuildCommands` and menu scopes; the `pkg/telegram` entry mentions publishing the command menu
-- [ ] T012 Run the automated part of specs/005-telegram-command-menu/quickstart.md: `task lint` reports 0 issues, `task test:coverage` passes with the 80% floor, `task build` succeeds with `CGO_ENABLED=0`; scan the diff for real ids, hostnames or names (Principle VI)
+- [x] T010 Add a "Command menu" section to README.md: tgshd replaces any default (BotFather) menu at every start, who sees it (allowed users in private chats and inside allowed groups; others none), that Telegram cannot limit it to one topic, that commands sent from the menu arrive without parameters, and the `curl` from contracts/telegram.md (placeholder ids) to clear the menu of a user removed from the allow-list (FR-014, R9)
+- [x] T011 [P] Update .claude/CLAUDE.md: the `telegram.Handler` interface is now `Commands() []route.BotCommand`, `Enabled() bool`, `Handle(…)`; the `pkg/telegram/route` package-map entry mentions `BotCommand`, `BuildCommands` and menu scopes; the `pkg/telegram` entry mentions publishing the command menu
+- [x] T012 Run the automated part of specs/005-telegram-command-menu/quickstart.md: `task lint` reports 0 issues, `task test:coverage` passes with the 80% floor, `task build` succeeds with `CGO_ENABLED=0`; scan the diff for real ids, hostnames or names (Principle VI)
 
 ---
 

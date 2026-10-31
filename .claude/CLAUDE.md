@@ -32,7 +32,7 @@ an fx lifecycle:
    incoming command to a handler, and publishes replies.
 2. **Command handlers** (`pkg/command`) — one per command, collected into the fx
    result group `command_handler`. Each implements `telegram.Handler`
-   (`Name() string`, `Enabled() bool`, `Handle(ctx, origin route.Origin, cmd string) error`).
+   (`Commands() []route.BotCommand`, `Enabled() bool`, `Handle(ctx, origin route.Origin, cmd string) error`).
 3. **Background workers** (`pkg/sms`, …) — collected into the fx result group
    `worker`. Each implements `app.Worker` (`Name`, `Duration`, `Do`) and is run
    on a schedule by `cmd/app` via gocron.
@@ -70,9 +70,9 @@ group, gated behind an env-var check in `main()`.
 | `cmd` | `main.go`: fx composition root, config, env-gated wiring; `cli.go`: `check --once` and `heartbeat` subcommands |
 | `cmd` (health) | `health.go`, `health_adapters.go`, `health_hardware.go`, `health_services.go`, `health_sms.go`, `health_reports.go`, `health_memory.go`, `health_memory_check.go`: health wiring, adapters and report/summary providers |
 | `cmd/app` | `Application` lifecycle, gocron worker scheduler |
-| `pkg/telegram` | Telegram consumer (long-poll, dispatch to handlers) + publisher (replies) |
-| `pkg/telegram/route` | Pure Telegram destinations and routing: `Route`/`Topic` and `TELEGRAM_TOPIC_*` parsing, command `Origin`, `AccessList` allow-list and group rule, `CommandName` (`/name@bot`), thread-rejection fallback (`ThreadRejected`/`SendWithFallback`) |
-| `pkg/command` | Command handlers (`/ping`, `/power`, `/speed`, `/5g` `/4g` `/3g`, `/sms`, `/status`, `/clear`, `/retire`, `/history`, `/temp`, `/disks`, script) |
+| `pkg/telegram` | Telegram consumer (long-poll, dispatch to handlers) + publisher (replies); `menu.go` publishes the Telegram command menu at startup (`publishMenu`: clears the default list, sets the menu per scope after getMe) |
+| `pkg/telegram/route` | Pure Telegram destinations and routing: `Route`/`Topic` and `TELEGRAM_TOPIC_*` parsing, command `Origin`, `AccessList` allow-list and group rule, `CommandName` (`/name@bot`), `BotCommand` and `BuildCommands` (the single validate/order/dedupe/cap-100 place), menu scopes (`MenuScope`, `AccessList.MenuScopes()`), thread-rejection fallback (`ThreadRejected`/`SendWithFallback`) |
+| `pkg/command` | Command handlers (`/ping`, `/power`, `/speed`, `/5g` `/4g` `/3g`, `/sms`, `/status`, `/clear`, `/retire`, `/history`, `/temp`, `/disks`, script with its `name - description` command list) |
 | `pkg/ping` | ICMP ping (pro-bing) |
 | `pkg/power` | UPS voltage via NUT |
 | `pkg/speedtest` | Internet speed test |

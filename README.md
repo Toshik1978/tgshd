@@ -190,6 +190,35 @@ the whole message as its argument. A command that takes parameters should reply
 with its usage when sent bare, because the Telegram command menu sends a tapped
 command without arguments.
 
+### Command menu
+
+On every start, once Telegram accepts the bot token, tgshd replaces the bot's
+command menu in the background. It first deletes the default menu, so a menu set
+in BotFather disappears, then publishes its own list: the built-in commands plus
+the script commands described in [Custom script commands](#custom-script-commands).
+
+- **Who sees it.** Only the user IDs from `TELEGRAM_CHAT_ID` and
+  `TELEGRAM_ALLOWED_IDS` (positive IDs are users, negative IDs are groups). Each
+  such user gets the menu in a private chat with the bot and inside every allowed
+  group. Everyone else sees no menu.
+- **Topics.** Telegram cannot limit a menu to one topic, so an allowed user sees
+  it in every topic of an allowed group.
+- **Parameters.** A command tapped in the menu is sent without parameters. A
+  command that needs them should reply with its usage.
+- **Failures.** A failed Telegram call is logged as a warning for its scope and
+  never stops the daemon.
+
+tgshd does not clear the menu of a user you later remove from the allow-list.
+Delete it by hand, using the group ID and user ID that were allowed:
+
+```sh
+curl -s "https://api.telegram.org/bot$TELEGRAM_TOKEN/deleteMyCommands" \
+  -H 'Content-Type: application/json' \
+  -d '{"scope":{"type":"chat_member","chat_id":-1000000000000,"user_id":100000000}}'
+```
+
+For a private chat use `{"type":"chat","chat_id":200000000}` as the scope.
+
 ## Host health monitoring
 
 tgshd can watch the host it runs on and push alerts to Telegram (and, per
