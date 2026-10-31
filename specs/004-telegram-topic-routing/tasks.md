@@ -110,3 +110,7 @@ Phase 5:  T014 (README, .env.dist) ∥ T015 (CLAUDE.md)
 2. US2 (Phase 3): commands from the group, safely.
 3. US3 (Phase 4): the fall-back for rejected topics.
 4. Polish and the full verification run.
+
+## Phase 6: Convergence
+
+- [x] T017 Parse and warn about the `TELEGRAM_TOPIC_*` settings at every startup by adding `fx.Invoke(func(route.Topics) {})` to `configuration()` in cmd/main.go, with a test that `appOptions` without any optional feature env still logs the warning for an invalid topic per FR-004 (partial)

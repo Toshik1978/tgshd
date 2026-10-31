@@ -111,6 +111,9 @@ func configuration() fx.Option {
 			),
 			fx.Annotate(telegram.NewPublisher, fx.As(new(command.Publisher)), fx.As(new(sms.Publisher))),
 		),
+		// Parse the topic settings at every startup so a bad one always warns,
+		// even when no optional feature consumes route.Topics.
+		fx.Invoke(func(route.Topics) {}),
 	)
 }
 

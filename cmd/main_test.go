@@ -2,8 +2,10 @@ package main
 
 import (
 	"context"
+	"strings"
 	"testing"
 
+	"go.uber.org/fx"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
 
@@ -69,5 +71,31 @@ func TestNewModemSMSWorkerGoesToSMSTopic(t *testing.T) {
 	}
 	if want := (route.Destination{ChatID: chat, ThreadID: 3}); len(pub.to) != 1 || pub.to[0] != want {
 		t.Fatalf("destinations = %+v, want [%+v] (sms topic, loud)", pub.to, want)
+	}
+}
+
+// TestInvalidTopicWarnsWithoutOptionalFeatures: the TELEGRAM_TOPIC_* settings
+// are parsed and warned about at every startup, even when no optional feature
+// that consumes route.Topics is enabled (FR-004).
+func TestInvalidTopicWarnsWithoutOptionalFeatures(t *testing.T) {
+	t.Setenv("TELEGRAM_TOKEN", "123:placeholder")
+	t.Setenv("TELEGRAM_TOPIC_ALERTS", "abc")
+	t.Setenv("TELEGRAM_TOPIC_SMS", "3")
+	t.Setenv("TELEGRAM_TOPIC_SYSTEM", "4")
+
+	core, logs := observer.New(zap.WarnLevel)
+	a := fx.New(append(appOptions(func(string) string { return "" }), fx.NopLogger,
+		fx.Decorate(func(*zap.Logger) *zap.Logger { return zap.New(core) }))...)
+	if err := a.Err(); err != nil {
+		t.Fatalf("startup failed on a bad topic setting: %v", err)
+	}
+	var found int
+	for _, e := range logs.All() {
+		if strings.Contains(e.Message, "TELEGRAM_TOPIC_ALERTS") {
+			found++
+		}
+	}
+	if found != 1 {
+		t.Fatalf("got %d TELEGRAM_TOPIC_ALERTS warnings, want 1: %v", found, logs.All())
 	}
 }
