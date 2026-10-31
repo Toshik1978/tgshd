@@ -64,7 +64,7 @@ follows a cancelled context; against a real bot, quickstart.md manual steps 2–
 with those descriptions (quickstart.md manual steps 1–3); parsing and routing are covered by
 T003–T005.
 
-- [ ] T009 [US3] Document the script command list in README.md per contracts/script.md: the `name - description` format with the example script, the rules (name characters and length, description length, blank lines, skipped lines and clashes logged as warnings), that the old `a|b|c` output is no longer accepted, and that commands with parameters should reply with usage when sent bare; update the `TELEGRAM_UNKNOWN_SCRIPT` row in the configuration table (FR-008, FR-010, FR-014)
+- [x] T009 [US3] Document the script command list in README.md per contracts/script.md: the `name - description` format with the example script, the rules (name characters and length, description length, blank lines, skipped lines and clashes logged as warnings), that the old `a|b|c` output is no longer accepted, and that commands with parameters should reply with usage when sent bare; update the `TELEGRAM_UNKNOWN_SCRIPT` row in the configuration table (FR-008, FR-010, FR-014)
 
 ---
 

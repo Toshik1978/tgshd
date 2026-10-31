@@ -99,7 +99,7 @@ Configuration is read from the environment (a local `.env` is auto-loaded; see
 | `TELEGRAM_TOPIC_ALERTS` | Optional thread ID of the alerts topic |
 | `TELEGRAM_TOPIC_SMS` | Optional thread ID of the SMS topic |
 | `TELEGRAM_TOPIC_SYSTEM` | Optional thread ID of the system topic |
-| `TELEGRAM_UNKNOWN_SCRIPT` | Path to a script that lists/executes custom commands; it receives `TELEGRAM_THREAD_ID` when the command came from a topic |
+| `TELEGRAM_UNKNOWN_SCRIPT` | Path to a script that lists its commands (one `name - description` line each, when run with no arguments) and executes them; see [Custom script commands](#custom-script-commands). It receives `TELEGRAM_THREAD_ID` when the command came from a topic |
 | `BOT_PING_HOSTS` | Comma-separated hosts for `/ping` |
 | `BOT_NUT_IP` | NUT server address |
 | `BOT_NUT_NAME` | UPS name in NUT |
@@ -149,6 +149,46 @@ The custom script (`TELEGRAM_UNKNOWN_SCRIPT`) still gets the whole message as it
 single argument. When the command came from a topic, its environment also holds
 `TELEGRAM_THREAD_ID=<thread id>`; the variable is not set for commands from
 General, a private chat or a channel. A script that ignores it works unchanged.
+
+### Custom script commands
+
+Run with **no arguments**, the script prints its commands on stdout, one per
+line, in BotFather's format:
+
+```text
+name - description
+```
+
+- `name` is 1-32 characters of `a-z`, `0-9` and `_`; one leading `/` is allowed
+  and dropped.
+- The separator is the first ` - ` (space, hyphen, space) on the line.
+- `description` is 1-256 characters after trimming. Put usage here when the
+  command takes parameters, for example `Wake a PC: /wake <host>`.
+- Blank lines are ignored.
+- Any other line is skipped with a logged warning naming it; the remaining
+  lines still count.
+- A name equal to a built-in command, or repeated, is skipped with a warning.
+- The old single-line `a|b|c` output is **no longer accepted**: it has no
+  ` - `, so it is skipped.
+
+Example:
+
+```sh
+#!/bin/sh
+if [ $# -eq 0 ]; then
+  cat <<'EOF'
+wake - Wake a PC: /wake <host>
+backup - Run the backup now
+EOF
+  exit 0
+fi
+# ... handle "$1" ...
+```
+
+Execution is unchanged: a listed command `/name args...` runs the script with
+the whole message as its argument. A command that takes parameters should reply
+with its usage when sent bare, because the Telegram command menu sends a tapped
+command without arguments.
 
 ## Host health monitoring
 
