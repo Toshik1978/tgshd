@@ -7,6 +7,8 @@ import (
 	"strings"
 
 	"go.uber.org/zap"
+
+	"github.com/Toshik1978/tgshd/pkg/telegram/route"
 )
 
 // SmsSender declares the outgoing SMS backend (gammu-smsd).
@@ -41,15 +43,17 @@ func (c *smsCommand) Enabled() bool {
 	return true
 }
 
-func (c *smsCommand) Handle(ctx context.Context, senderID int64, cmd string) error {
-	if senderID != c.chatID {
-		c.logger.With(zap.Int64("sender_id", senderID)).Debug("Unauthorized /sms attempt")
+func (c *smsCommand) Handle(ctx context.Context, origin route.Origin, cmd string) error {
+	if origin.ChatID != c.chatID {
+		c.logger.
+			With(zap.Int64("chat_id", origin.ChatID), zap.Int64("sender_id", origin.SenderID)).
+			Debug("Unauthorized /sms attempt")
 		return nil
 	}
 
 	phone, msg := parseSmsArgs(cmd)
 	if phone == "" || msg == "" {
-		if err := c.publisher.Publish(ctx, senderID, "Usage: /sms &lt;phone&gt; &lt;message&gt;"); err != nil {
+		if err := c.publisher.Publish(ctx, origin.Reply(), "Usage: /sms &lt;phone&gt; &lt;message&gt;"); err != nil {
 			return fmt.Errorf("failed to publish reply: %w", err)
 		}
 		return nil
@@ -57,14 +61,14 @@ func (c *smsCommand) Handle(ctx context.Context, senderID int64, cmd string) err
 
 	if err := c.sender.Publish(ctx, phone, msg); err != nil {
 		reply := "Failed to send SMS: " + html.EscapeString(err.Error())
-		if replyErr := c.publisher.Publish(ctx, senderID, reply); replyErr != nil {
+		if replyErr := c.publisher.Publish(ctx, origin.Reply(), reply); replyErr != nil {
 			c.logger.With(zap.Error(replyErr)).Debug("Failed to send /sms failure reply")
 		}
 		return fmt.Errorf("failed to send sms: %w", err)
 	}
 
 	reply := fmt.Sprintf("SMS queued for <b>%s</b>", html.EscapeString(phone))
-	if err := c.publisher.Publish(ctx, senderID, reply); err != nil {
+	if err := c.publisher.Publish(ctx, origin.Reply(), reply); err != nil {
 		return fmt.Errorf("failed to publish reply: %w", err)
 	}
 

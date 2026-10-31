@@ -9,6 +9,7 @@ import (
 
 	"github.com/Toshik1978/tgshd/pkg/health/report"
 	"github.com/Toshik1978/tgshd/pkg/health/store"
+	"github.com/Toshik1978/tgshd/pkg/telegram/route"
 )
 
 // MetricsSource provides current and 7-day statistics of stored metrics.
@@ -48,7 +49,7 @@ func (c *tempCommand) Enabled() bool {
 	return true
 }
 
-func (c *tempCommand) Handle(ctx context.Context, senderID int64, _ string) error {
+func (c *tempCommand) Handle(ctx context.Context, origin route.Origin, _ string) error {
 	c.logger.Debug("Temp command received")
 
 	stats, err := c.metrics.Metrics(ctx, "temp.", c.now())
@@ -59,7 +60,7 @@ func (c *tempCommand) Handle(ctx context.Context, senderID int64, _ string) erro
 	if c.sensors != nil {
 		sensors = c.sensors.TempSensors()
 	}
-	if err := c.publisher.Publish(ctx, senderID, report.Temps(stats, sensors)); err != nil {
+	if err := c.publisher.Publish(ctx, origin.Reply(), report.Temps(stats, sensors)); err != nil {
 		return fmt.Errorf("failed to publish reply: %w", err)
 	}
 

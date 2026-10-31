@@ -12,6 +12,8 @@ import (
 	"unicode/utf16"
 
 	"go.uber.org/zap"
+
+	"github.com/Toshik1978/tgshd/pkg/telegram/route"
 )
 
 // incompleteTimeout is how long a partially received multipart message waits
@@ -55,7 +57,7 @@ type ProbeMatcher interface {
 type InboxWorker struct {
 	logger    *zap.Logger
 	publisher Publisher
-	chatID    int64
+	dest      route.Destination
 	inbox     Inbox
 	matcher   ProbeMatcher
 	now       func() time.Time
@@ -77,7 +79,7 @@ func NewInboxWorker(
 	return &InboxWorker{
 		logger:    logger,
 		publisher: publisher,
-		chatID:    chatID,
+		dest:      route.Destination{ChatID: chatID},
 		inbox:     inbox,
 		matcher:   matcher,
 		now:       now,
@@ -152,7 +154,7 @@ func (w *InboxWorker) deliver(ctx context.Context, g *inboxGroup, complete bool)
 		w.logger.Info("forwarding incomplete multipart sms after timeout", zap.String("sender", MaskPhone(g.sender)))
 		note = incompleteNote
 	}
-	if err := w.publisher.Publish(ctx, w.chatID, formatInbox(g.sender, g.last, text, note)); err != nil {
+	if err := w.publisher.Publish(ctx, w.dest, formatInbox(g.sender, g.last, text, note)); err != nil {
 		return fmt.Errorf("publish sms from %s: %w", MaskPhone(g.sender), err)
 	}
 

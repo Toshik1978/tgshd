@@ -6,6 +6,8 @@ import (
 
 	"go.uber.org/zap"
 	"gopkg.in/telebot.v4"
+
+	"github.com/Toshik1978/tgshd/pkg/telegram/route"
 )
 
 type publisher struct {
@@ -22,10 +24,12 @@ func NewPublisher(logger *zap.Logger, bot *telebot.Bot) *publisher {
 	}
 }
 
-func (p *publisher) Publish(_ context.Context, recipientID int64, msg string) error {
+func (p *publisher) Publish(_ context.Context, dest route.Destination, msg string) error {
 	p.logger.Debug("Send telegram message")
-	_, err := p.bot.Send(&telebot.User{ID: recipientID}, msg, &telebot.SendOptions{
-		ParseMode: telebot.ModeHTML,
+	_, err := p.bot.Send(&telebot.User{ID: dest.ChatID}, msg, &telebot.SendOptions{
+		ParseMode:           telebot.ModeHTML,
+		ThreadID:            dest.ThreadID,
+		DisableNotification: dest.Silent,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to send telegram message: %w", err)

@@ -8,6 +8,7 @@ import (
 
 	"github.com/Toshik1978/tgshd/pkg/health/report"
 	"github.com/Toshik1978/tgshd/pkg/health/runner"
+	"github.com/Toshik1978/tgshd/pkg/telegram/route"
 )
 
 // StatusSource provides the health runner state.
@@ -45,14 +46,14 @@ func (c *statusCommand) Enabled() bool {
 	return true
 }
 
-func (c *statusCommand) Handle(ctx context.Context, senderID int64, _ string) error {
+func (c *statusCommand) Handle(ctx context.Context, origin route.Origin, _ string) error {
 	c.logger.Debug("Status command received")
 
 	var mem *report.Memory
 	if c.memory != nil {
 		mem = c.memory.MemoryStatus(ctx)
 	}
-	if err := c.publisher.Publish(ctx, senderID, report.Status(c.source.Snapshot(), mem)); err != nil {
+	if err := c.publisher.Publish(ctx, origin.Reply(), report.Status(c.source.Snapshot(), mem)); err != nil {
 		return fmt.Errorf("failed to publish reply: %w", err)
 	}
 

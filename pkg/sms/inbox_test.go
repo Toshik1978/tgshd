@@ -9,6 +9,8 @@ import (
 	"unicode/utf8"
 
 	"go.uber.org/zap"
+
+	"github.com/Toshik1978/tgshd/pkg/telegram/route"
 )
 
 const testNumber = "+10000000000"
@@ -168,7 +170,7 @@ func TestInboxWorker_SingleMessage(t *testing.T) {
 	if err := e.w.Do(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if len(e.pub.calls) != 1 || e.pub.calls[0].recipientID != 42 {
+	if len(e.pub.calls) != 1 || e.pub.calls[0].dest != (route.Destination{ChatID: 42}) {
 		t.Fatalf("calls = %+v", e.pub.calls)
 	}
 	msg := e.pub.calls[0].msg

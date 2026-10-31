@@ -26,6 +26,7 @@ import (
 	"github.com/Toshik1978/tgshd/pkg/host/kmsg"
 	"github.com/Toshik1978/tgshd/pkg/host/nvidia"
 	"github.com/Toshik1978/tgshd/pkg/host/smartctl"
+	"github.com/Toshik1978/tgshd/pkg/telegram/route"
 )
 
 const (
@@ -431,8 +432,8 @@ func (noDrivesCommand) Name() string { return "retire" }
 func (noDrivesCommand) Enabled() bool { return true }
 
 // Handle implements telegram.Handler.
-func (c noDrivesCommand) Handle(ctx context.Context, senderID int64, _ string) error {
-	if err := c.publisher.Publish(ctx, senderID, noDrivesReply); err != nil {
+func (c noDrivesCommand) Handle(ctx context.Context, origin route.Origin, _ string) error {
+	if err := c.publisher.Publish(ctx, origin.Reply(), noDrivesReply); err != nil {
 		return fmt.Errorf("failed to publish reply: %w", err)
 	}
 

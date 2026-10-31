@@ -558,7 +558,7 @@ func TestHealthReportsHandlers(t *testing.T) {
 		{"temp", "cpu: 41°C"},
 		{"disks", "NVMe Example NVMe SSD …0001: health OK, wear 4%"},
 	} {
-		if err := hs[handlerIndex(t, hs, c.name)].Handle(t.Context(), 42, "/"+c.name); err != nil {
+		if err := hs[handlerIndex(t, hs, c.name)].Handle(t.Context(), testOrigin(42), "/"+c.name); err != nil {
 			t.Fatal(err)
 		}
 		msgs := pub.messages()
@@ -579,7 +579,7 @@ func TestHealthReportsHandlersWithoutStore(t *testing.T) {
 		if !h.Enabled() {
 			t.Errorf("/%s disabled", h.Name())
 		}
-		if err := h.Handle(t.Context(), 42, "/"+h.Name()); err != nil {
+		if err := h.Handle(t.Context(), testOrigin(42), "/"+h.Name()); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -597,7 +597,7 @@ func TestHealthReportsHandlersWithoutStore(t *testing.T) {
 		&fakeRunner{},
 		time.Now(),
 	).handlers(zap.NewNop(), &fakePublisher{err: errors.New("down")})
-	if err := failing[0].Handle(t.Context(), 42, "/history"); err == nil {
+	if err := failing[0].Handle(t.Context(), testOrigin(42), "/history"); err == nil {
 		t.Fatal("a failed reply must be returned")
 	}
 }

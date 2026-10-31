@@ -22,6 +22,7 @@ import (
 	"github.com/Toshik1978/tgshd/pkg/mail"
 	"github.com/Toshik1978/tgshd/pkg/ping"
 	"github.com/Toshik1978/tgshd/pkg/power"
+	"github.com/Toshik1978/tgshd/pkg/telegram/route"
 )
 
 const (
@@ -47,7 +48,7 @@ type delivery struct {
 // (gammu and BOT_SMS_PHONE both set) and the mailer (BOT_SMTP_ADDR set and
 // valid; an invalid SMTP setup is a start error and email stays off).
 func newDelivery(cfg *config, publisher command.Publisher, gammu command.SmsSender) delivery {
-	d := delivery{telegram: telegramSender{publisher: publisher, chatID: cfg.ChatID}}
+	d := delivery{telegram: telegramSender{publisher: publisher, dest: route.Destination{ChatID: cfg.ChatID}}}
 	if s := newSMSSender(gammu, cfg.SMSPhone); s != nil {
 		d.sms = s
 	}
@@ -91,12 +92,12 @@ func validateSMTP(c mail.Config) error {
 // Telegram client carries its own timeout (telegramTimeout).
 type telegramSender struct {
 	publisher command.Publisher
-	chatID    int64
+	dest      route.Destination
 }
 
 // Send implements notify.Sender.
 func (s telegramSender) Send(ctx context.Context, text string) error {
-	if err := s.publisher.Publish(ctx, s.chatID, text); err != nil {
+	if err := s.publisher.Publish(ctx, s.dest, text); err != nil {
 		return fmt.Errorf("send health message to telegram: %w", err)
 	}
 

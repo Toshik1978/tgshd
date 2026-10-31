@@ -9,13 +9,14 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/Toshik1978/tgshd/pkg/telegram/route"
 	"github.com/Toshik1978/tgshd/pkg/zte"
 )
 
 // publishCall records a single invocation of fakePublisher.Publish.
 type publishCall struct {
-	recipientID int64
-	msg         string
+	dest route.Destination
+	msg  string
 }
 
 // fakePublisher is a hand-written test double for the Publisher interface.
@@ -26,9 +27,9 @@ type fakePublisher struct {
 	errs []error
 }
 
-func (p *fakePublisher) Publish(_ context.Context, recipientID int64, msg string) error {
+func (p *fakePublisher) Publish(_ context.Context, dest route.Destination, msg string) error {
 	idx := len(p.calls)
-	p.calls = append(p.calls, publishCall{recipientID: recipientID, msg: msg})
+	p.calls = append(p.calls, publishCall{dest: dest, msg: msg})
 	if idx < len(p.errs) {
 		return p.errs[idx]
 	}
@@ -89,8 +90,8 @@ func TestWorker_Do_PublishesEachSms(t *testing.T) {
 	}
 
 	for i, call := range pub.calls {
-		if call.recipientID != chatID {
-			t.Errorf("call[%d].recipientID = %d, want %d", i, call.recipientID, chatID)
+		if call.dest != (route.Destination{ChatID: chatID}) {
+			t.Errorf("call[%d].dest = %+v, want chat %d loud, no thread", i, call.dest, chatID)
 		}
 		if !strings.Contains(call.msg, sms[i].Number) {
 			t.Errorf("call[%d].msg = %q, want it to contain sender number %q", i, call.msg, sms[i].Number)

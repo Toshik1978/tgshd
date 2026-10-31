@@ -11,6 +11,8 @@ import (
 
 	"go.uber.org/zap"
 	"gopkg.in/telebot.v4"
+
+	"github.com/Toshik1978/tgshd/pkg/telegram/route"
 )
 
 // Handler define handler for specific command.
@@ -20,13 +22,13 @@ type Handler interface {
 	// Enabled return true if command is enabled.
 	Enabled() bool
 	// Handle handles command.
-	Handle(ctx context.Context, senderID int64, cmd string) error
+	Handle(ctx context.Context, origin route.Origin, cmd string) error
 }
 
 type consumer struct {
 	logger   *zap.Logger
 	bot      *telebot.Bot
-	access   *AccessList
+	access   *route.AccessList
 	handlers []Handler
 
 	mu      sync.Mutex
@@ -41,7 +43,7 @@ const (
 )
 
 // NewConsumer initializes new consumer for telegram messages.
-func NewConsumer(logger *zap.Logger, bot *telebot.Bot, access *AccessList, handlers []Handler) *consumer {
+func NewConsumer(logger *zap.Logger, bot *telebot.Bot, access *route.AccessList, handlers []Handler) *consumer {
 	logger.Info("Creation of TelegramConsumer")
 
 	if access.Empty() {
@@ -190,18 +192,10 @@ func (c *consumer) handleCommand(ctx context.Context, handler Handler, tctx tele
 	logger := c.logger.With(zap.String("command", handler.Name()))
 	message := tctx.Message()
 
-	var senderID int64
-	switch {
-	case message.Sender != nil:
-		senderID = message.Sender.ID
-	case message.Chat != nil:
-		senderID = message.Chat.ID
-	default:
-		logger.Error("Failed to get sender ID")
-		return errors.New("failed to get sender ID")
-	}
+	origin := originOf(message)
 
-	logger = logger.With(zap.Int64("sender_id", senderID))
+	logger = logger.With(zap.Int64("chat_id", origin.ChatID), zap.Int("thread_id", origin.ThreadID),
+		zap.Int64("sender_id", origin.SenderID))
 	logger.Debug("Handle command")
 
 	defer func() {
@@ -210,7 +204,7 @@ func (c *consumer) handleCommand(ctx context.Context, handler Handler, tctx tele
 		}
 	}()
 
-	err := handler.Handle(ctx, senderID, tctx.Text())
+	err := handler.Handle(ctx, origin, tctx.Text())
 	if err != nil {
 		logger.
 			With(zap.Error(err)).
@@ -219,6 +213,24 @@ func (c *consumer) handleCommand(ctx context.Context, handler Handler, tctx tele
 	}
 
 	return nil
+}
+
+// originOf describes where a command came from. Telegram sets ThreadID on
+// replies in the General topic too, so it counts only on topic messages.
+// Channel posts have no sender.
+func originOf(message *telebot.Message) route.Origin {
+	var origin route.Origin
+	if message.Chat != nil {
+		origin.ChatID = message.Chat.ID
+	}
+	if message.Sender != nil {
+		origin.SenderID = message.Sender.ID
+	}
+	if message.TopicMessage {
+		origin.ThreadID = message.ThreadID
+	}
+
+	return origin
 }
 
 // permitted reports whether the update comes from an allowed chat. Other

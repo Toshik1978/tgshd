@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"go.uber.org/zap"
+
+	"github.com/Toshik1978/tgshd/pkg/telegram/route"
 )
 
 // scriptNameTimeout bounds the one-shot script invocation used to resolve the
@@ -54,14 +56,14 @@ func (c *unknownCommand) Enabled() bool {
 	return true
 }
 
-func (c *unknownCommand) Handle(ctx context.Context, senderID int64, cmd string) error {
+func (c *unknownCommand) Handle(ctx context.Context, origin route.Origin, cmd string) error {
 	c.logger.Debug("Unknown command received")
 
 	if err := c.runner.Execute(ctx, cmd); err != nil {
 		return fmt.Errorf("failed to run script: %w", err)
 	}
 
-	if err := c.publisher.Publish(ctx, senderID, "Script succeeded!"); err != nil {
+	if err := c.publisher.Publish(ctx, origin.Reply(), "Script succeeded!"); err != nil {
 		return fmt.Errorf("failed to publish reply: %w", err)
 	}
 

@@ -10,6 +10,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/Toshik1978/tgshd/pkg/health/store"
+	"github.com/Toshik1978/tgshd/pkg/telegram/route"
 )
 
 type fakeHistory struct {
@@ -56,7 +57,7 @@ func TestHistoryCommand(t *testing.T) {
 			if cmd.Name() != "history" || !cmd.Enabled() {
 				t.Fatalf("Name=%q Enabled=%v", cmd.Name(), cmd.Enabled())
 			}
-			if err := cmd.Handle(context.Background(), 5, c.cmd); err != nil {
+			if err := cmd.Handle(context.Background(), testOrigin(5), c.cmd); err != nil {
 				t.Fatal(err)
 			}
 			if src.calls != c.wantCalls || src.filter != c.wantFilter {
@@ -67,8 +68,9 @@ func TestHistoryCommand(t *testing.T) {
 					t.Errorf("age = %v", age)
 				}
 			}
-			if pub.lastRecipient != 5 || !strings.Contains(pub.lastMsg, c.wantMsg) {
-				t.Errorf("recipient=%d msg=%q", pub.lastRecipient, pub.lastMsg)
+			if pub.lastDest != (route.Destination{ChatID: 5, ThreadID: 3, Silent: true}) ||
+				!strings.Contains(pub.lastMsg, c.wantMsg) {
+				t.Errorf("dest=%+v msg=%q", pub.lastDest, pub.lastMsg)
 			}
 		})
 	}
@@ -77,12 +79,12 @@ func TestHistoryCommand(t *testing.T) {
 func TestHistoryCommandErrors(t *testing.T) {
 	boom := errors.New("boom")
 	cmd := NewHistoryCommand(zap.NewNop(), &fakePublisher{}, &fakeHistory{err: boom})
-	if err := cmd.Handle(context.Background(), 1, "/history"); !errors.Is(err, boom) {
+	if err := cmd.Handle(context.Background(), testOrigin(1), "/history"); !errors.Is(err, boom) {
 		t.Errorf("source err = %v", err)
 	}
 	pub := &errPublisher{err: boom}
 	cmd = NewHistoryCommand(zap.NewNop(), pub, &fakeHistory{})
-	if err := cmd.Handle(context.Background(), 1, "/history"); !errors.Is(err, boom) {
+	if err := cmd.Handle(context.Background(), testOrigin(1), "/history"); !errors.Is(err, boom) {
 		t.Errorf("publish err = %v", err)
 	}
 }

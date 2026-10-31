@@ -5,6 +5,8 @@ import (
 	"fmt"
 
 	"go.uber.org/zap"
+
+	"github.com/Toshik1978/tgshd/pkg/telegram/route"
 )
 
 type Speedtest interface {
@@ -36,7 +38,7 @@ func (c *speedCommand) Enabled() bool {
 	return true
 }
 
-func (c *speedCommand) Handle(ctx context.Context, senderID int64, _ string) error {
+func (c *speedCommand) Handle(ctx context.Context, origin route.Origin, _ string) error {
 	c.logger.Debug("Speed command received")
 
 	dl, ul, err := c.speedtest.Speedtest(ctx)
@@ -46,7 +48,7 @@ func (c *speedCommand) Handle(ctx context.Context, senderID int64, _ string) err
 
 	err1 := c.publisher.Publish(
 		ctx,
-		senderID,
+		origin.Reply(),
 		fmt.Sprintf("Download: <b>%.2fMbps</b>\nUpload: <b>%.2fMbps</b>", dl, ul),
 	)
 	if err1 != nil {

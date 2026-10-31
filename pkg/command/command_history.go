@@ -11,6 +11,7 @@ import (
 
 	"github.com/Toshik1978/tgshd/pkg/health/report"
 	"github.com/Toshik1978/tgshd/pkg/health/store"
+	"github.com/Toshik1978/tgshd/pkg/telegram/route"
 )
 
 // HistorySource reads the alert log; the state store satisfies it.
@@ -39,7 +40,7 @@ func (c *historyCommand) Enabled() bool {
 	return true
 }
 
-func (c *historyCommand) Handle(ctx context.Context, senderID int64, cmd string) error {
+func (c *historyCommand) Handle(ctx context.Context, origin route.Origin, cmd string) error {
 	args, ok := parseHistoryArgs(strings.Fields(cmd))
 
 	var reply string
@@ -55,7 +56,7 @@ func (c *historyCommand) Handle(ctx context.Context, senderID int64, cmd string)
 		reply = report.History(alerts, args.period, now.Location())
 	}
 
-	if err := c.publisher.Publish(ctx, senderID, reply); err != nil {
+	if err := c.publisher.Publish(ctx, origin.Reply(), reply); err != nil {
 		return fmt.Errorf("failed to publish reply: %w", err)
 	}
 

@@ -7,6 +7,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/Toshik1978/tgshd/pkg/telegram/route"
 	"github.com/Toshik1978/tgshd/pkg/zte"
 )
 
@@ -41,7 +42,7 @@ func (c *networkCommand) Enabled() bool {
 	return true
 }
 
-func (c *networkCommand) Handle(ctx context.Context, senderID int64, _ string) error {
+func (c *networkCommand) Handle(ctx context.Context, origin route.Origin, _ string) error {
 	c.logger.Debug("Network command received")
 
 	if err := c.conn.SetBearer(ctx, c.commandToBearer()); err != nil {
@@ -49,7 +50,7 @@ func (c *networkCommand) Handle(ctx context.Context, senderID int64, _ string) e
 	}
 
 	reply := fmt.Sprintf("Bearer preferences succeeded: <b>%s</b>", strings.ToUpper(c.cmd))
-	if err := c.publisher.Publish(ctx, senderID, reply); err != nil {
+	if err := c.publisher.Publish(ctx, origin.Reply(), reply); err != nil {
 		return fmt.Errorf("failed to publish reply: %w", err)
 	}
 

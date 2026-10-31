@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	"go.uber.org/zap"
+
+	"github.com/Toshik1978/tgshd/pkg/telegram/route"
 )
 
 type fakePinger struct {
@@ -50,11 +52,11 @@ func TestPingHandleHappyPath(t *testing.T) {
 	pinger := &fakePinger{result: map[string]bool{"host1": true, "host2": false}}
 	cmd := NewPingCommand(zap.NewNop(), pub, pinger, []string{"host1", "host2"})
 
-	if err := cmd.Handle(context.Background(), 11, "/ping"); err != nil {
+	if err := cmd.Handle(context.Background(), testOrigin(11), "/ping"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if pub.count != 1 || pub.lastRecipient != 11 {
-		t.Errorf("expected one reply to sender 11, got count=%d recipient=%d", pub.count, pub.lastRecipient)
+	if pub.count != 1 || pub.lastDest != (route.Destination{ChatID: 11, ThreadID: 3, Silent: true}) {
+		t.Errorf("expected one reply to sender 11, got count=%d dest=%+v", pub.count, pub.lastDest)
 	}
 	if !strings.Contains(pub.lastMsg, "host1: <b>OK</b>") {
 		t.Errorf("expected reply to report host1 OK, got %q", pub.lastMsg)
@@ -70,7 +72,7 @@ func TestPingHandleMissingHostTreatedAsFail(t *testing.T) {
 	pinger := &fakePinger{result: map[string]bool{"host1": true}}
 	cmd := NewPingCommand(zap.NewNop(), pub, pinger, []string{"host1", "host2"})
 
-	if err := cmd.Handle(context.Background(), 11, "/ping"); err != nil {
+	if err := cmd.Handle(context.Background(), testOrigin(11), "/ping"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if !strings.Contains(pub.lastMsg, "host2: <b>FAIL</b>") {
@@ -83,7 +85,7 @@ func TestPingHandlePingError(t *testing.T) {
 	pinger := &fakePinger{err: errors.New("boom")}
 	cmd := NewPingCommand(zap.NewNop(), pub, pinger, []string{"host1"})
 
-	err := cmd.Handle(context.Background(), 11, "/ping")
+	err := cmd.Handle(context.Background(), testOrigin(11), "/ping")
 	if err == nil {
 		t.Fatal("expected an error when Ping fails")
 	}
@@ -97,7 +99,7 @@ func TestPingHandlePublishError(t *testing.T) {
 	pinger := &fakePinger{result: map[string]bool{"host1": true}}
 	cmd := NewPingCommand(zap.NewNop(), pub, pinger, []string{"host1"})
 
-	err := cmd.Handle(context.Background(), 11, "/ping")
+	err := cmd.Handle(context.Background(), testOrigin(11), "/ping")
 	if err == nil {
 		t.Fatal("expected an error when publish fails")
 	}

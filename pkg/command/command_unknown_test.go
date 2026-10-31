@@ -6,6 +6,8 @@ import (
 	"testing"
 
 	"go.uber.org/zap"
+
+	"github.com/Toshik1978/tgshd/pkg/telegram/route"
 )
 
 type fakeScript struct {
@@ -83,7 +85,7 @@ func TestUnknownHandleHappyPath(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	if err := cmd.Handle(context.Background(), 55, "/whatever arg1"); err != nil {
+	if err := cmd.Handle(context.Background(), testOrigin(55), "/whatever arg1"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if !script.executed || script.lastCmd != "/whatever arg1" {
@@ -93,8 +95,8 @@ func TestUnknownHandleHappyPath(t *testing.T) {
 			script.lastCmd,
 		)
 	}
-	if pub.count != 1 || pub.lastRecipient != 55 {
-		t.Errorf("expected one reply to sender 55, got count=%d recipient=%d", pub.count, pub.lastRecipient)
+	if pub.count != 1 || pub.lastDest != (route.Destination{ChatID: 55, ThreadID: 3, Silent: true}) {
+		t.Errorf("expected one reply to sender 55, got count=%d dest=%+v", pub.count, pub.lastDest)
 	}
 	if pub.lastMsg != "Script succeeded!" {
 		t.Errorf("expected reply %q, got %q", "Script succeeded!", pub.lastMsg)
@@ -109,7 +111,7 @@ func TestUnknownHandleExecuteError(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	handleErr := cmd.Handle(context.Background(), 55, "/whatever")
+	handleErr := cmd.Handle(context.Background(), testOrigin(55), "/whatever")
 	if handleErr == nil {
 		t.Fatal("expected an error when Execute fails")
 	}
@@ -126,7 +128,7 @@ func TestUnknownHandlePublishError(t *testing.T) {
 		t.Fatalf("unexpected error: %v", err)
 	}
 
-	handleErr := cmd.Handle(context.Background(), 55, "/whatever")
+	handleErr := cmd.Handle(context.Background(), testOrigin(55), "/whatever")
 	if handleErr == nil {
 		t.Fatal("expected an error when publish fails")
 	}

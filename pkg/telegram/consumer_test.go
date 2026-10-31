@@ -7,45 +7,13 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
 	"gopkg.in/telebot.v4"
+
+	"github.com/Toshik1978/tgshd/pkg/telegram/route"
 )
-
-func TestAccessListAllowed(t *testing.T) {
-	tests := []struct {
-		name   string
-		chatID int64
-		extra  []int64
-		query  int64
-		want   bool
-	}{
-		{"configured chat", 100, nil, 100, true},
-		{"extra id", 100, []int64{200, -300}, -300, true},
-		{"stranger", 100, []int64{200}, 999, false},
-		{"unset chat does not allow zero", 0, nil, 0, false},
-		{"unset chat with extras", 0, []int64{200}, 200, true},
-		{"empty list denies all", 0, nil, 1, false},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := NewAccessList(tt.chatID, tt.extra).Allowed(tt.query); got != tt.want {
-				t.Fatalf("Allowed(%d) = %v, want %v", tt.query, got, tt.want)
-			}
-		})
-	}
-}
-
-func TestAccessListEmpty(t *testing.T) {
-	if !NewAccessList(0, nil).Empty() {
-		t.Fatal("list with no IDs must be empty")
-	}
-
-	if NewAccessList(1, nil).Empty() {
-		t.Fatal("list with an ID must not be empty")
-	}
-}
 
 func TestNewConsumerWarnsOnEmptyAccessList(t *testing.T) {
 	core, logs := observer.New(zap.DebugLevel)
-	NewConsumer(zap.New(core), nil, NewAccessList(0, nil), nil)
+	NewConsumer(zap.New(core), nil, route.NewAccessList(0, nil), nil)
 
 	if got := logs.FilterLevelExact(zap.WarnLevel).Len(); got != 1 {
 		t.Fatalf("want one warn, got %d", got)
@@ -66,7 +34,7 @@ type fakeHandler struct{ calls int }
 
 func (h *fakeHandler) Name() string  { return "ping" }
 func (h *fakeHandler) Enabled() bool { return true }
-func (h *fakeHandler) Handle(context.Context, int64, string) error {
+func (h *fakeHandler) Handle(context.Context, route.Origin, string) error {
 	h.calls++
 	return nil
 }
@@ -76,7 +44,7 @@ func newTestConsumer(h Handler) (*consumer, *observer.ObservedLogs) {
 
 	return &consumer{
 		logger:   zap.New(core),
-		access:   NewAccessList(100, []int64{200}),
+		access:   route.NewAccessList(100, []int64{200}),
 		handlers: []Handler{h},
 	}, logs
 }
@@ -119,5 +87,37 @@ func TestConsumerAccessFilter(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+func TestOriginOf(t *testing.T) {
+	chat := &telebot.Chat{ID: -1000000000000}
+	tests := []struct {
+		name string
+		msg  *telebot.Message
+		want route.Origin
+	}{
+		{
+			"topic message",
+			&telebot.Message{Chat: chat, Sender: &telebot.User{ID: 100}, ThreadID: 3, TopicMessage: true},
+			route.Origin{ChatID: -1000000000000, ThreadID: 3, SenderID: 100},
+		},
+		{
+			"reply in General carries a thread id but is not a topic message",
+			&telebot.Message{Chat: chat, Sender: &telebot.User{ID: 100}, ThreadID: 2},
+			route.Origin{ChatID: -1000000000000, SenderID: 100},
+		},
+		{
+			"channel post without sender",
+			&telebot.Message{Chat: chat},
+			route.Origin{ChatID: -1000000000000},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := originOf(tt.msg); got != tt.want {
+				t.Fatalf("originOf() = %+v, want %+v", got, tt.want)
+			}
+		})
 	}
 }

@@ -67,7 +67,7 @@ jobs:
           # on failure. Capture the real exit code for the gate at the end.
           set +e
           go test -v \
-            -coverpkg=./pkg/command/...,./pkg/sms,./pkg/script,./cmd/app,./pkg/health/... \
+            -coverpkg=./pkg/command/...,./pkg/sms,./pkg/script,./cmd/app,./pkg/health/...,./pkg/telegram/route \
             -covermode=count -coverprofile=coverage.out \
             ./... > test_status.log 2>&1
           echo "TEST_EXIT=$?" >> "$GITHUB_ENV"

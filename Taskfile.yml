@@ -8,7 +8,7 @@ vars:
   # pkg/host, pkg/mail, pkg/doh), the gammu Postgres repository, and the fx root
   # (package cmd) run only against real hardware/services and are exercised in
   # integration, not here.
-  COVERPKG: ./pkg/command/...,./pkg/sms,./pkg/script,./cmd/app,./pkg/health/...
+  COVERPKG: ./pkg/command/...,./pkg/sms,./pkg/script,./cmd/app,./pkg/health/...,./pkg/telegram/route
   BUILDSTAMP:
     sh: date +%Y/%m/%d_%H:%M:%S
   COMMIT:

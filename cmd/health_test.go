@@ -40,6 +40,7 @@ import (
 	"github.com/Toshik1978/tgshd/pkg/mail"
 	"github.com/Toshik1978/tgshd/pkg/power"
 	"github.com/Toshik1978/tgshd/pkg/telegram"
+	"github.com/Toshik1978/tgshd/pkg/telegram/route"
 )
 
 // fakePublisher records Telegram messages; it is safe for concurrent use.
@@ -47,14 +48,14 @@ type fakePublisher struct {
 	mu   sync.Mutex
 	err  error
 	sent []string
-	to   []int64
+	to   []route.Destination
 }
 
-func (f *fakePublisher) Publish(_ context.Context, recipientID int64, msg string) error {
+func (f *fakePublisher) Publish(_ context.Context, dest route.Destination, msg string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
-	f.to = append(f.to, recipientID)
+	f.to = append(f.to, dest)
 	f.sent = append(f.sent, msg)
 
 	return f.err
@@ -401,11 +402,11 @@ func TestTelegramSender(t *testing.T) {
 	t.Parallel()
 
 	pub := &fakePublisher{}
-	s := telegramSender{publisher: pub, chatID: 42}
+	s := telegramSender{publisher: pub, dest: route.Destination{ChatID: 42}}
 	if err := s.Send(t.Context(), "hello"); err != nil {
 		t.Fatalf("Send() = %v", err)
 	}
-	if pub.to[0] != 42 || pub.sent[0] != "hello" {
+	if pub.to[0] != (route.Destination{ChatID: 42}) || pub.sent[0] != "hello" {
 		t.Fatalf("published %v to %v", pub.sent, pub.to)
 	}
 
@@ -1008,7 +1009,7 @@ func TestNewHealthRetireWithoutDisks(t *testing.T) {
 	if !h.Enabled() {
 		t.Fatal("/retire must stay enabled")
 	}
-	if err := h.Handle(t.Context(), 42, "/retire TEST"); err != nil {
+	if err := h.Handle(t.Context(), testOrigin(42), "/retire TEST"); err != nil {
 		t.Fatal(err)
 	}
 	if got := pub.messages(); !slices.Equal(got, []string{"No drives are monitored."}) {
@@ -1017,14 +1018,14 @@ func TestNewHealthRetireWithoutDisks(t *testing.T) {
 	pub.mu.Lock()
 	to := slices.Clone(pub.to)
 	pub.mu.Unlock()
-	if !slices.Equal(to, []int64{42}) {
-		t.Fatalf("replied to %v, want the sender", to)
+	if !slices.Equal(to, []route.Destination{{ChatID: 42, ThreadID: 3, Silent: true}}) {
+		t.Fatalf("replied to %v, want the origin chat and topic", to)
 	}
 
 	failing := newHealth(
 		enabledHealthParams(t, &fakePublisher{err: errors.New("telegram down")}, fxtest.NewLifecycle(t)),
 	)
-	if err := failing.Handlers[retireIndex(t, failing)].Handle(t.Context(), 42, "/retire"); err == nil {
+	if err := failing.Handlers[retireIndex(t, failing)].Handle(t.Context(), testOrigin(42), "/retire"); err == nil {
 		t.Fatal("a failed reply must be returned")
 	}
 }
@@ -1034,7 +1035,7 @@ func TestNewHealthRetireWithDisks(t *testing.T) {
 
 	pub := &fakePublisher{}
 	out := newHealth(enabledHealthParams(t, pub, fxtest.NewLifecycle(t), checkSet{Drives: &fakeDriveBook{}}))
-	if err := out.Handlers[retireIndex(t, out)].Handle(t.Context(), 42, "/retire TEST"); err != nil {
+	if err := out.Handlers[retireIndex(t, out)].Handle(t.Context(), testOrigin(42), "/retire TEST"); err != nil {
 		t.Fatal(err)
 	}
 	if got := pub.messages(); len(got) != 1 || !strings.HasPrefix(got[0], "Unknown drive.") {
@@ -2559,7 +2560,7 @@ type stallingPublisher struct {
 	sent    []string
 }
 
-func (p *stallingPublisher) Publish(ctx context.Context, _ int64, msg string) error {
+func (p *stallingPublisher) Publish(ctx context.Context, _ route.Destination, msg string) error {
 	if strings.Contains(msg, "memory: restarted") {
 		close(p.stalled)
 		<-ctx.Done()
@@ -2993,4 +2994,9 @@ func TestMemorySourceContainers(t *testing.T) {
 	if _, err := failing.Containers(t.Context()); !errors.Is(err, other) || errors.Is(err, memory.ErrNoContainers) {
 		t.Fatalf("engine error: err = %v, want it passed through", err)
 	}
+}
+
+// testOrigin is a command that arrived in topic 3 of the given chat.
+func testOrigin(chatID int64) route.Origin {
+	return route.Origin{ChatID: chatID, ThreadID: 3, SenderID: 100}
 }

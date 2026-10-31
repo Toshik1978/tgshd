@@ -11,6 +11,7 @@ import (
 
 	"github.com/Toshik1978/tgshd/pkg/health/report"
 	"github.com/Toshik1978/tgshd/pkg/health/store"
+	"github.com/Toshik1978/tgshd/pkg/telegram/route"
 )
 
 type fakeMetrics struct {
@@ -40,11 +41,12 @@ func TestTempCommand(t *testing.T) {
 	if cmd.Name() != "temp" || !cmd.Enabled() {
 		t.Fatalf("Name=%q Enabled=%v", cmd.Name(), cmd.Enabled())
 	}
-	if err := cmd.Handle(context.Background(), 4, "/temp"); err != nil {
+	if err := cmd.Handle(context.Background(), testOrigin(4), "/temp"); err != nil {
 		t.Fatal(err)
 	}
-	if pub.lastRecipient != 4 || pub.lastMsg != "gpu.0: 60°C (7d min/avg/max 40/50/70)" {
-		t.Errorf("recipient=%d msg=%q", pub.lastRecipient, pub.lastMsg)
+	if pub.lastDest != (route.Destination{ChatID: 4, ThreadID: 3, Silent: true}) ||
+		pub.lastMsg != "gpu.0: 60°C (7d min/avg/max 40/50/70)" {
+		t.Errorf("dest=%+v msg=%q", pub.lastDest, pub.lastMsg)
 	}
 	if m.now.IsZero() {
 		t.Error("now not passed")
@@ -64,7 +66,8 @@ func TestTempCommandShowsLimitsAndUnreadable(t *testing.T) {
 		{Metric: "temp.gpu.0", Label: "gpu 0", Limit: 80},
 		{Metric: "temp.gpu.1", Label: "gpu 1", Since: time.Date(2026, 3, 2, 9, 30, 0, 0, time.UTC)},
 	}
-	if err := NewTempCommand(zap.NewNop(), pub, m, sensors).Handle(context.Background(), 4, "/temp"); err != nil {
+	cmd := NewTempCommand(zap.NewNop(), pub, m, sensors)
+	if err := cmd.Handle(context.Background(), testOrigin(4), "/temp"); err != nil {
 		t.Fatal(err)
 	}
 	want := "gpu 0: 60°C (7d min/avg/max 40/50/70), limit 80°C\ngpu 1: unreadable since 2026-03-02 09:30"
@@ -76,12 +79,12 @@ func TestTempCommandShowsLimitsAndUnreadable(t *testing.T) {
 func TestTempCommandErrors(t *testing.T) {
 	boom := errors.New("boom")
 	cmd := NewTempCommand(zap.NewNop(), &fakePublisher{}, &fakeMetrics{err: boom}, nil)
-	if err := cmd.Handle(context.Background(), 1, "/temp"); !errors.Is(err, boom) {
+	if err := cmd.Handle(context.Background(), testOrigin(1), "/temp"); !errors.Is(err, boom) {
 		t.Errorf("metrics err = %v", err)
 	}
 	pub := &errPublisher{err: boom}
 	cmd = NewTempCommand(zap.NewNop(), pub, &fakeMetrics{}, nil)
-	if err := cmd.Handle(context.Background(), 1, "/temp"); !errors.Is(err, boom) {
+	if err := cmd.Handle(context.Background(), testOrigin(1), "/temp"); !errors.Is(err, boom) {
 		t.Errorf("publish err = %v", err)
 	}
 }
@@ -103,7 +106,7 @@ func TestDisksCommand(t *testing.T) {
 	if cmd.Name() != "disks" || !cmd.Enabled() {
 		t.Fatalf("Name=%q Enabled=%v", cmd.Name(), cmd.Enabled())
 	}
-	if err := cmd.Handle(context.Background(), 4, "/disks"); err != nil {
+	if err := cmd.Handle(context.Background(), testOrigin(4), "/disks"); err != nil {
 		t.Fatal(err)
 	}
 	want := "nvme0n1 NVMe Example NVMe SSD …0001: health OK, wear 2% (7d 1/2/3), spare unknown (floor 10%, drive unknown), " +
@@ -117,7 +120,7 @@ func TestDisksCommandNoDrivesSkipsMetrics(t *testing.T) {
 	pub := &fakePublisher{}
 	m := &fakeMetrics{}
 	cmd := NewDisksCommand(zap.NewNop(), pub, fakeDrives{}, m)
-	if err := cmd.Handle(context.Background(), 1, "/disks"); err != nil {
+	if err := cmd.Handle(context.Background(), testOrigin(1), "/disks"); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(pub.lastMsg, "No drives") || len(m.prefixes) != 0 {
@@ -129,18 +132,18 @@ func TestDisksCommandErrors(t *testing.T) {
 	boom := errors.New("boom")
 	d := fakeDrives{drives: []Drive{{Serial: "S1"}}}
 	err := NewDisksCommand(zap.NewNop(), &fakePublisher{}, d, &fakeMetrics{err: boom}).
-		Handle(context.Background(), 1, "/disks")
+		Handle(context.Background(), testOrigin(1), "/disks")
 	if !errors.Is(err, boom) {
 		t.Errorf("first metrics err = %v", err)
 	}
 	err = NewDisksCommand(zap.NewNop(), &errPublisher{err: boom}, d, &fakeMetrics{}).
-		Handle(context.Background(), 1, "/disks")
+		Handle(context.Background(), testOrigin(1), "/disks")
 	if !errors.Is(err, boom) {
 		t.Errorf("publish err = %v", err)
 	}
 	second := &secondFails{err: boom}
 	err = NewDisksCommand(zap.NewNop(), &fakePublisher{}, d, second).
-		Handle(context.Background(), 1, "/disks")
+		Handle(context.Background(), testOrigin(1), "/disks")
 	if !errors.Is(err, boom) {
 		t.Errorf("second metrics err = %v", err)
 	}

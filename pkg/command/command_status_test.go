@@ -11,6 +11,7 @@ import (
 
 	"github.com/Toshik1978/tgshd/pkg/health/report"
 	"github.com/Toshik1978/tgshd/pkg/health/runner"
+	"github.com/Toshik1978/tgshd/pkg/telegram/route"
 )
 
 type fakeHealth struct {
@@ -35,11 +36,12 @@ func TestStatusCommand(t *testing.T) {
 	if cmd.Name() != "status" || !cmd.Enabled() {
 		t.Fatalf("Name=%q Enabled=%v", cmd.Name(), cmd.Enabled())
 	}
-	if err := cmd.Handle(context.Background(), 5, "/status"); err != nil {
+	if err := cmd.Handle(context.Background(), testOrigin(5), "/status"); err != nil {
 		t.Fatal(err)
 	}
-	if pub.lastRecipient != 5 || !strings.Contains(pub.lastMsg, "disk/a: hot (since 2026-01-02 03:04)") {
-		t.Errorf("recipient=%d msg=%q", pub.lastRecipient, pub.lastMsg)
+	if pub.lastDest != (route.Destination{ChatID: 5, ThreadID: 3, Silent: true}) ||
+		!strings.Contains(pub.lastMsg, "disk/a: hot (since 2026-01-02 03:04)") {
+		t.Errorf("dest=%+v msg=%q", pub.lastDest, pub.lastMsg)
 	}
 }
 
@@ -63,7 +65,7 @@ func TestStatusCommandShowsTheMemoryBlock(t *testing.T) {
 	cmd := NewStatusCommand(zap.NewNop(), pub, &fakeHealth{snap: runner.Snapshot{Checks: 1}}, mem)
 
 	ctx := context.WithValue(context.Background(), handleKey{}, "handle")
-	if err := cmd.Handle(ctx, 5, "/status"); err != nil {
+	if err := cmd.Handle(ctx, testOrigin(5), "/status"); err != nil {
 		t.Fatal(err)
 	}
 	if !strings.HasSuffix(pub.lastMsg, "\nMemory: unreadable\nGuard: off") || mem.ctx != ctx {
@@ -74,7 +76,7 @@ func TestStatusCommandShowsTheMemoryBlock(t *testing.T) {
 func TestStatusCommandPublishError(t *testing.T) {
 	pub := &errPublisher{err: errors.New("boom")}
 	cmd := NewStatusCommand(zap.NewNop(), pub, &fakeHealth{}, nil)
-	if err := cmd.Handle(context.Background(), 1, "/status"); !errors.Is(err, pub.err) {
+	if err := cmd.Handle(context.Background(), testOrigin(1), "/status"); !errors.Is(err, pub.err) {
 		t.Errorf("err = %v", err)
 	}
 }
@@ -108,7 +110,7 @@ func TestClearCommand(t *testing.T) {
 			if cmd.Name() != "clear" || !cmd.Enabled() {
 				t.Fatalf("Name=%q Enabled=%v", cmd.Name(), cmd.Enabled())
 			}
-			if err := cmd.Handle(context.Background(), 9, c.cmd); err != nil {
+			if err := cmd.Handle(context.Background(), testOrigin(9), c.cmd); err != nil {
 				t.Fatal(err)
 			}
 			if strings.Join(h.cleared, ",") != strings.Join(c.wantCleared, ",") {
@@ -126,7 +128,7 @@ func TestClearCommand(t *testing.T) {
 func TestClearCommandPublishError(t *testing.T) {
 	pub := &errPublisher{err: errors.New("boom")}
 	cmd := NewClearCommand(zap.NewNop(), pub, &fakeHealth{})
-	if err := cmd.Handle(context.Background(), 1, "/clear"); !errors.Is(err, pub.err) {
+	if err := cmd.Handle(context.Background(), testOrigin(1), "/clear"); !errors.Is(err, pub.err) {
 		t.Errorf("err = %v", err)
 	}
 }

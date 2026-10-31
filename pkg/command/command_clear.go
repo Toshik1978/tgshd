@@ -9,6 +9,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/Toshik1978/tgshd/pkg/health/report"
+	"github.com/Toshik1978/tgshd/pkg/telegram/route"
 )
 
 // Clearer clears an open condition without sending RESOLVED and lists the
@@ -39,7 +40,7 @@ func (c *clearCommand) Enabled() bool {
 	return true
 }
 
-func (c *clearCommand) Handle(ctx context.Context, senderID int64, cmd string) error {
+func (c *clearCommand) Handle(ctx context.Context, origin route.Origin, cmd string) error {
 	key := ""
 	if fields := strings.Fields(cmd); len(fields) > 1 {
 		key = fields[1]
@@ -62,7 +63,7 @@ func (c *clearCommand) Handle(ctx context.Context, senderID int64, cmd string) e
 		reply = report.OpenKeys(heading, keys)
 	}
 
-	if err := c.publisher.Publish(ctx, senderID, reply); err != nil {
+	if err := c.publisher.Publish(ctx, origin.Reply(), reply); err != nil {
 		return fmt.Errorf("failed to publish reply: %w", err)
 	}
 

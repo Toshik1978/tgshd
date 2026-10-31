@@ -6,6 +6,8 @@ import (
 	"strings"
 
 	"go.uber.org/zap"
+
+	"github.com/Toshik1978/tgshd/pkg/telegram/route"
 )
 
 type Pinger interface {
@@ -39,7 +41,7 @@ func (c *pingCommand) Enabled() bool {
 	return len(c.hosts) > 0
 }
 
-func (c *pingCommand) Handle(ctx context.Context, senderID int64, _ string) error {
+func (c *pingCommand) Handle(ctx context.Context, origin route.Origin, _ string) error {
 	c.logger.Debug("Ping command received")
 
 	resp, err := c.pinger.Ping(ctx, c.hosts)
@@ -57,7 +59,7 @@ func (c *pingCommand) Handle(ctx context.Context, senderID int64, _ string) erro
 		}
 	}
 
-	if err := c.publisher.Publish(ctx, senderID, text.String()); err != nil {
+	if err := c.publisher.Publish(ctx, origin.Reply(), text.String()); err != nil {
 		return fmt.Errorf("failed to publish reply: %w", err)
 	}
 

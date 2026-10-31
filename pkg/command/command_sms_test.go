@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	"go.uber.org/zap"
+
+	"github.com/Toshik1978/tgshd/pkg/telegram/route"
 )
 
 type fakeSender struct {
@@ -24,14 +26,14 @@ func (f *fakeSender) Publish(_ context.Context, phone, msg string) error {
 }
 
 type fakePublisher struct {
-	lastRecipient int64
-	lastMsg       string
-	count         int
+	lastDest route.Destination
+	lastMsg  string
+	count    int
 }
 
-func (f *fakePublisher) Publish(_ context.Context, recipientID int64, msg string) error {
+func (f *fakePublisher) Publish(_ context.Context, d route.Destination, msg string) error {
 	f.count++
-	f.lastRecipient = recipientID
+	f.lastDest = d
 	f.lastMsg = msg
 	return nil
 }
@@ -60,7 +62,7 @@ func TestSmsUnauthorizedSenderIgnored(t *testing.T) {
 	pub := &fakePublisher{}
 	cmd := NewSmsCommand(zap.NewNop(), pub, sender, 100)
 
-	if err := cmd.Handle(context.Background(), 999, "/sms +123 hi"); err != nil {
+	if err := cmd.Handle(context.Background(), testOrigin(999), "/sms +123 hi"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if sender.called {
@@ -71,19 +73,34 @@ func TestSmsUnauthorizedSenderIgnored(t *testing.T) {
 	}
 }
 
+func TestSmsComparesChatNotSender(t *testing.T) {
+	sender := &fakeSender{}
+	pub := &fakePublisher{}
+	cmd := NewSmsCommand(zap.NewNop(), pub, sender, 100)
+
+	// The sender id equals the configured chat, but the command came from another chat.
+	origin := route.Origin{ChatID: 999, ThreadID: 3, SenderID: 100}
+	if err := cmd.Handle(context.Background(), origin, "/sms +123 hi"); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if sender.called || pub.count != 0 {
+		t.Errorf("command from another chat must be ignored, sent=%v replies=%d", sender.called, pub.count)
+	}
+}
+
 func TestSmsHappyPath(t *testing.T) {
 	sender := &fakeSender{}
 	pub := &fakePublisher{}
 	cmd := NewSmsCommand(zap.NewNop(), pub, sender, 100)
 
-	if err := cmd.Handle(context.Background(), 100, "/sms +123 hello there"); err != nil {
+	if err := cmd.Handle(context.Background(), testOrigin(100), "/sms +123 hello there"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if !sender.called || sender.phone != "+123" || sender.msg != "hello there" {
 		t.Errorf("sender got (%v, %q, %q)", sender.called, sender.phone, sender.msg)
 	}
-	if pub.count != 1 || pub.lastRecipient != 100 {
-		t.Errorf("expected one confirmation to sender 100, got count=%d recipient=%d", pub.count, pub.lastRecipient)
+	if pub.count != 1 || pub.lastDest != (route.Destination{ChatID: 100, ThreadID: 3, Silent: true}) {
+		t.Errorf("expected one confirmation to sender 100, got count=%d dest=%+v", pub.count, pub.lastDest)
 	}
 }
 
@@ -92,7 +109,7 @@ func TestSmsUsageOnBadArgs(t *testing.T) {
 	pub := &fakePublisher{}
 	cmd := NewSmsCommand(zap.NewNop(), pub, sender, 100)
 
-	if err := cmd.Handle(context.Background(), 100, "/sms"); err != nil {
+	if err := cmd.Handle(context.Background(), testOrigin(100), "/sms"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
 	if sender.called {
@@ -111,7 +128,7 @@ func TestSmsSendFailureReported(t *testing.T) {
 	pub := &fakePublisher{}
 	cmd := NewSmsCommand(zap.NewNop(), pub, sender, 100)
 
-	err := cmd.Handle(context.Background(), 100, "/sms +123 hi")
+	err := cmd.Handle(context.Background(), testOrigin(100), "/sms +123 hi")
 	if err == nil {
 		t.Fatal("expected an error when the sender fails")
 	}

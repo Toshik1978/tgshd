@@ -79,7 +79,7 @@ func TestRetireCommand(t *testing.T) {
 			if cmd.Name() != "retire" || !cmd.Enabled() {
 				t.Fatalf("Name=%q Enabled=%v", cmd.Name(), cmd.Enabled())
 			}
-			if err := cmd.Handle(context.Background(), 9, c.cmd); err != nil {
+			if err := cmd.Handle(context.Background(), testOrigin(9), c.cmd); err != nil {
 				t.Fatal(err)
 			}
 			if len(r.args) != 1 || r.args[0] != c.wantArg {
@@ -102,12 +102,12 @@ func TestRetireCommand(t *testing.T) {
 func TestRetireCommandErrors(t *testing.T) {
 	boom := errors.New("boom")
 	failing := NewRetireCommand(zap.NewNop(), &fakePublisher{}, &fakeRetirer{err: boom})
-	if err := failing.Handle(context.Background(), 1, "/retire x"); !errors.Is(err, boom) {
+	if err := failing.Handle(context.Background(), testOrigin(1), "/retire x"); !errors.Is(err, boom) {
 		t.Errorf("retire err = %v", err)
 	}
 	pub := &errPublisher{err: boom}
 	cmd := NewRetireCommand(zap.NewNop(), pub, &fakeRetirer{err: runner.ErrNoDrive})
-	if err := cmd.Handle(context.Background(), 1, "/retire"); !errors.Is(err, boom) {
+	if err := cmd.Handle(context.Background(), testOrigin(1), "/retire"); !errors.Is(err, boom) {
 		t.Errorf("publish err = %v", err)
 	}
 }

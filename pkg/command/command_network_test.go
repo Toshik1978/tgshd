@@ -8,6 +8,7 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/Toshik1978/tgshd/pkg/telegram/route"
 	"github.com/Toshik1978/tgshd/pkg/zte"
 )
 
@@ -53,14 +54,14 @@ func TestNetworkHandleHappyPath(t *testing.T) {
 			conn := &fakeZTE{}
 			cmd := NewNetworkCommand(zap.NewNop(), pub, conn, c.cmd)
 
-			if err := cmd.Handle(context.Background(), 21, "/"+c.cmd); err != nil {
+			if err := cmd.Handle(context.Background(), testOrigin(21), "/"+c.cmd); err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
 			if !conn.called || conn.lastBearer != c.wantBearer {
 				t.Errorf("expected SetBearer(%q), got called=%v bearer=%q", c.wantBearer, conn.called, conn.lastBearer)
 			}
-			if pub.count != 1 || pub.lastRecipient != 21 {
-				t.Errorf("expected one reply to sender 21, got count=%d recipient=%d", pub.count, pub.lastRecipient)
+			if pub.count != 1 || pub.lastDest != (route.Destination{ChatID: 21, ThreadID: 3, Silent: true}) {
+				t.Errorf("expected one reply to sender 21, got count=%d dest=%+v", pub.count, pub.lastDest)
 			}
 			wantSubstr := strings.ToUpper(c.cmd)
 			if !strings.Contains(pub.lastMsg, wantSubstr) {
@@ -75,7 +76,7 @@ func TestNetworkHandleSetBearerError(t *testing.T) {
 	conn := &fakeZTE{err: errors.New("boom")}
 	cmd := NewNetworkCommand(zap.NewNop(), pub, conn, "5g")
 
-	err := cmd.Handle(context.Background(), 21, "/5g")
+	err := cmd.Handle(context.Background(), testOrigin(21), "/5g")
 	if err == nil {
 		t.Fatal("expected an error when SetBearer fails")
 	}
@@ -89,7 +90,7 @@ func TestNetworkHandlePublishError(t *testing.T) {
 	conn := &fakeZTE{}
 	cmd := NewNetworkCommand(zap.NewNop(), pub, conn, "5g")
 
-	err := cmd.Handle(context.Background(), 21, "/5g")
+	err := cmd.Handle(context.Background(), testOrigin(21), "/5g")
 	if err == nil {
 		t.Fatal("expected an error when publish fails")
 	}

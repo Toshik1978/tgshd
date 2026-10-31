@@ -5,6 +5,8 @@ import (
 	"fmt"
 
 	"go.uber.org/zap"
+
+	"github.com/Toshik1978/tgshd/pkg/telegram/route"
 )
 
 type Power interface {
@@ -37,7 +39,7 @@ func (c *powerCommand) Enabled() bool {
 	return c.power.Valid()
 }
 
-func (c *powerCommand) Handle(ctx context.Context, senderID int64, _ string) error {
+func (c *powerCommand) Handle(ctx context.Context, origin route.Origin, _ string) error {
 	c.logger.Debug("Power command received")
 
 	voltage, err := c.power.Voltage(ctx)
@@ -45,7 +47,7 @@ func (c *powerCommand) Handle(ctx context.Context, senderID int64, _ string) err
 		return fmt.Errorf("failed to get voltage: %w", err)
 	}
 
-	if err := c.publisher.Publish(ctx, senderID, fmt.Sprintf("Voltage: <b>%.1f</b>", voltage)); err != nil {
+	if err := c.publisher.Publish(ctx, origin.Reply(), fmt.Sprintf("Voltage: <b>%.1f</b>", voltage)); err != nil {
 		return fmt.Errorf("failed to publish reply: %w", err)
 	}
 

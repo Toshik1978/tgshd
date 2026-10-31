@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	"go.uber.org/zap"
+
+	"github.com/Toshik1978/tgshd/pkg/telegram/route"
 )
 
 type fakeSpeedtest struct {
@@ -37,11 +39,11 @@ func TestSpeedHandleHappyPath(t *testing.T) {
 	speedtest := &fakeSpeedtest{dl: 123.456, ul: 12.34}
 	cmd := NewSpeedCommand(zap.NewNop(), pub, speedtest)
 
-	if err := cmd.Handle(context.Background(), 7, "/speed"); err != nil {
+	if err := cmd.Handle(context.Background(), testOrigin(7), "/speed"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if pub.count != 1 || pub.lastRecipient != 7 {
-		t.Errorf("expected one reply to sender 7, got count=%d recipient=%d", pub.count, pub.lastRecipient)
+	if pub.count != 1 || pub.lastDest != (route.Destination{ChatID: 7, ThreadID: 3, Silent: true}) {
+		t.Errorf("expected one reply to sender 7, got count=%d dest=%+v", pub.count, pub.lastDest)
 	}
 	if !strings.Contains(pub.lastMsg, "123.46") || !strings.Contains(pub.lastMsg, "12.34") {
 		t.Errorf("expected reply to contain formatted speeds, got %q", pub.lastMsg)
@@ -53,7 +55,7 @@ func TestSpeedHandleSpeedtestError(t *testing.T) {
 	speedtest := &fakeSpeedtest{err: errors.New("boom")}
 	cmd := NewSpeedCommand(zap.NewNop(), pub, speedtest)
 
-	err := cmd.Handle(context.Background(), 7, "/speed")
+	err := cmd.Handle(context.Background(), testOrigin(7), "/speed")
 	if err == nil {
 		t.Fatal("expected an error when Speedtest fails")
 	}
@@ -67,7 +69,7 @@ func TestSpeedHandlePublishError(t *testing.T) {
 	speedtest := &fakeSpeedtest{dl: 1, ul: 1}
 	cmd := NewSpeedCommand(zap.NewNop(), pub, speedtest)
 
-	err := cmd.Handle(context.Background(), 7, "/speed")
+	err := cmd.Handle(context.Background(), testOrigin(7), "/speed")
 	if err == nil {
 		t.Fatal("expected an error when publish fails")
 	}

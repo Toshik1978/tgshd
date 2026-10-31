@@ -8,18 +8,19 @@ import (
 
 	"go.uber.org/zap"
 
+	"github.com/Toshik1978/tgshd/pkg/telegram/route"
 	"github.com/Toshik1978/tgshd/pkg/zte"
 )
 
 type worker struct {
 	logger    *zap.Logger
 	publisher Publisher
-	chatID    int64
+	dest      route.Destination
 	conn      ZTE
 }
 
 type Publisher interface {
-	Publish(ctx context.Context, recipientID int64, msg string) error
+	Publish(ctx context.Context, dest route.Destination, msg string) error
 }
 
 type ZTE interface {
@@ -31,7 +32,7 @@ func NewWorker(logger *zap.Logger, publisher Publisher, chatID int64, conn ZTE) 
 	return &worker{
 		logger:    logger,
 		publisher: publisher,
-		chatID:    chatID,
+		dest:      route.Destination{ChatID: chatID},
 		conn:      conn,
 	}
 }
@@ -56,7 +57,7 @@ func (w *worker) Do(ctx context.Context) error {
 		text += fmt.Sprintf("<i>Date</i>: %s\n\n", decodeDate(m.Date).Format(time.RFC1123))
 		text += decodeMessage(m.Content)
 
-		errs = append(errs, w.publisher.Publish(ctx, w.chatID, text))
+		errs = append(errs, w.publisher.Publish(ctx, w.dest, text))
 	}
 
 	return errors.Join(errs...)

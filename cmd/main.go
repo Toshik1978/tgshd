@@ -28,6 +28,7 @@ import (
 	"github.com/Toshik1978/tgshd/pkg/sms/gammu"
 	"github.com/Toshik1978/tgshd/pkg/speedtest"
 	"github.com/Toshik1978/tgshd/pkg/telegram"
+	"github.com/Toshik1978/tgshd/pkg/telegram/route"
 	"github.com/Toshik1978/tgshd/pkg/zte"
 )
 
@@ -263,8 +264,8 @@ func newConfig() (*config, error) {
 }
 
 // newAccessList builds the Telegram allow-list from the configuration.
-func newAccessList(cfg *config) *telegram.AccessList {
-	return telegram.NewAccessList(cfg.ChatID, cfg.AllowedIDs)
+func newAccessList(cfg *config) *route.AccessList {
+	return route.NewAccessList(cfg.ChatID, cfg.AllowedIDs)
 }
 
 // newTelegramBot initializes new telegram bot.

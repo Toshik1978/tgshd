@@ -22,6 +22,7 @@ import (
 	"github.com/Toshik1978/tgshd/pkg/health/store"
 	"github.com/Toshik1978/tgshd/pkg/host/sysfs"
 	"github.com/Toshik1978/tgshd/pkg/telegram"
+	"github.com/Toshik1978/tgshd/pkg/telegram/route"
 )
 
 const (
@@ -542,8 +543,8 @@ func (c replyCommand) Name() string { return c.name }
 func (replyCommand) Enabled() bool { return true }
 
 // Handle implements telegram.Handler.
-func (c replyCommand) Handle(ctx context.Context, senderID int64, _ string) error {
-	if err := c.publisher.Publish(ctx, senderID, c.reply); err != nil {
+func (c replyCommand) Handle(ctx context.Context, origin route.Origin, _ string) error {
+	if err := c.publisher.Publish(ctx, origin.Reply(), c.reply); err != nil {
 		return fmt.Errorf("failed to publish reply: %w", err)
 	}
 

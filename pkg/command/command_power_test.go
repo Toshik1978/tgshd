@@ -7,6 +7,8 @@ import (
 	"testing"
 
 	"go.uber.org/zap"
+
+	"github.com/Toshik1978/tgshd/pkg/telegram/route"
 )
 
 type fakePower struct {
@@ -54,11 +56,11 @@ func TestPowerHandleHappyPath(t *testing.T) {
 	power := &fakePower{valid: true, voltage: 12.345}
 	cmd := NewPowerCommand(zap.NewNop(), pub, power)
 
-	if err := cmd.Handle(context.Background(), 42, "/power"); err != nil {
+	if err := cmd.Handle(context.Background(), testOrigin(42), "/power"); err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if pub.count != 1 || pub.lastRecipient != 42 {
-		t.Errorf("expected one reply to sender 42, got count=%d recipient=%d", pub.count, pub.lastRecipient)
+	if pub.count != 1 || pub.lastDest != (route.Destination{ChatID: 42, ThreadID: 3, Silent: true}) {
+		t.Errorf("expected one reply to sender 42, got count=%d dest=%+v", pub.count, pub.lastDest)
 	}
 	if !strings.Contains(pub.lastMsg, "12.3") {
 		t.Errorf("expected reply to contain formatted voltage, got %q", pub.lastMsg)
@@ -70,7 +72,7 @@ func TestPowerHandleVoltageError(t *testing.T) {
 	power := &fakePower{valid: true, err: errors.New("boom")}
 	cmd := NewPowerCommand(zap.NewNop(), pub, power)
 
-	err := cmd.Handle(context.Background(), 42, "/power")
+	err := cmd.Handle(context.Background(), testOrigin(42), "/power")
 	if err == nil {
 		t.Fatal("expected an error when Voltage fails")
 	}
@@ -84,7 +86,7 @@ func TestPowerHandlePublishError(t *testing.T) {
 	power := &fakePower{valid: true, voltage: 5}
 	cmd := NewPowerCommand(zap.NewNop(), pub, power)
 
-	err := cmd.Handle(context.Background(), 42, "/power")
+	err := cmd.Handle(context.Background(), testOrigin(42), "/power")
 	if err == nil {
 		t.Fatal("expected an error when publish fails")
 	}

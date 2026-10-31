@@ -9,6 +9,7 @@ import (
 
 	"github.com/Toshik1978/tgshd/pkg/health/report"
 	"github.com/Toshik1978/tgshd/pkg/health/store"
+	"github.com/Toshik1978/tgshd/pkg/telegram/route"
 )
 
 // Drive describes one known drive: Bus, Model and Serial, whether its health
@@ -43,7 +44,7 @@ func (c *disksCommand) Enabled() bool {
 	return true
 }
 
-func (c *disksCommand) Handle(ctx context.Context, senderID int64, _ string) error {
+func (c *disksCommand) Handle(ctx context.Context, origin route.Origin, _ string) error {
 	c.logger.Debug("Disks command received")
 
 	var stats []store.MetricStats
@@ -54,7 +55,7 @@ func (c *disksCommand) Handle(ctx context.Context, senderID int64, _ string) err
 			return err
 		}
 	}
-	if err := c.publisher.Publish(ctx, senderID, report.Disks(drives, stats)); err != nil {
+	if err := c.publisher.Publish(ctx, origin.Reply(), report.Disks(drives, stats)); err != nil {
 		return fmt.Errorf("failed to publish reply: %w", err)
 	}
 

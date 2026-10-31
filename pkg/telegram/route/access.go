@@ -1,4 +1,4 @@
-package telegram
+package route
 
 // AccessList is the set of Telegram chat IDs allowed to command the bot.
 type AccessList struct {
