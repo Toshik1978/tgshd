@@ -76,8 +76,8 @@ func TestRetireCommand(t *testing.T) {
 			pub := &fakePublisher{}
 			r := &fakeRetirer{res: c.res, err: c.err}
 			cmd := NewRetireCommand(zap.NewNop(), pub, r)
-			if cmd.Name() != "retire" || !cmd.Enabled() {
-				t.Fatalf("Name=%q Enabled=%v", cmd.Name(), cmd.Enabled())
+			if !cmd.Enabled() {
+				t.Fatal("command disabled")
 			}
 			if err := cmd.Handle(context.Background(), testOrigin(9), c.cmd); err != nil {
 				t.Fatal(err)

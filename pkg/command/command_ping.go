@@ -33,8 +33,8 @@ func NewPingCommand(logger *zap.Logger, publisher Publisher, pinger Pinger, host
 	}
 }
 
-func (c *pingCommand) Name() string {
-	return "ping"
+func (c *pingCommand) Commands() []route.BotCommand {
+	return builtinCommands("ping")
 }
 
 func (c *pingCommand) Enabled() bool {

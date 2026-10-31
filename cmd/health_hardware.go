@@ -425,8 +425,12 @@ type noDrivesCommand struct {
 	publisher command.Publisher
 }
 
-// Name implements telegram.Handler.
-func (noDrivesCommand) Name() string { return "retire" }
+// Commands returns the same entry as the real /retire handler.
+func (noDrivesCommand) Commands() []route.BotCommand {
+	entry, _ := command.BuiltinCommand("retire")
+
+	return []route.BotCommand{entry}
+}
 
 // Enabled implements telegram.Handler.
 func (noDrivesCommand) Enabled() bool { return true }

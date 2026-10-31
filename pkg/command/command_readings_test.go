@@ -38,8 +38,8 @@ func TestTempCommand(t *testing.T) {
 		"temp.": {{Metric: "temp.gpu.0", Current: 60, HasCurrent: true, Min: 40, Avg: 50, Max: 70}},
 	}}
 	cmd := NewTempCommand(zap.NewNop(), pub, m, nil)
-	if cmd.Name() != "temp" || !cmd.Enabled() {
-		t.Fatalf("Name=%q Enabled=%v", cmd.Name(), cmd.Enabled())
+	if !cmd.Enabled() {
+		t.Fatal("command disabled")
 	}
 	if err := cmd.Handle(context.Background(), testOrigin(4), "/temp"); err != nil {
 		t.Fatal(err)
@@ -103,8 +103,8 @@ func TestDisksCommand(t *testing.T) {
 		SelfTest: report.SelfTest{Format: "ok", Result: "passed", Age: 24 * time.Hour},
 	}}}
 	cmd := NewDisksCommand(zap.NewNop(), pub, d, m)
-	if cmd.Name() != "disks" || !cmd.Enabled() {
-		t.Fatalf("Name=%q Enabled=%v", cmd.Name(), cmd.Enabled())
+	if !cmd.Enabled() {
+		t.Fatal("command disabled")
 	}
 	if err := cmd.Handle(context.Background(), testOrigin(4), "/disks"); err != nil {
 		t.Fatal(err)

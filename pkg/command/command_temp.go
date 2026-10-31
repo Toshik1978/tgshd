@@ -41,8 +41,8 @@ func NewTempCommand(
 	return &tempCommand{logger: logger, publisher: publisher, metrics: metrics, sensors: sensors, now: time.Now}
 }
 
-func (c *tempCommand) Name() string {
-	return "temp"
+func (c *tempCommand) Commands() []route.BotCommand {
+	return builtinCommands("temp")
 }
 
 func (c *tempCommand) Enabled() bool {

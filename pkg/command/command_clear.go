@@ -32,8 +32,8 @@ func NewClearCommand(logger *zap.Logger, publisher Publisher, clearer Clearer) *
 	return &clearCommand{logger: logger, publisher: publisher, clearer: clearer}
 }
 
-func (c *clearCommand) Name() string {
-	return "clear"
+func (c *clearCommand) Commands() []route.BotCommand {
+	return builtinCommands("clear")
 }
 
 func (c *clearCommand) Enabled() bool {

@@ -25,13 +25,6 @@ func (f *fakePower) Voltage(_ context.Context) (float64, error) {
 	return f.voltage, f.err
 }
 
-func TestPowerName(t *testing.T) {
-	cmd := NewPowerCommand(zap.NewNop(), &fakePublisher{}, &fakePower{})
-	if got := cmd.Name(); got != "power" {
-		t.Errorf("Name() = %q, want %q", got, "power")
-	}
-}
-
 func TestPowerEnabled(t *testing.T) {
 	cases := []struct {
 		name  string

@@ -33,8 +33,8 @@ func TestStatusCommand(t *testing.T) {
 	src := &fakeHealth{snap: runner.Snapshot{Open: []runner.OpenCondition{{Key: "disk/a", Text: "hot", Since: at}}}}
 	cmd := NewStatusCommand(zap.NewNop(), pub, src, nil)
 
-	if cmd.Name() != "status" || !cmd.Enabled() {
-		t.Fatalf("Name=%q Enabled=%v", cmd.Name(), cmd.Enabled())
+	if !cmd.Enabled() {
+		t.Fatal("command disabled")
 	}
 	if err := cmd.Handle(context.Background(), testOrigin(5), "/status"); err != nil {
 		t.Fatal(err)
@@ -107,8 +107,8 @@ func TestClearCommand(t *testing.T) {
 			pub := &fakePublisher{}
 			h := &fakeHealth{snap: open, ok: c.ok}
 			cmd := NewClearCommand(zap.NewNop(), pub, h)
-			if cmd.Name() != "clear" || !cmd.Enabled() {
-				t.Fatalf("Name=%q Enabled=%v", cmd.Name(), cmd.Enabled())
+			if !cmd.Enabled() {
+				t.Fatal("command disabled")
 			}
 			if err := cmd.Handle(context.Background(), testOrigin(9), c.cmd); err != nil {
 				t.Fatal(err)

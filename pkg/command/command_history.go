@@ -32,8 +32,8 @@ func NewHistoryCommand(logger *zap.Logger, publisher Publisher, source HistorySo
 	return &historyCommand{logger: logger, publisher: publisher, source: source}
 }
 
-func (c *historyCommand) Name() string {
-	return "history"
+func (c *historyCommand) Commands() []route.BotCommand {
+	return builtinCommands("history")
 }
 
 func (c *historyCommand) Enabled() bool {

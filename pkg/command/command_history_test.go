@@ -54,8 +54,8 @@ func TestHistoryCommand(t *testing.T) {
 			pub := &fakePublisher{}
 			src := &fakeHistory{alerts: c.alerts}
 			cmd := NewHistoryCommand(zap.NewNop(), pub, src)
-			if cmd.Name() != "history" || !cmd.Enabled() {
-				t.Fatalf("Name=%q Enabled=%v", cmd.Name(), cmd.Enabled())
+			if !cmd.Enabled() {
+				t.Fatal("command disabled")
 			}
 			if err := cmd.Handle(context.Background(), testOrigin(5), c.cmd); err != nil {
 				t.Fatal(err)

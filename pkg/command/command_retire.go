@@ -32,8 +32,8 @@ func NewRetireCommand(logger *zap.Logger, publisher Publisher, retirer Retirer) 
 	return &retireCommand{logger: logger, publisher: publisher, retirer: retirer}
 }
 
-func (c *retireCommand) Name() string {
-	return "retire"
+func (c *retireCommand) Commands() []route.BotCommand {
+	return builtinCommands("retire")
 }
 
 func (c *retireCommand) Enabled() bool {

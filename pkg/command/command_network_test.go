@@ -24,13 +24,6 @@ func (f *fakeZTE) SetBearer(_ context.Context, pref zte.Bearer) error {
 	return f.err
 }
 
-func TestNetworkName(t *testing.T) {
-	cmd := NewNetworkCommand(zap.NewNop(), &fakePublisher{}, &fakeZTE{}, "5g")
-	if got := cmd.Name(); got != "5g" {
-		t.Errorf("Name() = %q, want %q", got, "5g")
-	}
-}
-
 func TestNetworkEnabled(t *testing.T) {
 	cmd := NewNetworkCommand(zap.NewNop(), &fakePublisher{}, &fakeZTE{}, "5g")
 	if !cmd.Enabled() {

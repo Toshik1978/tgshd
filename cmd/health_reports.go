@@ -537,8 +537,14 @@ type replyCommand struct {
 	publisher command.Publisher
 }
 
-// Name implements telegram.Handler.
-func (c replyCommand) Name() string { return c.name }
+// Commands returns the built-in entry for this command's name.
+func (c replyCommand) Commands() []route.BotCommand {
+	if entry, ok := command.BuiltinCommand(c.name); ok {
+		return []route.BotCommand{entry}
+	}
+
+	return nil
+}
 
 // Enabled implements telegram.Handler.
 func (replyCommand) Enabled() bool { return true }

@@ -1,5 +1,7 @@
 package route
 
+import "slices"
+
 // AccessList is the set of Telegram chat IDs allowed to command the bot.
 type AccessList struct {
 	ids map[int64]struct{}
@@ -59,4 +61,53 @@ func (a *AccessList) Permit(kind ChatKind, chatID, senderID int64) bool {
 	default:
 		return false
 	}
+}
+
+// ScopeKind is the kind of Telegram command scope a menu is published to.
+type ScopeKind int
+
+const (
+	// ScopePrivate is the private chat with one allowed user.
+	ScopePrivate ScopeKind = iota + 1
+	// ScopeGroupMember is one allowed user inside one allowed group.
+	ScopeGroupMember
+)
+
+// MenuScope is one place the command menu is published to. For ScopePrivate
+// ChatID is the user id and UserID is zero. For ScopeGroupMember ChatID is the
+// group id and UserID is the user id.
+type MenuScope struct {
+	Kind   ScopeKind
+	ChatID int64
+	UserID int64
+}
+
+// MenuScopes lists every scope the menu is published to: a private scope for
+// each allowed user (positive id) and a group-member scope for each allowed
+// group (negative id) and user pair. The result is sorted, private scopes
+// first, then by chat id, then by user id.
+func (a *AccessList) MenuScopes() []MenuScope {
+	users := make([]int64, 0, len(a.ids))
+	groups := make([]int64, 0, len(a.ids))
+	for id := range a.ids {
+		if id > 0 {
+			users = append(users, id)
+		} else {
+			groups = append(groups, id)
+		}
+	}
+	slices.Sort(users)
+	slices.Sort(groups)
+
+	scopes := make([]MenuScope, 0, len(users)*(1+len(groups)))
+	for _, u := range users {
+		scopes = append(scopes, MenuScope{Kind: ScopePrivate, ChatID: u})
+	}
+	for _, g := range groups {
+		for _, u := range users {
+			scopes = append(scopes, MenuScope{Kind: ScopeGroupMember, ChatID: g, UserID: u})
+		}
+	}
+
+	return scopes
 }

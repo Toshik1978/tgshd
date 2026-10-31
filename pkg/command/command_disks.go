@@ -36,8 +36,8 @@ func NewDisksCommand(logger *zap.Logger, publisher Publisher, drives DriveSource
 	return &disksCommand{logger: logger, publisher: publisher, drives: drives, metrics: metrics, now: time.Now}
 }
 
-func (c *disksCommand) Name() string {
-	return "disks"
+func (c *disksCommand) Commands() []route.BotCommand {
+	return builtinCommands("disks")
 }
 
 func (c *disksCommand) Enabled() bool {

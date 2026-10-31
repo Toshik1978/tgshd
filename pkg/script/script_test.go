@@ -10,10 +10,10 @@ import (
 	"go.uber.org/zap"
 )
 
-func TestName_EmptyScriptFile(t *testing.T) {
+func TestList_EmptyScriptFile(t *testing.T) {
 	s := New(zap.NewNop(), "")
 
-	got, err := s.Name(context.Background())
+	got, err := s.List(context.Background())
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -30,11 +30,11 @@ func TestExecute_EmptyScriptFile(t *testing.T) {
 	}
 }
 
-func TestName_Success(t *testing.T) {
+func TestList_Success(t *testing.T) {
 	path := writeScript(t, "#!/bin/sh\necho hello\n")
 	s := New(zap.NewNop(), path)
 
-	got, err := s.Name(context.Background())
+	got, err := s.List(context.Background())
 	if err != nil {
 		t.Fatalf("expected no error, got %v", err)
 	}
@@ -52,11 +52,11 @@ func TestExecute_Success(t *testing.T) {
 	}
 }
 
-func TestName_NonExistentScript(t *testing.T) {
+func TestList_NonExistentScript(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "nope")
 	s := New(zap.NewNop(), path)
 
-	got, err := s.Name(context.Background())
+	got, err := s.List(context.Background())
 	if err == nil {
 		t.Fatal("expected an error, got nil")
 	}
@@ -83,11 +83,11 @@ func TestExecute_ScriptExitsNonZero(t *testing.T) {
 	}
 }
 
-func TestName_ScriptExitsNonZero(t *testing.T) {
+func TestList_ScriptExitsNonZero(t *testing.T) {
 	path := writeScript(t, "#!/bin/sh\nexit 1\n")
 	s := New(zap.NewNop(), path)
 
-	got, err := s.Name(context.Background())
+	got, err := s.List(context.Background())
 	if err == nil {
 		t.Fatal("expected an error, got nil")
 	}
@@ -96,14 +96,14 @@ func TestName_ScriptExitsNonZero(t *testing.T) {
 	}
 }
 
-func TestName_ContextCancelled(t *testing.T) {
+func TestList_ContextCancelled(t *testing.T) {
 	path := writeScript(t, "#!/bin/sh\necho hello\n")
 	s := New(zap.NewNop(), path)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	if _, err := s.Name(ctx); err == nil {
+	if _, err := s.List(ctx); err == nil {
 		t.Fatal("expected an error when the context is already cancelled")
 	}
 }

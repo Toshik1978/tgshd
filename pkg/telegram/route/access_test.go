@@ -1,6 +1,9 @@
 package route
 
-import "testing"
+import (
+	"slices"
+	"testing"
+)
 
 func TestAccessListAllowed(t *testing.T) {
 	tests := []struct {
@@ -63,5 +66,58 @@ func TestAccessListPermit(t *testing.T) {
 				t.Fatalf("Permit(%v, %d, %d) = %v, want %v", tt.kind, tt.chatID, tt.senderID, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestAccessListMenuScopes(t *testing.T) {
+	const (
+		userA  = int64(100000000)
+		userB  = int64(200000000)
+		groupA = int64(-1000000000000)
+		groupB = int64(-1000000000001)
+	)
+
+	tests := []struct {
+		name string
+		ids  []int64
+		want []MenuScope
+	}{
+		{name: "empty list", ids: nil, want: nil},
+		{
+			name: "users only",
+			ids:  []int64{userB, userA},
+			want: []MenuScope{
+				{Kind: ScopePrivate, ChatID: userA},
+				{Kind: ScopePrivate, ChatID: userB},
+			},
+		},
+		{name: "groups without users", ids: []int64{groupA, groupB}, want: nil},
+		{
+			name: "groups and users",
+			ids:  []int64{groupB, userB, groupA, userA},
+			want: []MenuScope{
+				{Kind: ScopePrivate, ChatID: userA},
+				{Kind: ScopePrivate, ChatID: userB},
+				{Kind: ScopeGroupMember, ChatID: groupB, UserID: userA},
+				{Kind: ScopeGroupMember, ChatID: groupB, UserID: userB},
+				{Kind: ScopeGroupMember, ChatID: groupA, UserID: userA},
+				{Kind: ScopeGroupMember, ChatID: groupA, UserID: userB},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := NewAccessList(0, tt.ids).MenuScopes()
+			if !slices.Equal(got, tt.want) {
+				t.Fatalf("MenuScopes() = %+v, want %+v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestScopeKindZeroIsInvalid(t *testing.T) {
+	if ScopePrivate == 0 || ScopeGroupMember == 0 {
+		t.Fatal("zero ScopeKind must not be a valid kind")
 	}
 }

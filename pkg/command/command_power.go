@@ -31,8 +31,8 @@ func NewPowerCommand(logger *zap.Logger, publisher Publisher, power Power) *powe
 	}
 }
 
-func (c *powerCommand) Name() string {
-	return "power"
+func (c *powerCommand) Commands() []route.BotCommand {
+	return builtinCommands("power")
 }
 
 func (c *powerCommand) Enabled() bool {

@@ -20,13 +20,6 @@ func (f *fakePinger) Ping(_ context.Context, _ []string) (map[string]bool, error
 	return f.result, f.err
 }
 
-func TestPingName(t *testing.T) {
-	cmd := NewPingCommand(zap.NewNop(), &fakePublisher{}, &fakePinger{}, []string{"host1"})
-	if got := cmd.Name(); got != "ping" {
-		t.Errorf("Name() = %q, want %q", got, "ping")
-	}
-}
-
 func TestPingEnabled(t *testing.T) {
 	cases := []struct {
 		name  string

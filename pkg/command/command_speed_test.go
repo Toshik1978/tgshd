@@ -20,13 +20,6 @@ func (f *fakeSpeedtest) Speedtest(_ context.Context) (float64, float64, error) {
 	return f.dl, f.ul, f.err
 }
 
-func TestSpeedName(t *testing.T) {
-	cmd := NewSpeedCommand(zap.NewNop(), &fakePublisher{}, &fakeSpeedtest{})
-	if got := cmd.Name(); got != "speed" {
-		t.Errorf("Name() = %q, want %q", got, "speed")
-	}
-}
-
 func TestSpeedEnabled(t *testing.T) {
 	cmd := NewSpeedCommand(zap.NewNop(), &fakePublisher{}, &fakeSpeedtest{})
 	if !cmd.Enabled() {

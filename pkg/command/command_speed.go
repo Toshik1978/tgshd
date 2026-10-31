@@ -30,8 +30,8 @@ func NewSpeedCommand(logger *zap.Logger, publisher Publisher, speedtest Speedtes
 	}
 }
 
-func (c *speedCommand) Name() string {
-	return "speed"
+func (c *speedCommand) Commands() []route.BotCommand {
+	return builtinCommands("speed")
 }
 
 func (c *speedCommand) Enabled() bool {

@@ -886,7 +886,7 @@ func TestNewHealthEnabledRegistersRunnerAndCommands(t *testing.T) {
 	}
 	names := make([]string, 0, len(out.Handlers))
 	for _, h := range out.Handlers {
-		names = append(names, h.Name())
+		names = append(names, handlerName(h))
 	}
 	if !slices.Equal(names, []string{"status", "clear", "retire", "history", "temp", "disks"}) {
 		t.Fatalf("handlers = %v", names)
@@ -1032,7 +1032,7 @@ func TestNewHealthRestoresStateBeforeBackgroundJobsStart(t *testing.T) {
 func retireIndex(t *testing.T, out healthOut) int {
 	t.Helper()
 
-	i := slices.IndexFunc(out.Handlers, func(h telegram.Handler) bool { return h.Name() == "retire" })
+	i := slices.IndexFunc(out.Handlers, func(h telegram.Handler) bool { return handlerName(h) == "retire" })
 	if i < 0 {
 		t.Fatal("no /retire handler")
 	}

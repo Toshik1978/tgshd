@@ -34,8 +34,9 @@ func NewNetworkCommand(logger *zap.Logger, publisher Publisher, conn ZTE, cmd st
 	}
 }
 
-func (c *networkCommand) Name() string {
-	return c.cmd
+// Commands returns the menu entry for this instance's own command name.
+func (c *networkCommand) Commands() []route.BotCommand {
+	return builtinCommands(c.cmd)
 }
 
 func (c *networkCommand) Enabled() bool {

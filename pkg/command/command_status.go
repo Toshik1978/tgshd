@@ -38,8 +38,8 @@ func NewStatusCommand(
 	return &statusCommand{logger: logger, publisher: publisher, source: source, memory: memory}
 }
 
-func (c *statusCommand) Name() string {
-	return "status"
+func (c *statusCommand) Commands() []route.BotCommand {
+	return builtinCommands("status")
 }
 
 func (c *statusCommand) Enabled() bool {

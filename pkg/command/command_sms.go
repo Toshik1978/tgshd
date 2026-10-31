@@ -35,8 +35,8 @@ func NewSmsCommand(logger *zap.Logger, publisher Publisher, sender SmsSender, ch
 	}
 }
 
-func (c *smsCommand) Name() string {
-	return "sms"
+func (c *smsCommand) Commands() []route.BotCommand {
+	return builtinCommands("sms")
 }
 
 func (c *smsCommand) Enabled() bool {

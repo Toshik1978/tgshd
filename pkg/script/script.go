@@ -24,8 +24,8 @@ func New(logger *zap.Logger, scriptFile string) *script {
 	}
 }
 
-// Name runs the script to get the list of available commands.
-func (s *script) Name(ctx context.Context) (string, error) {
+// List runs the script to get the list of available commands.
+func (s *script) List(ctx context.Context) (string, error) {
 	if s.scriptFile == "" {
 		return "", nil
 	}

@@ -15,7 +15,7 @@ import (
 const scriptNameTimeout = 10 * time.Second
 
 type Script interface {
-	Name(ctx context.Context) (string, error)
+	List(ctx context.Context) (string, error)
 	Execute(ctx context.Context, cmd string, threadID int) error
 }
 
@@ -23,34 +23,44 @@ type unknownCommand struct {
 	logger    *zap.Logger
 	publisher Publisher
 	runner    Script
-	name      string
+	commands  []route.BotCommand
 }
 
 // NewUnknownCommand creates new handler for unknown command. The command list
-// is resolved from the script once, here at construction, so Name() stays a
+// is resolved from the script once, here at construction, so Commands() stays a
 // cheap accessor instead of re-executing the script on every dispatch.
 func NewUnknownCommand(logger *zap.Logger, publisher Publisher, runner Script) (*unknownCommand, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), scriptNameTimeout)
 	defer cancel()
 
-	name, err := runner.Name(ctx)
+	out, err := runner.List(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get unknown commands list: %w", err)
 	}
 
-	logger.Info("Unknown command created")
+	commands, problems := parseScriptCommands(out)
+	for _, problem := range problems {
+		logger.Warn(problem)
+	}
+
+	logger.Info("Unknown command created", zap.Int("commands", len(commands)))
 
 	return &unknownCommand{
 		logger:    logger,
 		publisher: publisher,
 		runner:    runner,
-		name:      name,
+		commands:  commands,
 	}, nil
 }
 
-func (c *unknownCommand) Name() string {
-	return c.name
+// Commands returns the entries parsed from the script's command list.
+func (c *unknownCommand) Commands() []route.BotCommand {
+	return c.commands
 }
+
+// CustomScript marks this as the custom-script handler, so the consumer can
+// register its commands after the built-ins.
+func (c *unknownCommand) CustomScript() {}
 
 func (c *unknownCommand) Enabled() bool {
 	return true

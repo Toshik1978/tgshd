@@ -31,11 +31,18 @@ func (f fakeContext) Chat() *telebot.Chat       { return f.msg.Chat }
 func (f fakeContext) Text() string              { return f.msg.Text }
 
 type fakeHandler struct {
-	calls int
-	got   string
+	calls    int
+	got      string
+	commands []route.BotCommand
 }
 
-func (h *fakeHandler) Name() string  { return "ping" }
+func (h *fakeHandler) Commands() []route.BotCommand {
+	if h.commands != nil {
+		return h.commands
+	}
+
+	return []route.BotCommand{{Name: "ping", Description: "Ping"}}
+}
 func (h *fakeHandler) Enabled() bool { return true }
 func (h *fakeHandler) Handle(_ context.Context, _ route.Origin, cmd string) error {
 	h.calls++
@@ -92,7 +99,7 @@ func TestConsumerAccessFilter(t *testing.T) {
 				tctx := fakeContext{msg: &telebot.Message{Chat: tt.chat, Sender: tt.sender, Text: "/ping"}}
 				var err error
 				if path == "command" {
-					err = c.handleCommand(context.Background(), h, tctx)
+					err = c.handleCommand(context.Background(), h, "ping", tctx)
 				} else {
 					err = c.handleCommands(context.Background(), map[string]Handler{"/ping": h}, tctx)
 				}
@@ -193,7 +200,7 @@ func TestHandleCommandStripsOwnBotName(t *testing.T) {
 			c.bot = &telebot.Bot{Me: &telebot.User{Username: "tgshd_test_bot"}}
 			chat := &telebot.Chat{ID: 100, Type: telebot.ChatChannel}
 			tctx := fakeContext{msg: &telebot.Message{Chat: chat, Sender: &telebot.User{ID: 5}, Text: tt.text}}
-			if err := c.handleCommand(context.Background(), h, tctx); err != nil {
+			if err := c.handleCommand(context.Background(), h, "ping", tctx); err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
 			if h.got != tt.want {
@@ -202,3 +209,64 @@ func TestHandleCommandStripsOwnBotName(t *testing.T) {
 		})
 	}
 }
+
+type fakeScriptHandler struct{ fakeHandler }
+
+func (*fakeScriptHandler) CustomScript() {}
+
+func TestBuildRoutesScriptNameEqualToBuiltinRoutesToBuiltin(t *testing.T) {
+	builtin := &fakeHandler{}
+	script := &fakeScriptHandler{fakeHandler{commands: []route.BotCommand{
+		{Name: "ping", Description: "Shadow"}, {Name: "custom", Description: "Custom"},
+	}}}
+	// The script handler is listed first on purpose: order must not matter.
+	c, logs := newTestConsumer(script)
+	c.handlers = []Handler{script, builtin}
+
+	got := c.buildRoutes()
+	if len(got) != 2 {
+		t.Fatalf("routes = %d, want 2", len(got))
+	}
+	if got["/ping"] != Handler(builtin) {
+		t.Errorf("/ping routes to %T, want the built-in", got["/ping"])
+	}
+	if got["/custom"] != Handler(script) {
+		t.Errorf("/custom routes to %T, want the script handler", got["/custom"])
+	}
+	if logs.FilterLevelExact(zap.WarnLevel).Len() != 1 {
+		t.Errorf("want one warning for the duplicate, got %d", logs.FilterLevelExact(zap.WarnLevel).Len())
+	}
+	if len(c.menu) != 2 {
+		t.Errorf("menu = %+v, want 2 entries", c.menu)
+	}
+}
+
+func TestBuildRoutesDropsInvalidAndSkipsDisabled(t *testing.T) {
+	h := &fakeHandler{commands: []route.BotCommand{
+		{Name: "ok", Description: "Fine"}, {Name: "Bad Name", Description: "Invalid"}, {Name: "nodesc"},
+	}}
+	c, logs := newTestConsumer(h)
+	c.handlers = []Handler{h, disabledHandler{}}
+
+	got := c.buildRoutes()
+	if _, ok := got["/ok"]; !ok || len(got) != 1 {
+		t.Fatalf("routes = %v, want only /ok", got)
+	}
+	if _, ok := got["/off"]; ok {
+		t.Error("disabled handler was routed")
+	}
+	if n := logs.FilterLevelExact(zap.WarnLevel).Len(); n != 2 {
+		t.Errorf("warnings = %d, want 2", n)
+	}
+	if len(c.menu) != 1 || c.menu[0].Name != "ok" {
+		t.Errorf("menu = %+v, want [ok]", c.menu)
+	}
+}
+
+type disabledHandler struct{}
+
+func (disabledHandler) Commands() []route.BotCommand {
+	return []route.BotCommand{{Name: "off", Description: "Off"}}
+}
+func (disabledHandler) Enabled() bool                                      { return false }
+func (disabledHandler) Handle(context.Context, route.Origin, string) error { return nil }

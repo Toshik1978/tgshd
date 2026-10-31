@@ -17,19 +17,25 @@ import (
 
 // Handler define handler for specific command.
 type Handler interface {
-	// Name returns name of command to handle.
-	Name() string
+	// Commands returns the commands the handler serves, each with the
+	// description shown in the Telegram command menu.
+	Commands() []route.BotCommand
 	// Enabled return true if command is enabled.
 	Enabled() bool
 	// Handle handles command.
 	Handle(ctx context.Context, origin route.Origin, cmd string) error
 }
 
+// customScript marks the handler that serves the operator's script commands.
+// Its commands are registered after the built-ins.
+type customScript interface{ CustomScript() }
+
 type consumer struct {
 	logger   *zap.Logger
 	bot      *telebot.Bot
 	access   *route.AccessList
 	handlers []Handler
+	menu     []route.BotCommand
 
 	mu      sync.Mutex
 	cancel  context.CancelFunc
@@ -62,18 +68,13 @@ func (c *consumer) Start(ctx context.Context) error {
 	c.logger.Info("Telegram bot started")
 
 	// Add commands.
-	enabled := make(map[string]Handler)
-	for _, handler := range c.handlers {
-		if handler.Enabled() {
-			names := strings.SplitSeq(handler.Name(), "|")
-			for name := range names {
-				c.logger.With(zap.String("command", name)).Info("Telegram command added")
-				c.bot.Handle("/"+name, func(tctx telebot.Context) error {
-					return c.handleCommand(ctx, handler, tctx)
-				})
-				enabled["/"+name] = handler
-			}
-		}
+	enabled := c.buildRoutes()
+	for key, handler := range enabled {
+		name := strings.TrimPrefix(key, "/")
+		c.logger.With(zap.String("command", name)).Info("Telegram command added")
+		c.bot.Handle(key, func(tctx telebot.Context) error {
+			return c.handleCommand(ctx, handler, name, tctx)
+		})
 	}
 	// Add generic handler in case we are in the channel.
 	c.bot.Handle(telebot.OnChannelPost, func(tctx telebot.Context) error {
@@ -128,6 +129,50 @@ func (c *consumer) Stop(ctx context.Context) error {
 	return nil
 }
 
+// buildRoutes asks the enabled handlers for their commands, lets
+// route.BuildCommands validate and de-duplicate them, logs what it dropped and
+// remembers the menu. It returns the handler for each routed "/name".
+func (c *consumer) buildRoutes() map[string]Handler {
+	var builtins, script []route.BotCommand
+	builtinOwner := make(map[string]Handler)
+	scriptOwner := make(map[string]Handler)
+	for _, handler := range c.handlers {
+		if !handler.Enabled() {
+			continue
+		}
+		commands := handler.Commands()
+		list, owners := &builtins, builtinOwner
+		if _, ok := handler.(customScript); ok {
+			list, owners = &script, scriptOwner
+		}
+		*list = append(*list, commands...)
+		for _, command := range commands {
+			if _, taken := owners[command.Name]; !taken {
+				owners[command.Name] = handler
+			}
+		}
+	}
+
+	routed, menu, problems := route.BuildCommands(builtins, script)
+	for _, problem := range problems {
+		c.logger.Warn(problem)
+	}
+	c.menu = menu
+
+	enabled := make(map[string]Handler, len(routed))
+	for _, command := range routed {
+		// A script name equal to a built-in stays with the built-in, as in
+		// route.BuildCommands.
+		handler, ok := builtinOwner[command.Name]
+		if !ok {
+			handler = scriptOwner[command.Name]
+		}
+		enabled["/"+command.Name] = handler
+	}
+
+	return enabled
+}
+
 // connectAndPoll waits until Telegram answers getMe, then polls until stopped.
 func (c *consumer) connectAndPoll(ctx context.Context) {
 	err := retryUntil(ctx, connectInitialDelay, connectMaxDelay, c.fetchMe, func(err error, delay time.Duration) {
@@ -179,7 +224,7 @@ func (c *consumer) handleCommands(ctx context.Context, handlers map[string]Handl
 		return nil
 	}
 	if handler, ok := handlers[name]; ok {
-		return c.handleCommand(ctx, handler, tctx)
+		return c.handleCommand(ctx, handler, strings.TrimPrefix(name, "/"), tctx)
 	}
 
 	return nil
@@ -194,11 +239,11 @@ func (c *consumer) username() string {
 	return c.bot.Me.Username
 }
 
-func (c *consumer) handleCommand(ctx context.Context, handler Handler, tctx telebot.Context) error {
+func (c *consumer) handleCommand(ctx context.Context, handler Handler, name string, tctx telebot.Context) error {
 	if !c.permitted(tctx) {
 		return nil
 	}
-	logger := c.logger.With(zap.String("command", handler.Name()))
+	logger := c.logger.With(zap.String("command", name))
 	message := tctx.Message()
 
 	origin := originOf(message)

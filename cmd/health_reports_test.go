@@ -534,11 +534,16 @@ func TestHealthReportsWeeklyBeforeBind(t *testing.T) {
 	}
 }
 
+// handlerName is the single command a handler serves.
+func handlerName(h telegram.Handler) string {
+	return h.Commands()[0].Name
+}
+
 // handlerIndex returns the index of the /name handler in hs.
 func handlerIndex(t *testing.T, hs []telegram.Handler, name string) int {
 	t.Helper()
 
-	i := slices.IndexFunc(hs, func(h telegram.Handler) bool { return h.Name() == name })
+	i := slices.IndexFunc(hs, func(h telegram.Handler) bool { return handlerName(h) == name })
 	if i < 0 {
 		t.Fatalf("no /%s handler", name)
 	}
@@ -581,11 +586,11 @@ func TestHealthReportsHandlersWithoutStore(t *testing.T) {
 	hs := weeklyReports(nil, &fakeRunner{}, time.Now()).handlers(zap.NewNop(), pub)
 	names := make([]string, 0, len(hs))
 	for _, h := range hs {
-		names = append(names, h.Name())
+		names = append(names, handlerName(h))
 		if !h.Enabled() {
-			t.Errorf("/%s disabled", h.Name())
+			t.Errorf("/%s disabled", handlerName(h))
 		}
-		if err := h.Handle(t.Context(), testOrigin(42), "/"+h.Name()); err != nil {
+		if err := h.Handle(t.Context(), testOrigin(42), "/"+handlerName(h)); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -665,7 +670,7 @@ func TestHealthGraphRegistersReportCommands(t *testing.T) {
 
 	names := make([]string, 0, len(got.Handlers))
 	for _, h := range got.Handlers {
-		names = append(names, h.Name())
+		names = append(names, handlerName(h))
 	}
 	for _, want := range []string{"history", "temp", "disks"} {
 		if !slices.Contains(names, want) {
@@ -789,5 +794,26 @@ func TestMergeCheckSetsKeepsTheMemoryFigures(t *testing.T) {
 
 	if merged := mergeCheckSets([]checkSet{{}, {Memory: fakeMemoryFigures{}}}); merged.Memory == nil {
 		t.Fatal("mergeCheckSets dropped the memory figures")
+	}
+}
+
+func TestFallbackCommandsReturnTheBuiltinEntries(t *testing.T) {
+	for _, name := range []string{"history", "temp", "disks"} {
+		want, ok := command.BuiltinCommand(name)
+		if !ok {
+			t.Fatalf("no built-in entry for %q", name)
+		}
+		got := replyCommand{name: name}.Commands()
+		if !slices.Equal(got, []route.BotCommand{want}) {
+			t.Errorf("replyCommand(%q).Commands() = %+v, want [%+v]", name, got, want)
+		}
+	}
+	if got := (replyCommand{name: "nope"}).Commands(); len(got) != 0 {
+		t.Errorf("replyCommand for an unknown name returned %+v, want none", got)
+	}
+
+	want, _ := command.BuiltinCommand("retire")
+	if got := (noDrivesCommand{}).Commands(); !slices.Equal(got, []route.BotCommand{want}) {
+		t.Errorf("noDrivesCommand.Commands() = %+v, want [%+v]", got, want)
 	}
 }
