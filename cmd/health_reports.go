@@ -106,7 +106,7 @@ type guardStatus interface {
 // reportRunner is the runner as the reports use it; *runner.Runner satisfies it.
 type reportRunner interface {
 	Snapshot() runner.Snapshot
-	Push(ctx context.Context, check, text, record string)
+	PushRoute(ctx context.Context, check, key, text, record string, r route.Route)
 	ExpireQueue(now time.Time, maxAge time.Duration) []notify.QueuedMessage
 }
 
@@ -149,7 +149,7 @@ type healthReports struct {
 // runnerHooks are the runner's methods the reports call; all nil before bind.
 type runnerHooks struct {
 	snapshot func() runner.Snapshot
-	push     func(ctx context.Context, check, text, record string)
+	push     func(ctx context.Context, check, key, text, record string, r route.Route)
 	expire   func(now time.Time, maxAge time.Duration) []notify.QueuedMessage
 }
 
@@ -282,7 +282,7 @@ func (h *healthReports) bind(r reportRunner) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	h.runner = runnerHooks{snapshot: r.Snapshot, push: r.Push, expire: r.ExpireQueue}
+	h.runner = runnerHooks{snapshot: r.Snapshot, push: r.PushRoute, expire: r.ExpireQueue}
 }
 
 // handlers returns /history, /temp and /disks; without a state database each
@@ -359,7 +359,8 @@ func (h *healthReports) weekly(ctx context.Context, now time.Time) error {
 	if len(in.Drives) > 0 {
 		in.DriveStats = h.driveStats(ctx, now)
 	}
-	rh.push(ctx, summaryCheck, report.Summary(in), summaryRecord)
+	rh.push(ctx, summaryCheck, summaryCheck, report.Summary(in), summaryRecord,
+		route.Route{Topic: route.TopicSystem, Silent: true})
 
 	return nil
 }

@@ -48,14 +48,14 @@ func (z *fakeZTE) ReadSms(_ context.Context, _ bool) ([]zte.Sms, error) {
 }
 
 func TestWorker_Name(t *testing.T) {
-	w := NewWorker(zap.NewNop(), &fakePublisher{}, 42, &fakeZTE{})
+	w := NewWorker(zap.NewNop(), &fakePublisher{}, route.Destination{ChatID: 42}, &fakeZTE{})
 	if got := w.Name(); got != "sms" {
 		t.Errorf("Name() = %q, want %q", got, "sms")
 	}
 }
 
 func TestWorker_Duration(t *testing.T) {
-	w := NewWorker(zap.NewNop(), &fakePublisher{}, 42, &fakeZTE{})
+	w := NewWorker(zap.NewNop(), &fakePublisher{}, route.Destination{ChatID: 42}, &fakeZTE{})
 	if got := w.Duration(); got != 15*time.Second {
 		t.Errorf("Duration() = %v, want %v", got, 15*time.Second)
 	}
@@ -78,7 +78,7 @@ func TestWorker_Do_PublishesEachSms(t *testing.T) {
 	}
 	pub := &fakePublisher{}
 	conn := &fakeZTE{sms: sms}
-	w := NewWorker(zap.NewNop(), pub, chatID, conn)
+	w := NewWorker(zap.NewNop(), pub, route.Destination{ChatID: chatID, ThreadID: 4}, conn)
 
 	err := w.Do(context.Background())
 	if err != nil {
@@ -90,8 +90,8 @@ func TestWorker_Do_PublishesEachSms(t *testing.T) {
 	}
 
 	for i, call := range pub.calls {
-		if call.dest != (route.Destination{ChatID: chatID}) {
-			t.Errorf("call[%d].dest = %+v, want chat %d loud, no thread", i, call.dest, chatID)
+		if call.dest != (route.Destination{ChatID: chatID, ThreadID: 4}) {
+			t.Errorf("call[%d].dest = %+v, want chat %d thread 4 loud", i, call.dest, chatID)
 		}
 		if !strings.Contains(call.msg, sms[i].Number) {
 			t.Errorf("call[%d].msg = %q, want it to contain sender number %q", i, call.msg, sms[i].Number)
@@ -110,7 +110,7 @@ func TestWorker_Do_ReadSmsError(t *testing.T) {
 	readErr := errors.New("read sms failed")
 	pub := &fakePublisher{}
 	conn := &fakeZTE{err: readErr}
-	w := NewWorker(zap.NewNop(), pub, 1, conn)
+	w := NewWorker(zap.NewNop(), pub, route.Destination{ChatID: 1}, conn)
 
 	err := w.Do(context.Background())
 	if err == nil {
@@ -135,7 +135,7 @@ func TestWorker_Do_PublisherError(t *testing.T) {
 	}
 	pub := &fakePublisher{errs: []error{pubErr}}
 	conn := &fakeZTE{sms: sms}
-	w := NewWorker(zap.NewNop(), pub, 1, conn)
+	w := NewWorker(zap.NewNop(), pub, route.Destination{ChatID: 1}, conn)
 
 	err := w.Do(context.Background())
 	if err == nil {
@@ -164,7 +164,7 @@ func TestWorker_Do_ReadAndPublisherErrorsAreJoined(t *testing.T) {
 	}
 	pub := &fakePublisher{errs: []error{pubErr}}
 	conn := &fakeZTE{sms: sms, err: readErr}
-	w := NewWorker(zap.NewNop(), pub, 1, conn)
+	w := NewWorker(zap.NewNop(), pub, route.Destination{ChatID: 1}, conn)
 
 	err := w.Do(context.Background())
 	if err == nil {
@@ -181,7 +181,7 @@ func TestWorker_Do_ReadAndPublisherErrorsAreJoined(t *testing.T) {
 func TestWorker_Do_EmptySmsList(t *testing.T) {
 	pub := &fakePublisher{}
 	conn := &fakeZTE{sms: []zte.Sms{}}
-	w := NewWorker(zap.NewNop(), pub, 1, conn)
+	w := NewWorker(zap.NewNop(), pub, route.Destination{ChatID: 1}, conn)
 
 	err := w.Do(context.Background())
 	if err != nil {

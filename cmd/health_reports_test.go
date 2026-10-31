@@ -30,6 +30,7 @@ import (
 	"github.com/Toshik1978/tgshd/pkg/health/store"
 	"github.com/Toshik1978/tgshd/pkg/host/sysfs"
 	"github.com/Toshik1978/tgshd/pkg/telegram"
+	"github.com/Toshik1978/tgshd/pkg/telegram/route"
 )
 
 const (
@@ -93,6 +94,7 @@ type fakeRunner struct {
 	mu       sync.Mutex
 	open     []runner.OpenCondition
 	pushed   [][3]string // check, text, record
+	routes   []route.Route
 	expired  []notify.QueuedMessage
 	expireAt []time.Time
 }
@@ -101,11 +103,12 @@ func (f *fakeRunner) Snapshot() runner.Snapshot {
 	return runner.Snapshot{Open: slices.Clone(f.open)}
 }
 
-func (f *fakeRunner) Push(_ context.Context, check, text, record string) {
+func (f *fakeRunner) PushRoute(_ context.Context, check, _, text, record string, r route.Route) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 
 	f.pushed = append(f.pushed, [3]string{check, text, record})
+	f.routes = append(f.routes, r)
 }
 
 func (f *fakeRunner) ExpireQueue(now time.Time, maxAge time.Duration) []notify.QueuedMessage {
@@ -395,6 +398,9 @@ func TestHealthReportsWeeklyPushesTheSummary(t *testing.T) {
 	if len(r.pushed) != 1 || r.pushed[0][0] != "summary" || r.pushed[0][2] != "Weekly summary sent" {
 		t.Fatalf("pushed = %q, want the summary with a one-line record", r.pushed)
 	}
+	if want := (route.Route{Topic: route.TopicSystem, Silent: true}); r.routes[0] != want {
+		t.Fatalf("route = %+v, want %+v", r.routes[0], want)
+	}
 	want := "Weekly summary\n" +
 		"Drives:\n" +
 		"nvme0n1 (/) 48°C, self-test passed 2 d ago, wear 4%\n" +
@@ -647,7 +653,7 @@ func TestHealthGraphRegistersReportCommands(t *testing.T) {
 	var got reportHandlers
 	app := fxtest.New(t,
 		fx.NopLogger,
-		fx.Supply(&config{HealthConfig: path, ChatID: 9}),
+		fx.Supply(&config{HealthConfig: path, ChatID: 9}, route.Topics{}),
 		fx.Provide(
 			zap.NewNop,
 			func() command.Publisher { return &fakePublisher{} },

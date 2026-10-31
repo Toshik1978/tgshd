@@ -14,6 +14,7 @@ import (
 
 	"github.com/Toshik1978/tgshd/pkg/health"
 	"github.com/Toshik1978/tgshd/pkg/health/notify"
+	"github.com/Toshik1978/tgshd/pkg/telegram/route"
 )
 
 const (
@@ -223,16 +224,27 @@ func validate(st State, alerts []Alert) error {
 		}
 	}
 	for i := range st.Queue {
-		switch st.Queue[i].Channel {
-		case "tlg", "sms", "email":
-		default:
-			return fmt.Errorf("invalid queue channel %q", st.Queue[i].Channel)
+		if err := validateQueued(&st.Queue[i]); err != nil {
+			return err
 		}
-		switch st.Queue[i].Kind {
-		case "problem", "resolved", "event":
-		default:
-			return fmt.Errorf("invalid queue kind %q", st.Queue[i].Kind)
-		}
+	}
+
+	return nil
+}
+
+func validateQueued(m *notify.QueuedMessage) error {
+	switch m.Channel {
+	case "tlg", "sms", "email":
+	default:
+		return fmt.Errorf("invalid queue channel %q", m.Channel)
+	}
+	switch m.Kind {
+	case "problem", "resolved", "event":
+	default:
+		return fmt.Errorf("invalid queue kind %q", m.Kind)
+	}
+	if m.Route != (route.Route{}) && m.Route.String() == "" {
+		return fmt.Errorf("invalid queue route %+v", m.Route)
 	}
 
 	return nil
@@ -378,10 +390,10 @@ func writeQueue(ctx context.Context, tx *sql.Tx, queue []notify.QueuedMessage) e
 	for i := range queue {
 		m := &queue[i]
 		_, err := tx.ExecContext(ctx,
-			`INSERT INTO queue (id, created_at, channel, text, attempts, kind, check_name, key, plain, since)
-			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			`INSERT INTO queue (id, created_at, channel, text, attempts, kind, check_name, key, plain, since, route)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			m.ID, m.CreatedAt.Unix(), m.Channel, m.Text, m.Attempts, m.Kind, m.Check, m.Key,
-			m.Plain, nullUnix(m.Since))
+			m.Plain, nullUnix(m.Since), m.Route.String())
 		if err != nil {
 			return fmt.Errorf("write queue message %d: %w", m.ID, err)
 		}
@@ -493,7 +505,7 @@ func (s *Store) loadKV(ctx context.Context) (map[string]string, error) {
 
 func (s *Store) loadQueue(ctx context.Context) ([]notify.QueuedMessage, error) {
 	rows, err := s.db.QueryContext(ctx,
-		`SELECT id, created_at, channel, text, attempts, kind, check_name, key, plain, since
+		`SELECT id, created_at, channel, text, attempts, kind, check_name, key, plain, since, route
 		FROM queue ORDER BY id`)
 	if err != nil {
 		return nil, fmt.Errorf("load queue: %w", err)
@@ -505,10 +517,14 @@ func (s *Store) loadQueue(ctx context.Context) ([]notify.QueuedMessage, error) {
 		var m notify.QueuedMessage
 		var created int64
 		var since sql.NullInt64
+		var routeText string
 		err := rows.Scan(&m.ID, &created, &m.Channel, &m.Text, &m.Attempts, &m.Kind, &m.Check, &m.Key,
-			&m.Plain, &since)
+			&m.Plain, &since, &routeText)
 		if err != nil {
 			return nil, fmt.Errorf("scan queue message: %w", err)
+		}
+		if m.Route, err = route.ParseRoute(routeText); err != nil {
+			return nil, fmt.Errorf("queue message %d: %w", m.ID, err)
 		}
 		m.CreatedAt = time.Unix(created, 0).UTC()
 		m.Since = fromNull(since)

@@ -24,6 +24,7 @@ import (
 	"github.com/Toshik1978/tgshd/pkg/host/lockfile"
 	"github.com/Toshik1978/tgshd/pkg/host/sysfs"
 	"github.com/Toshik1978/tgshd/pkg/telegram"
+	"github.com/Toshik1978/tgshd/pkg/telegram/route"
 )
 
 const (
@@ -116,6 +117,7 @@ type healthParams struct {
 	Lifecycle fx.Lifecycle
 	Logger    *zap.Logger
 	Config    *config
+	Topics    route.Topics
 	Setup     *healthSetup
 	Publisher command.Publisher
 	// SMS is provided only when BOT_GAMMU_DSN is set.
@@ -295,7 +297,7 @@ func closeState(st *store.Deferred, inst *lockfile.Instance) error {
 // background jobs and the memory guard. When the configuration could not be
 // parsed it only reports that as a checker error.
 func newHealth(p healthParams) healthOut {
-	d := newDelivery(p.Config, p.Publisher, p.SMS)
+	d := newDelivery(p.Config, p.Topics, p.Publisher, p.SMS)
 	errs := slices.Concat(p.Setup.Errors, d.errors)
 
 	if p.Setup.Config == nil {

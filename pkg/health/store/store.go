@@ -190,7 +190,7 @@ func applyStep(ctx context.Context, db *sql.DB, version int, ddl string) error {
 
 // migrations returns the ordered schema steps; step N brings user_version to N.
 func migrations() []string {
-	return []string{schemaV1, schemaV2, schemaV3}
+	return []string{schemaV1, schemaV2, schemaV3, schemaV4}
 }
 
 const schemaV1 = `
@@ -250,4 +250,11 @@ END;
 const schemaV3 = `
 ALTER TABLE queue ADD COLUMN plain TEXT NOT NULL DEFAULT '';
 ALTER TABLE queue ADD COLUMN since INTEGER;
+`
+
+// schemaV4 keeps a queued message's route as its text form, so a message
+// queued before a restart still lands in its topic. Rows written before it
+// read back with an empty route, which resolves by kind at Flush.
+const schemaV4 = `
+ALTER TABLE queue ADD COLUMN route TEXT NOT NULL DEFAULT '';
 `

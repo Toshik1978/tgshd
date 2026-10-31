@@ -119,7 +119,7 @@ func TestExpiredQueueEntryIsNeverFlushedAndReportedOnce(t *testing.T) {
 	tlg := &fakeSender{}
 	var r *Runner
 	r = New(Options{
-		Store: st, Host: host, Telegram: tlg, Logger: zap.New(core), Now: func() time.Time { return now },
+		Store: st, Host: host, Telegram: asTelegram(tlg), Logger: zap.New(core), Now: func() time.Time { return now },
 		Location: zone(), Uptime: &fakeUptime{up: time.Hour},
 		Daily: func(_ context.Context, at time.Time) error {
 			if dropped := r.ExpireQueue(at, 7*24*time.Hour); len(dropped) != 1 || dropped[0].ID != 1 {

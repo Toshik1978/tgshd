@@ -20,6 +20,7 @@ import (
 	"github.com/Toshik1978/tgshd/pkg/health/runner"
 	"github.com/Toshik1978/tgshd/pkg/sms"
 	"github.com/Toshik1978/tgshd/pkg/sms/gammu"
+	"github.com/Toshik1978/tgshd/pkg/telegram/route"
 )
 
 const (
@@ -59,15 +60,18 @@ type inboxParams struct {
 	Logger    *zap.Logger
 	Publisher sms.Publisher
 	Config    *config
+	Topics    route.Topics
 	Inbox     sms.Inbox
 	// Matcher is the modem probe; nil (or absent without health monitoring)
 	// when no probe runs.
 	Matcher sms.ProbeMatcher `optional:"true"`
 }
 
-// newInboxWorker builds the inbox worker, forwarding to the main chat.
+// newInboxWorker builds the inbox worker, forwarding loud to the SMS topic.
 func newInboxWorker(p inboxParams) *sms.InboxWorker {
-	return sms.NewInboxWorker(p.Logger, p.Publisher, p.Config.ChatID, p.Inbox, p.Matcher, nil)
+	dest := p.Topics.Resolve(p.Config.ChatID, route.Route{Topic: route.TopicSMS})
+
+	return sms.NewInboxWorker(p.Logger, p.Publisher, dest, p.Inbox, p.Matcher, nil)
 }
 
 // newGammuInbox reads the inbox of the gammu database.

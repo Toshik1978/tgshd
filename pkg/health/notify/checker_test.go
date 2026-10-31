@@ -12,6 +12,7 @@ import (
 	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/Toshik1978/tgshd/pkg/health"
+	"github.com/Toshik1978/tgshd/pkg/telegram/route"
 )
 
 type fakeMailer struct {
@@ -34,11 +35,13 @@ func (f *fakeMailer) Send(_ context.Context, subject, body string) error {
 }
 
 type checkerFixture struct {
-	ce   *CheckerErrors
-	tlg  *fakeSender
-	mail *fakeMailer
-	logs *observer.ObservedLogs
-	now  time.Time
+	ce  *CheckerErrors
+	tlg *fakeSender
+	// tlgAd records the route of every Telegram send.
+	tlgAd *telegramAdapter
+	mail  *fakeMailer
+	logs  *observer.ObservedLogs
+	now   time.Time
 }
 
 func newCheckerFixture(t *testing.T, withMail bool) *checkerFixture {
@@ -47,10 +50,11 @@ func newCheckerFixture(t *testing.T, withMail bool) *checkerFixture {
 	cf := &checkerFixture{tlg: &fakeSender{}, mail: &fakeMailer{}, now: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)}
 	core, logs := observer.New(zap.WarnLevel)
 	cf.logs = logs
+	cf.tlgAd = asTelegram(cf.tlg)
 
 	opts := CheckerOptions{
 		Host:     "host1.example.org",
-		Notifier: New(Options{Host: "host1.example.org", Telegram: cf.tlg}),
+		Notifier: New(Options{Host: "host1.example.org", Telegram: cf.tlgAd}),
 		Marks:    health.NewRateMarks(),
 		Logger:   zap.New(core),
 		Now:      func() time.Time { return cf.now },
@@ -225,6 +229,11 @@ func TestRecovered(t *testing.T) {
 
 			cf.ce.Recovered("health/store/write", "state can be saved again")
 
+			if got := cf.tlgAd.sentRoutes(); len(got) != 2 ||
+				got[1] != (route.Route{Topic: route.TopicAlerts, Silent: true}) {
+				t.Fatalf("routes = %v, want the CHECKER OK on alerts/silent", got)
+			}
+
 			const ok = "host1.example.org: CHECKER OK: health: state can be saved again"
 			if len(cf.tlg.sent) != 2 || cf.tlg.sent[1] != ok {
 				t.Fatalf("telegram = %q, want the notice after the error", cf.tlg.sent)
@@ -273,7 +282,7 @@ func newFailingFixture(mailer Mailer) *failingFixture {
 	clock := func() time.Time { return ff.now }
 	core, logs := observer.New(zap.WarnLevel)
 	ff.logs = logs
-	ff.n = New(Options{Host: "host1.example.org", Telegram: ff.tlg, Now: clock})
+	ff.n = New(Options{Host: "host1.example.org", Telegram: asTelegram(ff.tlg), Now: clock})
 	ff.ce = NewCheckerErrors(CheckerOptions{
 		Host: "host1.example.org", Notifier: ff.n, Mailer: mailer, Marks: health.NewRateMarks(),
 		Logger: zap.New(core), Now: clock, Location: time.FixedZone("TST", 2*60*60),

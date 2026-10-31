@@ -63,11 +63,11 @@ type InboxWorker struct {
 	now       func() time.Time
 }
 
-// NewInboxWorker instantiates the inbox worker. The matcher and clock may be nil.
+// NewInboxWorker instantiates the inbox worker, forwarding to dest. The matcher and clock may be nil.
 func NewInboxWorker(
 	logger *zap.Logger,
 	publisher Publisher,
-	chatID int64,
+	dest route.Destination,
 	inbox Inbox,
 	matcher ProbeMatcher,
 	now func() time.Time,
@@ -79,7 +79,7 @@ func NewInboxWorker(
 	return &InboxWorker{
 		logger:    logger,
 		publisher: publisher,
-		dest:      route.Destination{ChatID: chatID},
+		dest:      dest,
 		inbox:     inbox,
 		matcher:   matcher,
 		now:       now,

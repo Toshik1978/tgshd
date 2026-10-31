@@ -93,7 +93,7 @@ func TestSlowDeliveriesEndByTheTickDeadline(t *testing.T) {
 	r := New(Options{
 		Checks: []health.Check{chk}, RunBudget: 100 * time.Millisecond, TickBudget: budget,
 		Heartbeat: hb, Store: &fakeStore{state: stored}, Fixes: []FixSource{src}, Host: host,
-		Telegram: tlg, SMS: sms, Mailer: mailer, Now: func() time.Time { return now },
+		Telegram: asTelegram(tlg), SMS: sms, Mailer: mailer, Now: func() time.Time { return now },
 	})
 
 	elapsed := doWithin(t, r, 5*time.Second)
@@ -160,7 +160,7 @@ func TestSlowCheckerErrorsInAQuietTickEndByTheTickDeadline(t *testing.T) {
 		Maintenance: &fakeMaintenance{held: true},
 		Heartbeat:   &fakeHeartbeat{err: errors.New("disk full")},
 		Uptime:      &fakeUptime{err: errors.New("no proc")},
-		Telegram:    &fakeSender{},
+		Telegram:    asTelegram(&fakeSender{}),
 		Mailer:      mailer,
 		Host:        host,
 		Now:         t0,
@@ -177,7 +177,7 @@ func TestSlowCheckerErrorsInAQuietTickEndByTheTickDeadline(t *testing.T) {
 func TestSendOutsideATickIsBoundedByItsOwnContext(t *testing.T) {
 	release := make(chan struct{})
 	t.Cleanup(func() { close(release) })
-	r := New(Options{Telegram: &hangingSender{release: release}, Host: host, Now: t0})
+	r := New(Options{Telegram: asTelegram(&hangingSender{release: release}), Host: host, Now: t0})
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 
@@ -399,7 +399,7 @@ func TestLateTelegramSuccessIsDeliveredOnceAndLaterMessagesFlow(t *testing.T) {
 	const budget = 200 * time.Millisecond
 	r := New(Options{
 		Checks: []health.Check{chk}, RunBudget: 100 * time.Millisecond, TickBudget: budget,
-		Store: &fakeStore{}, Host: host, Telegram: tlg, Now: func() time.Time { return now },
+		Store: &fakeStore{}, Host: host, Telegram: asTelegram(tlg), Now: func() time.Time { return now },
 	})
 
 	doWithin(t, r, 5*time.Second) // The PROBLEM's send outlives the tick.
@@ -440,7 +440,7 @@ func TestHungTelegramStillLeavesTimeForTheCheckerErrorEmail(t *testing.T) {
 	}}
 	r := New(Options{
 		Checks: []health.Check{chk}, RunBudget: 100 * time.Millisecond, TickBudget: 300 * time.Millisecond,
-		Host: host, Telegram: &hangingSender{release: release}, Mailer: mailer, Now: t0,
+		Host: host, Telegram: asTelegram(&hangingSender{release: release}), Mailer: mailer, Now: t0,
 	})
 
 	doWithin(t, r, 5*time.Second)
@@ -509,7 +509,7 @@ func TestHungCheckStillLeavesTheSendsAWindow(t *testing.T) {
 	const runBudget, tickBudget = 200 * time.Millisecond, 200 * time.Millisecond
 	r := New(Options{
 		Checks: []health.Check{hung, ups, modem}, RunBudget: runBudget, TickBudget: tickBudget,
-		Host: host, Telegram: tlg, SMS: sms, Now: t0,
+		Host: host, Telegram: asTelegram(tlg), SMS: sms, Now: t0,
 	})
 
 	elapsed := doWithin(t, r, 5*time.Second)
@@ -554,7 +554,7 @@ func TestHungCheckAndHungTelegramKeepTheTickBounded(t *testing.T) {
 	const runBudget, tickBudget = 150 * time.Millisecond, 150 * time.Millisecond
 	r := New(Options{
 		Checks: []health.Check{hung, ups}, RunBudget: runBudget, TickBudget: tickBudget, Heartbeat: hb,
-		Host: host, Telegram: &hangingSender{release: release}, Mailer: &fakeMailer{},
+		Host: host, Telegram: asTelegram(&hangingSender{release: release}), Mailer: &fakeMailer{},
 		Now: func() time.Time { return now },
 	})
 
@@ -594,7 +594,7 @@ func TestTelegramFailingEmailAfterTheTicksDeliveries(t *testing.T) {
 	f := newFixture(t, &fakeStore{}, checkOf(chk))
 	mailer := &fakeMailer{}
 	f.r = New(Options{
-		Checks: []health.Check{checkOf(chk)}, Store: f.st, Host: host, Telegram: f.tlg, Mailer: mailer,
+		Checks: []health.Check{checkOf(chk)}, Store: f.st, Host: host, Telegram: asTelegram(f.tlg), Mailer: mailer,
 		TelegramFailingAfter: 2 * time.Minute, Maintenance: f.maint,
 		Now: func() time.Time { return f.now }, Location: zone(),
 	})
@@ -666,7 +666,7 @@ func (f *fakeStore) alertTexts() []string {
 // deadline is followed only by refusals, never by a send on another free
 // lane (the SMS fallback after a Telegram hang).
 func TestSendContextEndsAfterTheSendStop(t *testing.T) {
-	r := New(Options{TickBudget: time.Millisecond, Telegram: &fakeSender{}, Host: host})
+	r := New(Options{TickBudget: time.Millisecond, Telegram: asTelegram(&fakeSender{}), Host: host})
 	for range 500 {
 		start := time.Now()
 		sendCtx, end := r.boundSends(context.Background())

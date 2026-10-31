@@ -99,6 +99,7 @@ func configuration() fx.Option {
 		fx.Provide(
 			newLogger,
 			newConfig,
+			newTopics,
 		),
 		fx.Provide(
 			newTelegramBot,
@@ -237,6 +238,9 @@ type config struct {
 	TelegramToken string   `env:"TELEGRAM_TOKEN"`
 	ChatID        int64    `env:"TELEGRAM_CHAT_ID"`
 	AllowedIDs    []int64  `env:"TELEGRAM_ALLOWED_IDS"    envSeparator:","`
+	TopicAlerts   string   `env:"TELEGRAM_TOPIC_ALERTS"`
+	TopicSMS      string   `env:"TELEGRAM_TOPIC_SMS"`
+	TopicSystem   string   `env:"TELEGRAM_TOPIC_SYSTEM"`
 	UnknownScript string   `env:"TELEGRAM_UNKNOWN_SCRIPT"`
 	PingHosts     []string `env:"BOT_PING_HOSTS"          envSeparator:","`
 	NutIP         string   `env:"BOT_NUT_IP"`
@@ -266,6 +270,28 @@ func newConfig() (*config, error) {
 // newAccessList builds the Telegram allow-list from the configuration.
 func newAccessList(cfg *config) *route.AccessList {
 	return route.NewAccessList(cfg.ChatID, cfg.AllowedIDs)
+}
+
+// newTopics parses the TELEGRAM_TOPIC_* settings once. Bad values never stop
+// the daemon: each is logged as a warning and falls back to no topic.
+func newTopics(cfg *config, logger *zap.Logger) route.Topics {
+	topics, warnings := route.ParseTopics(cfg.TopicAlerts, cfg.TopicSMS, cfg.TopicSystem)
+	for _, w := range warnings {
+		logger.Warn(w)
+	}
+
+	return topics
+}
+
+// newModemSMSWorker builds the modem SMS worker, forwarding loud to the SMS topic.
+//
+//nolint:ireturn // fx provides it into the app.Worker group.
+func newModemSMSWorker(
+	logger *zap.Logger, publisher sms.Publisher, cfg *config, topics route.Topics, conn sms.ZTE,
+) app.Worker {
+	dest := topics.Resolve(cfg.ChatID, route.Route{Topic: route.TopicSMS})
+
+	return sms.NewWorker(logger, publisher, dest, conn)
 }
 
 // newTelegramBot initializes new telegram bot.
@@ -353,9 +379,7 @@ func zteWorkers() fx.Option {
 	return fx.Options(
 		fx.Provide(
 			fx.Annotate(
-				func(logger *zap.Logger, publisher sms.Publisher, conn sms.ZTE, cfg *config) app.Worker {
-					return sms.NewWorker(logger, publisher, cfg.ChatID, conn)
-				},
+				newModemSMSWorker,
 				fx.ResultTags(`group:"worker"`),
 			),
 		),

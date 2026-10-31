@@ -11,6 +11,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/Toshik1978/tgshd/pkg/health"
+	"github.com/Toshik1978/tgshd/pkg/telegram/route"
 )
 
 const (
@@ -181,6 +182,7 @@ func (c *CheckerErrors) Recovered(key, text string) {
 			Key:   key,
 			Text:  recoveredLabel + check + ": " + text,
 			Mode:  ModeTelegram,
+			Route: route.Route{Topic: route.TopicAlerts, Silent: true},
 		})
 	}
 

@@ -38,7 +38,7 @@ const (
 // delivery holds the channels health messages go out on. sms and mailer are
 // nil interfaces when not configured.
 type delivery struct {
-	telegram notify.Sender
+	telegram notify.TelegramSender
 	sms      notify.Sender
 	mailer   notify.Mailer
 	errors   []startError
@@ -47,8 +47,8 @@ type delivery struct {
 // newDelivery builds the Telegram sender (to the main chat), the SMS sender
 // (gammu and BOT_SMS_PHONE both set) and the mailer (BOT_SMTP_ADDR set and
 // valid; an invalid SMTP setup is a start error and email stays off).
-func newDelivery(cfg *config, publisher command.Publisher, gammu command.SmsSender) delivery {
-	d := delivery{telegram: telegramSender{publisher: publisher, dest: route.Destination{ChatID: cfg.ChatID}}}
+func newDelivery(cfg *config, topics route.Topics, publisher command.Publisher, gammu command.SmsSender) delivery {
+	d := delivery{telegram: telegramSender{publisher: publisher, chatID: cfg.ChatID, topics: topics}}
 	if s := newSMSSender(gammu, cfg.SMSPhone); s != nil {
 		d.sms = s
 	}
@@ -88,16 +88,18 @@ func validateSMTP(c mail.Config) error {
 	return nil
 }
 
-// telegramSender sends health messages to the main chat. The publisher's
+// telegramSender sends health messages to the main chat and its topics. The publisher's
 // Telegram client carries its own timeout (telegramTimeout).
 type telegramSender struct {
 	publisher command.Publisher
-	dest      route.Destination
+	chatID    int64
+	topics    route.Topics
 }
 
-// Send implements notify.Sender.
-func (s telegramSender) Send(ctx context.Context, text string) error {
-	if err := s.publisher.Publish(ctx, s.dest, text); err != nil {
+// Send implements notify.TelegramSender: the route resolves to the main chat,
+// its topic's thread and its silence.
+func (s telegramSender) Send(ctx context.Context, r route.Route, text string) error {
+	if err := s.publisher.Publish(ctx, s.topics.Resolve(s.chatID, r), text); err != nil {
 		return fmt.Errorf("send health message to telegram: %w", err)
 	}
 

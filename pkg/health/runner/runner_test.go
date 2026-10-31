@@ -19,6 +19,7 @@ import (
 	"github.com/Toshik1978/tgshd/pkg/health/config"
 	"github.com/Toshik1978/tgshd/pkg/health/notify"
 	"github.com/Toshik1978/tgshd/pkg/health/store"
+	"github.com/Toshik1978/tgshd/pkg/telegram/route"
 )
 
 const host = "host1.example.org"
@@ -248,14 +249,15 @@ func checkOf(c *fakeCheck) health.Check {
 }
 
 type fixture struct {
-	r     *Runner
-	now   time.Time
-	tlg   *fakeSender
-	sms   *fakeSender
-	hb    *fakeHeartbeat
-	maint *fakeMaintenance
-	up    *fakeUptime
-	st    *fakeStore
+	r         *Runner
+	now       time.Time
+	tlg       *fakeSender
+	tgAdapter *telegramAdapter
+	sms       *fakeSender
+	hb        *fakeHeartbeat
+	maint     *fakeMaintenance
+	up        *fakeUptime
+	st        *fakeStore
 }
 
 func newFixture(t *testing.T, st *fakeStore, checks ...health.Check) *fixture {
@@ -270,6 +272,7 @@ func newFixture(t *testing.T, st *fakeStore, checks ...health.Check) *fixture {
 		up:    &fakeUptime{up: time.Hour},
 		st:    st,
 	}
+	f.tgAdapter = asTelegram(f.tlg)
 	f.r = New(Options{
 		Checks:      checks,
 		BootGrace:   10 * time.Minute,
@@ -279,7 +282,7 @@ func newFixture(t *testing.T, st *fakeStore, checks ...health.Check) *fixture {
 		Uptime:      f.up,
 		Store:       st,
 		Host:        host,
-		Telegram:    f.tlg,
+		Telegram:    f.tgAdapter,
 		SMS:         f.sms,
 		Now:         func() time.Time { return f.now },
 		Location:    zone(),
@@ -809,7 +812,7 @@ func TestMessageQueuedDuringLoadSurvives(t *testing.T) {
 		}()
 		<-done
 	}
-	r = New(Options{Store: st, Telegram: tlg, Host: host, Now: t0})
+	r = New(Options{Store: st, Telegram: asTelegram(tlg), Host: host, Now: t0})
 
 	if err := r.Load(context.Background()); err != nil {
 		t.Fatal(err)
@@ -849,7 +852,12 @@ func TestTickDeadlineCoversAllRuns(t *testing.T) {
 			}
 			tlg := &fakeSender{}
 			r := New(Options{
-				Checks: checks, Concurrency: 2, RunBudget: 100 * time.Millisecond, Telegram: tlg, Host: host, Now: t0,
+				Checks:      checks,
+				Concurrency: 2,
+				RunBudget:   100 * time.Millisecond,
+				Telegram:    asTelegram(tlg),
+				Host:        host,
+				Now:         t0,
 			})
 
 			start := time.Now()
@@ -2037,6 +2045,50 @@ func TestPushModeQueuesWhenTelegramFails(t *testing.T) {
 
 	if got := f.tlg.texts(); !slices.Equal(got, []string{host + ": stopped db"}) {
 		t.Fatalf("telegram = %q, want the queued event delivered", got)
+	}
+}
+
+// TestPushRouteKeepsRoute: an event pushed with a route reaches Telegram with
+// exactly that route, and the alert log keeps the record.
+func TestPushRouteKeepsRoute(t *testing.T) {
+	f := newFixture(t, &fakeStore{})
+	want := route.Route{Topic: route.TopicSystem, Silent: true}
+
+	f.r.PushRoute(context.Background(), "summary", "summary", "weekly", "record", want)
+	f.tick(t)
+
+	if got := f.tlg.texts(); !slices.Equal(got, []string{host + ": weekly"}) {
+		t.Fatalf("telegram = %q, want the event", got)
+	}
+	if got := f.tgAdapter.sentRoutes(); len(got) != 1 || got[0] != want {
+		t.Fatalf("routes = %+v, want %+v", got, want)
+	}
+	if a := f.st.alerts; len(a) != 1 || a[0].Kind != store.KindEvent || a[0].Text != "record" {
+		t.Fatalf("alert log = %+v, want one record", a)
+	}
+}
+
+// TestPushRouteQueuesWhenTelegramFails: a failed delivery is queued with its
+// route and retried with it.
+func TestPushRouteQueuesWhenTelegramFails(t *testing.T) {
+	f := newFixture(t, &fakeStore{})
+	f.tlg.setFail(true)
+	want := route.Route{Topic: route.TopicSystem, Silent: true}
+
+	f.r.PushRoute(context.Background(), "summary", "summary", "weekly", "record", want)
+	f.tick(t)
+
+	if q := f.st.state.Queue; len(q) != 1 || q[0].Route != want {
+		t.Fatalf("queue = %+v, want the event queued with its route", q)
+	}
+
+	f.tlg.setFail(false)
+	f.next(t)
+	f.next(t)
+
+	routes := f.tgAdapter.sentRoutes()
+	if len(routes) == 0 || routes[len(routes)-1] != want {
+		t.Fatalf("routes = %+v, want the retry on %+v", routes, want)
 	}
 }
 

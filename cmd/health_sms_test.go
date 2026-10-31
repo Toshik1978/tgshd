@@ -24,6 +24,7 @@ import (
 	"github.com/Toshik1978/tgshd/pkg/health/store"
 	"github.com/Toshik1978/tgshd/pkg/sms"
 	"github.com/Toshik1978/tgshd/pkg/sms/gammu"
+	"github.com/Toshik1978/tgshd/pkg/telegram/route"
 )
 
 const (
@@ -370,6 +371,7 @@ func TestInboxWorkerConsumesProbeReplies(t *testing.T) {
 		fx.Supply(
 			&config{GammuDSN: testGammuDSN, ChatID: 9},
 			&healthSetup{Config: &hcfg.Config{ModemProbe: mp}},
+			route.Topics{},
 			zap.NewNop(), db,
 			fx.Annotate(&fakeSMS{}, fx.As(new(command.SmsSender))),
 			fx.Annotate(pub, fx.As(new(sms.Publisher))),
@@ -568,5 +570,23 @@ func TestBuildModemProbeCheckFeedsTheSummary(t *testing.T) {
 	}
 	if st := set.Probe.Status(); !st.LastOKAt.Equal(ok) || st.Outstanding() {
 		t.Errorf("status = %+v, want the restored round trip", st)
+	}
+}
+
+func TestInboxWorkerForwardsToSMSTopic(t *testing.T) {
+	t.Parallel()
+
+	const chat = int64(-1000000000000)
+	inbox := &fakeInbox{rows: []sms.InboxMessage{{ID: 1, SenderNumber: "+15550001111", TextDecoded: "hello"}}}
+	pub := &fakePublisher{}
+	w := newInboxWorker(inboxParams{
+		Logger: zap.NewNop(), Publisher: pub, Config: &config{ChatID: chat},
+		Topics: route.Topics{Alerts: 2, SMS: 3, System: 4}, Inbox: inbox,
+	})
+	if err := w.Do(t.Context()); err != nil {
+		t.Fatal(err)
+	}
+	if want := (route.Destination{ChatID: chat, ThreadID: 3}); len(pub.to) != 1 || pub.to[0] != want {
+		t.Fatalf("destinations = %+v, want [%+v] (sms topic, loud)", pub.to, want)
 	}
 }

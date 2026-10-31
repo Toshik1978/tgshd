@@ -11,6 +11,8 @@ import (
 	"time"
 	"unicode/utf16"
 	"unicode/utf8"
+
+	"github.com/Toshik1978/tgshd/pkg/telegram/route"
 )
 
 type fakeSender struct {
@@ -50,7 +52,7 @@ func newFixture(t *testing.T, mode Mode, withSMS bool) *fixture {
 	opts := Options{
 		Host:     "host1.example.org",
 		Mode:     mode,
-		Telegram: fx.tlg,
+		Telegram: asTelegram(fx.tlg),
 		OnCheckerError: func(key, _ string) {
 			fx.hooked = append(fx.hooked, key)
 		},
@@ -500,7 +502,7 @@ func TestNilTelegramQueues(t *testing.T) {
 
 func TestHostIsEscapedForTelegram(t *testing.T) {
 	fx := newFixture(t, ModeTelegram, false)
-	fx.n = New(Options{Host: "a<b>", Telegram: fx.tlg})
+	fx.n = New(Options{Host: "a<b>", Telegram: asTelegram(fx.tlg)})
 	_ = fx.n.Notify(context.Background(), Message{Kind: KindEvent, Text: "x"})
 
 	if fx.tlg.sent[0] != "a&lt;b&gt;: x" {
@@ -512,7 +514,9 @@ func TestDroppedAreReported(t *testing.T) {
 	var dropped []QueuedMessage
 
 	tlg := &fakeSender{fail: true}
-	n := New(Options{Host: "h", Telegram: tlg, OnDrop: func(m QueuedMessage) { dropped = append(dropped, m) }})
+	n := New(
+		Options{Host: "h", Telegram: asTelegram(tlg), OnDrop: func(m QueuedMessage) { dropped = append(dropped, m) }},
+	)
 
 	for range MaxQueue + 3 {
 		_ = n.Notify(context.Background(), Message{Kind: KindEvent, Text: "x"})
@@ -700,7 +704,7 @@ type clockFixture struct {
 func newClockFixture(mode Mode) *clockFixture {
 	cf := &clockFixture{tlg: &fakeSender{}, sms: &fakeSender{}, now: time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)}
 	cf.n = New(Options{
-		Host: "host1.example.org", Mode: mode, Telegram: cf.tlg, SMS: cf.sms,
+		Host: "host1.example.org", Mode: mode, Telegram: asTelegram(cf.tlg), SMS: cf.sms,
 		Now: func() time.Time { return cf.now },
 	})
 
@@ -1107,7 +1111,7 @@ func TestSMSFallbackAbandonedSendNotRepeated(t *testing.T) {
 			result := make(chan error, 1)
 			sms.hang["PROBLEM: x"] = result
 			tlg := &fakeSender{fail: true}
-			n := New(Options{Host: "host1.example.org", Telegram: tlg, SMS: sms})
+			n := New(Options{Host: "host1.example.org", Telegram: asTelegram(tlg), SMS: sms})
 
 			msg := Message{Kind: KindProblem, Key: "disks/a", Text: "x"}
 			if err := n.Notify(context.Background(), msg); err != nil {
@@ -1180,7 +1184,7 @@ func TestTelegramOrSMSProblemSMSNotRepeated(t *testing.T) {
 			sms := &abandoningSender{hang: map[string]chan error{}}
 			result := make(chan error, 1)
 			sms.hang["PROBLEM: x"] = result
-			n := New(Options{Host: "host1.example.org", Telegram: &fakeSender{fail: true}, SMS: sms})
+			n := New(Options{Host: "host1.example.org", Telegram: asTelegram(&fakeSender{fail: true}), SMS: sms})
 
 			if err := n.Notify(context.Background(), msg); err != nil {
 				t.Fatal(err)
@@ -1300,7 +1304,7 @@ func TestAbandonedResolvedSMSClaimsNothing(t *testing.T) {
 	sms := &abandoningSender{hang: map[string]chan error{}}
 	result := make(chan error, 1)
 	sms.hang["RESOLVED: x"] = result
-	n := New(Options{Host: "host1.example.org", Telegram: &fakeSender{fail: true}, SMS: sms})
+	n := New(Options{Host: "host1.example.org", Telegram: asTelegram(&fakeSender{fail: true}), SMS: sms})
 
 	msg := resolved("ups/main", "x")
 	msg.Mode = ModeTelegramOrSMS
@@ -1553,4 +1557,151 @@ func TestUndeliveredSinceSuffixInText(t *testing.T) {
 	if len(fx.tlg.sent) != 1 || fx.tlg.sent[0] != want {
 		t.Fatalf("sent = %q, want %q", fx.tlg.sent, want)
 	}
+}
+
+// routedNotifier is a Notifier over a Telegram fake that records routes.
+func routedNotifier(tlg *fakeSender) (*Notifier, *telegramAdapter) {
+	ad := asTelegram(tlg)
+
+	return New(Options{Host: "h", Telegram: ad, Location: time.UTC, Now: func() time.Time {
+		return time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
+	}}), ad
+}
+
+// TestMessageRoute: a message without a route goes by its kind (PROBLEM and
+// event loud, RESOLVED silent, all to alerts); an explicit route is kept.
+func TestMessageRoute(t *testing.T) {
+	alerts := route.Route{Topic: route.TopicAlerts}
+	alertsSilent := route.Route{Topic: route.TopicAlerts, Silent: true}
+	system := route.Route{Topic: route.TopicSystem, Silent: true}
+	tests := []struct {
+		name string
+		msg  Message
+		want route.Route
+	}{
+		{"problem", Message{Kind: KindProblem, Text: "x"}, alerts},
+		{"resolved", Message{Kind: KindResolved, Text: "x"}, alertsSilent},
+		{"event", Message{Kind: KindEvent, Text: "x"}, alerts},
+		{"no kind", Message{Text: "x"}, alerts},
+		{"explicit system", Message{Kind: KindEvent, Text: "x", Route: system}, system},
+		{
+			"explicit sms",
+			Message{Kind: KindProblem, Text: "x", Route: route.Route{Topic: route.TopicSMS}},
+			route.Route{Topic: route.TopicSMS},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			n, ad := routedNotifier(&fakeSender{})
+			_ = n.Notify(context.Background(), tt.msg)
+			if got := ad.sentRoutes(); len(got) != 1 || got[0] != tt.want {
+				t.Fatalf("routes = %v, want [%v]", got, tt.want)
+			}
+		})
+	}
+}
+
+// TestRetryKeepsRoute: a failed send is queued with its resolved route and
+// Flush retries it with that route.
+func TestRetryKeepsRoute(t *testing.T) {
+	system := route.Route{Topic: route.TopicSystem, Silent: true}
+	tests := []struct {
+		name string
+		msg  Message
+		want route.Route
+	}{
+		{
+			"default resolved",
+			Message{Kind: KindResolved, Text: "up"},
+			route.Route{Topic: route.TopicAlerts, Silent: true},
+		},
+		{"explicit", Message{Kind: KindEvent, Text: "x", Route: system}, system},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tlg := &fakeSender{fail: true}
+			n, ad := routedNotifier(tlg)
+			_ = n.Notify(context.Background(), tt.msg)
+
+			if q := n.Export(); len(q) != 1 || q[0].Route != tt.want {
+				t.Fatalf("queue = %+v, want route %v", q, tt.want)
+			}
+
+			tlg.fail = false
+			n.Flush(context.Background())
+			got := ad.sentRoutes()
+			if len(got) != 2 || got[1] != tt.want || len(n.Export()) != 0 {
+				t.Fatalf("routes = %v, want the retry on %v", got, tt.want)
+			}
+		})
+	}
+
+	t.Run("restored without a route", func(t *testing.T) {
+		n, ad := routedNotifier(&fakeSender{})
+		n.Restore([]QueuedMessage{{ID: 1, Channel: ChannelTelegram, Text: "h: up", Kind: string(KindResolved)}})
+		n.Flush(context.Background())
+		if got := ad.sentRoutes(); len(got) != 1 || got[0] != (route.Route{Topic: route.TopicAlerts, Silent: true}) {
+			t.Fatalf("routes = %v, want the kind's default", got)
+		}
+	})
+}
+
+// TestUndeliveredPrefixByRoute: only an alerts message carries the
+// undelivered prefix, and a message that carries it rings.
+func TestUndeliveredPrefixByRoute(t *testing.T) {
+	const prefix = "Undelivered earlier:"
+	tests := []struct {
+		name       string
+		msg        Message
+		wantPrefix bool
+		want       route.Route
+	}{
+		{"silent alerts rings", Message{Kind: KindResolved, Text: "up"}, true, route.Route{Topic: route.TopicAlerts}},
+		{"loud alerts", Message{Kind: KindProblem, Text: "down"}, true, route.Route{Topic: route.TopicAlerts}},
+		{
+			"system skips",
+			Message{Kind: KindEvent, Text: "x", Route: route.Route{Topic: route.TopicSystem, Silent: true}},
+			false,
+			route.Route{Topic: route.TopicSystem, Silent: true},
+		},
+		{
+			"sms topic skips",
+			Message{Kind: KindEvent, Text: "x", Route: route.Route{Topic: route.TopicSMS}},
+			false,
+			route.Route{Topic: route.TopicSMS},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tlg := &fakeSender{}
+			n, ad := routedNotifier(tlg)
+			n.ListUndelivered(QueuedMessage{Kind: string(KindProblem), Key: "k", Plain: "lost"})
+
+			_ = n.Notify(context.Background(), tt.msg)
+
+			if len(tlg.sent) != 1 || strings.HasPrefix(tlg.sent[0], prefix) != tt.wantPrefix {
+				t.Fatalf("sent = %q, want prefix = %v", tlg.sent, tt.wantPrefix)
+			}
+			if got := ad.sentRoutes(); len(got) != 1 || got[0] != tt.want {
+				t.Fatalf("routes = %v, want [%v]", got, tt.want)
+			}
+		})
+	}
+
+	t.Run("skipped prefix stays listed", func(t *testing.T) {
+		tlg := &fakeSender{}
+		n, _ := routedNotifier(tlg)
+		n.ListUndelivered(QueuedMessage{Kind: string(KindProblem), Key: "k", Plain: "lost"})
+		_ = n.Notify(
+			context.Background(),
+			Message{Kind: KindEvent, Text: "x", Route: route.Route{Topic: route.TopicSystem, Silent: true}},
+		)
+		_ = n.Notify(context.Background(), Message{Kind: KindEvent, Text: "y"})
+		if !strings.HasPrefix(tlg.sent[1], prefix) {
+			t.Fatalf("sent = %q, want the prefix on the next alerts message", tlg.sent)
+		}
+	})
 }

@@ -73,7 +73,9 @@ func abandonFixture(hang ...string) (*Notifier, *abandoningSender, map[string]ch
 		ch := make(chan error, 1)
 		results[h], s.hang[h] = ch, ch
 	}
-	n := New(Options{Telegram: s, Now: func() time.Time { return time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC) }})
+	n := New(
+		Options{Telegram: asTelegram(s), Now: func() time.Time { return time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC) }},
+	)
 
 	return n, s, results
 }
@@ -145,7 +147,7 @@ func TestAbandonedTelegramOrSMSFallsBackAndTracksTheQueuedCopy(t *testing.T) {
 	results := make(chan error, 1)
 	tlg := &abandoningSender{hang: map[string]chan error{"RESOLVED: up": results}}
 	sms := &fakeSender{fail: true}
-	n := New(Options{Host: "host1.example.org", Telegram: tlg, SMS: sms})
+	n := New(Options{Host: "host1.example.org", Telegram: asTelegram(tlg), SMS: sms})
 
 	_ = n.Notify(context.Background(), Message{Kind: KindResolved, Check: CheckNetwork, Text: "up"})
 
@@ -316,7 +318,7 @@ func TestUndeliveredAbandonedSend(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := context.Background()
 			tlg := &hangingSender{hang: "h: hang", result: make(chan error, 1)}
-			n := New(Options{Host: "h", Telegram: tlg, Location: time.UTC, Now: func() time.Time {
+			n := New(Options{Host: "h", Telegram: asTelegram(tlg), Location: time.UTC, Now: func() time.Time {
 				return time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 			}})
 			n.ListUndelivered(QueuedMessage{Kind: string(KindProblem), Key: "k", Plain: "lost"})

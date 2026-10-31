@@ -18,6 +18,7 @@ import (
 	"github.com/Toshik1978/tgshd/pkg/health"
 	"github.com/Toshik1978/tgshd/pkg/health/notify"
 	"github.com/Toshik1978/tgshd/pkg/health/store"
+	"github.com/Toshik1978/tgshd/pkg/telegram/route"
 )
 
 const (
@@ -116,7 +117,7 @@ type Options struct {
 	Host string
 	// Mode is the notifier's default delivery mode.
 	Mode     notify.Mode
-	Telegram notify.Sender
+	Telegram notify.TelegramSender
 	// SMS and Mailer may be nil.
 	SMS    notify.Sender
 	Mailer notify.Mailer
@@ -524,16 +525,17 @@ func (r *Runner) Push(ctx context.Context, check, text, record string) {
 // PushMode is Push for an event with its own key, distinct from the check's,
 // and a delivery mode (health.ModeDefault uses the notifier's default).
 func (r *Runner) PushMode(ctx context.Context, check, key, text, record string, mode health.Mode) {
-	// Notify queues a failed delivery and retries it; its error is always nil.
-	_ = r.notifier.Notify(ctx, notify.Message{
+	r.pushMessage(ctx, notify.Message{
 		Kind: notify.KindEvent, Check: check, Key: key, Text: text, Mode: notify.Mode(mode),
-	})
+	}, record)
+}
 
-	r.mu.Lock()
-	r.logged = append(r.logged, store.Alert{
-		At: r.opts.Now(), Kind: store.KindEvent, Check: check, Key: key, Text: record,
-	})
-	r.mu.Unlock()
+// PushRoute is Push for an event with its own key, delivered to Telegram on
+// route rt; a delivery that fails is queued and retried with the same route.
+func (r *Runner) PushRoute(ctx context.Context, check, key, text, record string, rt route.Route) {
+	r.pushMessage(ctx, notify.Message{
+		Kind: notify.KindEvent, Check: check, Key: key, Text: text, Route: rt,
+	}, record)
 }
 
 // ExpireQueue drops the queued messages created more than maxAge before now;
@@ -541,6 +543,19 @@ func (r *Runner) PushMode(ctx context.Context, check, key, text, record string, 
 // queue without them.
 func (r *Runner) ExpireQueue(now time.Time, maxAge time.Duration) []notify.QueuedMessage {
 	return r.notifier.Expire(now, maxAge)
+}
+
+// pushMessage notifies msg and logs it as an event with the record text.
+func (r *Runner) pushMessage(ctx context.Context, msg notify.Message, record string) {
+	// Notify queues a failed delivery and retries it; its error is always nil.
+	_ = r.notifier.Notify(ctx, msg)
+	check, key := msg.Check, msg.Key
+
+	r.mu.Lock()
+	r.logged = append(r.logged, store.Alert{
+		At: r.opts.Now(), Kind: store.KindEvent, Check: check, Key: key, Text: record,
+	})
+	r.mu.Unlock()
 }
 
 // tick is Do once no Checkpoint runs.

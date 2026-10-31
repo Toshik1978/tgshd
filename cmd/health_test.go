@@ -402,16 +402,16 @@ func TestTelegramSender(t *testing.T) {
 	t.Parallel()
 
 	pub := &fakePublisher{}
-	s := telegramSender{publisher: pub, dest: route.Destination{ChatID: 42}}
-	if err := s.Send(t.Context(), "hello"); err != nil {
+	s := telegramSender{publisher: pub, chatID: 42, topics: route.Topics{Alerts: 2}}
+	if err := s.Send(t.Context(), route.Route{Topic: route.TopicAlerts, Silent: true}, "hello"); err != nil {
 		t.Fatalf("Send() = %v", err)
 	}
-	if pub.to[0] != (route.Destination{ChatID: 42}) || pub.sent[0] != "hello" {
+	if pub.to[0] != (route.Destination{ChatID: 42, ThreadID: 2, Silent: true}) || pub.sent[0] != "hello" {
 		t.Fatalf("published %v to %v", pub.sent, pub.to)
 	}
 
 	pub.err = errors.New("boom")
-	if err := s.Send(t.Context(), "x"); !errors.Is(err, pub.err) {
+	if err := s.Send(t.Context(), route.Route{}, "x"); !errors.Is(err, pub.err) {
 		t.Fatalf("Send() = %v, want wrapped boom", err)
 	}
 }
@@ -465,26 +465,66 @@ func TestNewDelivery(t *testing.T) {
 	t.Parallel()
 
 	cfg := &config{ChatID: 7, SMSPhone: "+10000000000"}
-	d := newDelivery(cfg, &fakePublisher{}, nil)
+	d := newDelivery(cfg, route.Topics{}, &fakePublisher{}, nil)
 	if d.telegram == nil || d.sms != nil || d.mailer != nil || len(d.errors) != 0 {
 		t.Fatalf("no gammu, no smtp: %+v", d)
 	}
 
-	d = newDelivery(cfg, &fakePublisher{}, &fakeSMS{})
+	d = newDelivery(cfg, route.Topics{}, &fakePublisher{}, &fakeSMS{})
 	if d.sms == nil {
 		t.Fatal("gammu and phone set: want an SMS sender")
 	}
 
 	cfg.SMTP = mail.Config{Addr: "smtp.example.org:25", From: "tgshd@example.org"}
-	d = newDelivery(cfg, &fakePublisher{}, nil)
+	d = newDelivery(cfg, route.Topics{}, &fakePublisher{}, nil)
 	if d.mailer != nil || len(d.errors) != 1 || d.errors[0].Key != "health/smtp/config" {
 		t.Fatalf("invalid smtp: %+v", d)
 	}
 
 	cfg.SMTP.To = "ops@example.org"
-	d = newDelivery(cfg, &fakePublisher{}, nil)
+	d = newDelivery(cfg, route.Topics{}, &fakePublisher{}, nil)
 	if d.mailer == nil || len(d.errors) != 0 {
 		t.Fatalf("valid smtp: %+v", d)
+	}
+}
+
+func TestTelegramSenderResolvesRoutes(t *testing.T) {
+	t.Parallel()
+
+	const chat = int64(-1000000000000)
+	topics := route.Topics{Alerts: 2, SMS: 3, System: 4}
+	tests := []struct {
+		name string
+		r    route.Route
+		want route.Destination
+	}{
+		{"alerts loud", route.Route{Topic: route.TopicAlerts}, route.Destination{ChatID: chat, ThreadID: 2}},
+		{
+			"alerts silent",
+			route.Route{Topic: route.TopicAlerts, Silent: true},
+			route.Destination{ChatID: chat, ThreadID: 2, Silent: true},
+		},
+		{
+			"system silent",
+			route.Route{Topic: route.TopicSystem, Silent: true},
+			route.Destination{ChatID: chat, ThreadID: 4, Silent: true},
+		},
+		{"sms", route.Route{Topic: route.TopicSMS}, route.Destination{ChatID: chat, ThreadID: 3}},
+		{"none", route.Route{}, route.Destination{ChatID: chat}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			pub := &fakePublisher{}
+			d := newDelivery(&config{ChatID: chat}, topics, pub, nil)
+			if err := d.telegram.Send(t.Context(), tt.r, "text"); err != nil {
+				t.Fatal(err)
+			}
+			if len(pub.to) != 1 || pub.to[0] != tt.want {
+				t.Fatalf("destinations = %+v, want [%+v]", pub.to, tt.want)
+			}
+		})
 	}
 }
 
@@ -1057,6 +1097,13 @@ func (s *recordingSender) Send(_ context.Context, text string) error {
 	s.sent = append(s.sent, text)
 
 	return nil
+}
+
+// telegramRecorder presents a recordingSender as a notify.TelegramSender.
+type telegramRecorder struct{ *recordingSender }
+
+func (t telegramRecorder) Send(ctx context.Context, _ route.Route, text string) error {
+	return t.recordingSender.Send(ctx, text)
 }
 
 func (s *recordingSender) messages() []string {
@@ -1981,7 +2028,7 @@ func guardDaemon(t *testing.T, st *kvStore, f *guardFakes) (*runner.Runner, *fxt
 	g.kv = st
 	r := runner.New(runner.Options{
 		Store: st, Persisters: []runner.Persister{g.persister()}, Concurrency: 1,
-		Telegram: &recordingSender{}, Mode: notify.ModeTelegram, Logger: zap.NewNop(),
+		Telegram: telegramRecorder{&recordingSender{}}, Mode: notify.ModeTelegram, Logger: zap.NewNop(),
 	})
 	lc := fxtest.NewLifecycle(t)
 	registerStart(lc, r.Load, startLoadTimeout, r.CheckerError, nil)
@@ -2854,7 +2901,7 @@ func TestMemoryGuardStatus(t *testing.T) {
 
 	r := runner.New(runner.Options{
 		Persisters: []runner.Persister{g.persister()}, Concurrency: 1,
-		Telegram: &recordingSender{}, Mode: notify.ModeTelegram, Logger: zap.NewNop(),
+		Telegram: telegramRecorder{&recordingSender{}}, Mode: notify.ModeTelegram, Logger: zap.NewNop(),
 	})
 	lc := fxtest.NewLifecycle(t)
 	g.register(lc, r)

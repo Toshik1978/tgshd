@@ -10,6 +10,7 @@ import (
 
 	"github.com/Toshik1978/tgshd/pkg/health"
 	"github.com/Toshik1978/tgshd/pkg/health/notify"
+	"github.com/Toshik1978/tgshd/pkg/telegram/route"
 )
 
 func ts(sec int64) time.Time { return time.Unix(sec, 0).UTC() }
@@ -489,5 +490,68 @@ func TestQueuePlainAndSinceRoundTrip(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got.Queue, want) {
 		t.Errorf("queue = %+v, want %+v", got.Queue, want)
+	}
+}
+
+// TestQueueRouteRoundTrip: the queue keeps an item's route; the zero route
+// stays zero.
+func TestQueueRouteRoundTrip(t *testing.T) {
+	s := openTemp(t)
+	ctx := context.Background()
+	routes := []route.Route{
+		{},
+		{Topic: route.TopicAlerts},
+		{Topic: route.TopicAlerts, Silent: true},
+		{Topic: route.TopicSMS},
+		{Topic: route.TopicSystem, Silent: true},
+	}
+	want := make([]notify.QueuedMessage, 0, len(routes))
+	for i, r := range routes {
+		want = append(want, notify.QueuedMessage{
+			ID: int64(i + 1), CreatedAt: ts(30), Channel: "tlg", Text: "t", Kind: "event", Route: r,
+		})
+	}
+	if err := s.Checkpoint(ctx, State{Queue: want}, nil, nil); err != nil {
+		t.Fatalf("Checkpoint: %v", err)
+	}
+	got, err := s.Load(ctx)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if !reflect.DeepEqual(got.Queue, want) {
+		t.Errorf("queue = %+v, want %+v", got.Queue, want)
+	}
+}
+
+// TestQueueRouteRejectsUnsupported: a non-zero route with no text form is a
+// write error, not silently stored as the default.
+func TestQueueRouteRejectsUnsupported(t *testing.T) {
+	s := openTemp(t)
+	ctx := context.Background()
+	for _, r := range []route.Route{
+		{Topic: route.TopicSMS, Silent: true},
+		{Silent: true},
+		{Topic: route.Topic(99)},
+	} {
+		bad := State{Queue: []notify.QueuedMessage{
+			{ID: 9, CreatedAt: ts(1), Channel: "tlg", Kind: "event", Route: r},
+		}}
+		if err := s.Checkpoint(ctx, bad, nil, nil); err == nil || errors.Is(err, ErrDegraded) {
+			t.Errorf("route %+v = %v, want plain error", r, err)
+		}
+	}
+}
+
+// TestLoadQueueUnknownRoute: an unknown stored route text is a load error.
+func TestLoadQueueUnknownRoute(t *testing.T) {
+	s := openTemp(t)
+	ctx := context.Background()
+	_, err := s.db.ExecContext(ctx,
+		`INSERT INTO queue (id, created_at, channel, text, kind, route) VALUES (1, 1, 'tlg', 't', 'event', 'bogus')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err = s.Load(ctx); err == nil {
+		t.Fatal("Load accepted an unknown route")
 	}
 }

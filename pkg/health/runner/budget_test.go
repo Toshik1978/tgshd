@@ -58,7 +58,7 @@ func TestCheckHangingPastTheRunBudget(t *testing.T) {
 	tlg := &fakeSender{}
 	r := New(Options{
 		Checks: []health.Check{bounded, ignoring}, RunBudget: 300 * time.Millisecond,
-		Telegram: tlg, Host: host, Now: t0,
+		Telegram: asTelegram(tlg), Host: host, Now: t0,
 	})
 
 	start := time.Now()

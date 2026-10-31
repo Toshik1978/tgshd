@@ -141,7 +141,7 @@ func jobFixture(st *fakeStore, j *jobs, now time.Time, checks ...health.Check) *
 	f := &fixture{now: now, tlg: &fakeSender{}, up: &fakeUptime{up: time.Hour}, maint: &fakeMaintenance{}, st: st}
 	o := Options{
 		Checks: checks, Concurrency: 2, Maintenance: f.maint, Uptime: f.up, Store: st, Host: host,
-		Telegram: f.tlg, Now: func() time.Time { return f.now }, Location: zone(),
+		Telegram: asTelegram(f.tlg), Now: func() time.Time { return f.now }, Location: zone(),
 	}
 	j.options(&o)
 	f.r = New(o)

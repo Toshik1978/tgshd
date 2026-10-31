@@ -147,7 +147,14 @@ func newInboxEnv(msgs ...InboxMessage) *inboxEnv {
 		match: &fakeMatcher{},
 		now:   time.Date(2026, 1, 2, 12, 0, 0, 0, time.UTC),
 	}
-	e.w = NewInboxWorker(zap.NewNop(), e.pub, 42, e.inbox, e.match, func() time.Time { return e.now })
+	e.w = NewInboxWorker(
+		zap.NewNop(),
+		e.pub,
+		route.Destination{ChatID: 42},
+		e.inbox,
+		e.match,
+		func() time.Time { return e.now },
+	)
 
 	return e
 }
@@ -421,7 +428,14 @@ func TestInboxWorker_ProbeMatchedNotForwarded(t *testing.T) {
 
 func TestInboxWorker_NilMatcher(t *testing.T) {
 	e := newInboxEnv(InboxMessage{ID: 1, SenderNumber: testNumber, TextDecoded: "x", ReceivingDateTime: received()})
-	e.w = NewInboxWorker(zap.NewNop(), e.pub, 42, e.inbox, nil, func() time.Time { return e.now })
+	e.w = NewInboxWorker(
+		zap.NewNop(),
+		e.pub,
+		route.Destination{ChatID: 42},
+		e.inbox,
+		nil,
+		func() time.Time { return e.now },
+	)
 	if err := e.w.Do(context.Background()); err != nil {
 		t.Fatal(err)
 	}

@@ -303,7 +303,7 @@ func mailFixture(t *testing.T, st *fakeStore, mailer *fakeMailer, checks ...heal
 
 	f := newFixture(t, st, checks...)
 	f.r = New(Options{
-		Checks: checks, Store: st, Host: host, Telegram: f.tlg, SMS: f.sms, Mailer: mailer,
+		Checks: checks, Store: st, Host: host, Telegram: asTelegram(f.tlg), SMS: f.sms, Mailer: mailer,
 		TelegramFailingAfter: 2 * time.Minute, Maintenance: f.maint,
 		Now: func() time.Time { return f.now }, Location: zone(),
 	})

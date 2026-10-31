@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/Toshik1978/tgshd/pkg/health/notify"
+	"github.com/Toshik1978/tgshd/pkg/telegram/route"
 )
 
 // mailShareDiv reserves 1/mailShareDiv of the tick budget, at its end, for
@@ -256,6 +257,17 @@ func (s boundedSender) Send(ctx context.Context, text string) error {
 	return s.lane.run(ctx, func(ctx context.Context) error { return s.next.Send(ctx, text) })
 }
 
+// boundedTelegram is a notify.TelegramSender whose sends go through its lane.
+type boundedTelegram struct {
+	next notify.TelegramSender
+	lane *lane
+}
+
+// Send implements notify.TelegramSender.
+func (s boundedTelegram) Send(ctx context.Context, r route.Route, text string) error {
+	return s.lane.run(ctx, func(ctx context.Context) error { return s.next.Send(ctx, r, text) })
+}
+
 // boundedMailer is a notify.Mailer whose sends go through its lane.
 type boundedMailer struct {
 	next notify.Mailer
@@ -271,7 +283,7 @@ func (m boundedMailer) Send(ctx context.Context, subject, body string) error {
 // on, each in its own lane; an absent (nil) channel stays nil.
 func (d *deliveries) bind(o *Options) {
 	if o.Telegram != nil {
-		o.Telegram = boundedSender{next: o.Telegram, lane: &lane{d: d}}
+		o.Telegram = boundedTelegram{next: o.Telegram, lane: &lane{d: d}}
 	}
 	if o.SMS != nil {
 		o.SMS = boundedSender{next: o.SMS, lane: &lane{d: d}}

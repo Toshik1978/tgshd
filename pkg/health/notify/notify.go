@@ -13,6 +13,8 @@ import (
 	"sync"
 	"time"
 	"unicode/utf16"
+
+	"github.com/Toshik1978/tgshd/pkg/telegram/route"
 )
 
 // Mode selects the delivery channel of a message.
@@ -69,6 +71,32 @@ type Sender interface {
 	Send(ctx context.Context, text string) error
 }
 
+// TelegramSender sends one HTML text to Telegram, to the place the route
+// asks for; the chat and the topic ids are bound by the implementation.
+type TelegramSender interface {
+	Send(ctx context.Context, r route.Route, text string) error
+}
+
+// defaultRoute is the route of a message that asks for none: its kind
+// decides. A PROBLEM and an event ring in the alerts topic, a RESOLVED goes
+// there silently.
+func defaultRoute(kind string) route.Route {
+	if kind == string(KindResolved) {
+		return route.Route{Topic: route.TopicAlerts, Silent: true}
+	}
+
+	return route.Route{Topic: route.TopicAlerts}
+}
+
+// resolveRoute returns r, or the default for kind when r is the zero route.
+func resolveRoute(kind string, r route.Route) route.Route {
+	if r == (route.Route{}) {
+		return defaultRoute(kind)
+	}
+
+	return r
+}
+
 // Message is an alert to push, as mapped from an alert-engine event.
 type Message struct {
 	Kind  Kind
@@ -79,6 +107,9 @@ type Message struct {
 	Since time.Time
 	// Mode overrides the default delivery mode when not empty.
 	Mode Mode
+	// Route is where a Telegram delivery goes; the zero route resolves by
+	// Kind (see defaultRoute).
+	Route route.Route
 }
 
 // QueuedMessage is a message awaiting delivery (data-model "QueuedMessage").
@@ -98,6 +129,10 @@ type QueuedMessage struct {
 	// for messages restored from a store older than migration 3).
 	Plain string
 	Since time.Time
+	// Route is the Telegram route the message was queued with, resolved at
+	// enqueue; the zero route (a message restored without one) resolves by
+	// Kind when sent.
+	Route route.Route
 }
 
 // Options configures a Notifier.
@@ -106,7 +141,7 @@ type Options struct {
 	Host string
 	// Mode is the default delivery mode; empty means tlg.
 	Mode     Mode
-	Telegram Sender
+	Telegram TelegramSender
 	// SMS may be nil when no SMS backend is configured.
 	SMS Sender
 	// OnCheckerError is called once when mode sms degrades to tlg.
@@ -232,6 +267,7 @@ func (n *Notifier) ForgetEnded(ended func(key string) bool) {
 // Notify delivers a message. Failed deliveries are queued, so the returned
 // error is reserved for future use and is currently always nil.
 func (n *Notifier) Notify(ctx context.Context, msg Message) error {
+	msg.Route = resolveRoute(string(queuedKind(msg.Kind)), msg.Route)
 	mode := n.resolveMode(msg)
 	plain, rich := n.render(msg)
 
@@ -303,7 +339,7 @@ func (n *Notifier) Flush(ctx context.Context) {
 			continue
 		}
 
-		err := n.send(ctx, item.Channel, item.Text)
+		err := n.send(ctx, item.Channel, resolveRoute(item.Kind, item.Route), item.Text)
 		if item.Channel == ChannelTelegram {
 			n.telegramSent(ctx, err)
 		}
@@ -433,12 +469,12 @@ func (n *Notifier) telegramSentLocked(err error) {
 	}
 }
 
-func (n *Notifier) send(ctx context.Context, channel, text string) error {
+func (n *Notifier) send(ctx context.Context, channel string, r route.Route, text string) error {
 	var err error
 	if channel == ChannelSMS {
 		err = n.opts.SMS.Send(ctx, text)
 	} else {
-		err = n.sendTelegramText(ctx, text)
+		err = n.sendTelegramText(ctx, r, text)
 	}
 
 	if err != nil {
@@ -449,13 +485,26 @@ func (n *Notifier) send(ctx context.Context, channel, text string) error {
 }
 
 // sendTelegramText sends one Telegram message with the undelivered prefix
-// ahead of it, as much as fits the message limit; a successful send
+// ahead of it (alerts topic only), as much as fits the message limit; a successful send
 // acknowledges what the prefix showed. An abandoned send holds the prefix
 // until its result: the returned AbandonedError carries that result on to
 // the caller once the prefix is settled. The caller wraps the error.
-func (n *Notifier) sendTelegramText(ctx context.Context, text string) error {
-	prefix, shown, held := n.takePrefix(MaxMessageUnits - utf16Len(text))
-	err := n.opts.Telegram.Send(ctx, prefix+text)
+func (n *Notifier) sendTelegramText(ctx context.Context, r route.Route, text string) error {
+	var (
+		prefix string
+		shown  Shown
+		held   bool
+	)
+	// Only the alerts topic carries the prefix, and a message that carries it
+	// rings, whatever its route asked for.
+	if r.Topic == route.TopicAlerts {
+		prefix, shown, held = n.takePrefix(MaxMessageUnits - utf16Len(text))
+		if held {
+			r.Silent = false
+		}
+	}
+
+	err := n.opts.Telegram.Send(ctx, r, prefix+text)
 	if !held {
 		return err //nolint:wrapcheck // the callers wrap or classify it
 	}
@@ -560,7 +609,7 @@ func (n *Notifier) sendTelegram(ctx context.Context, msg Message, rich string, o
 		return
 	}
 
-	err := n.sendTelegramText(ctx, rich)
+	err := n.sendTelegramText(ctx, msg.Route, rich)
 	n.telegramSent(ctx, err)
 	if err != nil {
 		n.enqueueTracked(msg, ChannelTelegram, rich, err)
@@ -589,7 +638,7 @@ func (n *Notifier) sendTelegramOrSMS(ctx context.Context, msg Message, plain, ri
 
 	var tlgErr error
 	if !offline && n.opts.Telegram != nil {
-		tlgErr = n.sendTelegramText(ctx, rich)
+		tlgErr = n.sendTelegramText(ctx, msg.Route, rich)
 		n.telegramSent(ctx, tlgErr)
 		if tlgErr == nil {
 			return false
@@ -805,6 +854,7 @@ func (n *Notifier) enqueueTracked(msg Message, channel, text string, err error) 
 		Key:       msg.Key,
 		Plain:     msg.Text,
 		Since:     msg.Since,
+		Route:     msg.Route,
 	})
 	n.nextID++
 

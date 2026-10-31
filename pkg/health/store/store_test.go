@@ -9,6 +9,8 @@ import (
 	"slices"
 	"strings"
 	"testing"
+
+	"github.com/Toshik1978/tgshd/pkg/telegram/route"
 )
 
 func names(t *testing.T, db *sql.DB, typ string) map[string]bool {
@@ -95,8 +97,8 @@ func TestOpenCreatesSchema(t *testing.T) {
 			t.Errorf("index %s missing", n)
 		}
 	}
-	if v := pragma(t, s.db, "user_version"); v != "3" {
-		t.Errorf("user_version = %s, want 3", v)
+	if v := pragma(t, s.db, "user_version"); v != "4" {
+		t.Errorf("user_version = %s, want 4", v)
 	}
 	if v := pragma(t, s.db, "journal_mode"); v != "wal" {
 		t.Errorf("journal_mode = %s, want wal", v)
@@ -155,8 +157,8 @@ func TestOpenIsIdempotentAndKeepsData(t *testing.T) {
 	if got := kvValue(t, s.db, "a"); got != "b" {
 		t.Errorf("kv a = %q, want b", got)
 	}
-	if got := pragma(t, s.db, "user_version"); got != "3" {
-		t.Errorf("user_version = %s, want 3", got)
+	if got := pragma(t, s.db, "user_version"); got != "4" {
+		t.Errorf("user_version = %s, want 4", got)
 	}
 }
 
@@ -377,8 +379,8 @@ func TestMigrateV1ToCurrent(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 	defer func() { _ = s.Close() }()
-	if v := pragma(t, s.db, "user_version"); v != "3" {
-		t.Errorf("user_version = %s, want 3", v)
+	if v := pragma(t, s.db, "user_version"); v != "4" {
+		t.Errorf("user_version = %s, want 4", v)
 	}
 	st, err := s.Load(ctx)
 	if err != nil {
@@ -481,8 +483,8 @@ func TestMigrateV2ToV3(t *testing.T) {
 		t.Fatalf("Open: %v", err)
 	}
 	defer func() { _ = s.Close() }()
-	if v := pragma(t, s.db, "user_version"); v != "3" {
-		t.Errorf("user_version = %s, want 3", v)
+	if v := pragma(t, s.db, "user_version"); v != "4" {
+		t.Errorf("user_version = %s, want 4", v)
 	}
 	st, err := s.Load(ctx)
 	if err != nil {
@@ -495,5 +497,44 @@ func TestMigrateV2ToV3(t *testing.T) {
 	if q.ID != 4 || q.Kind != "problem" || q.Key != "disks/a" || q.Text != "h: PROBLEM: hot (since 10:00)" ||
 		q.Plain != "" || !q.Since.IsZero() {
 		t.Errorf("queue row = %+v, want the 002 row with no plain text and no since", q)
+	}
+}
+
+// TestMigrateV3ToV4: migration 4 adds the queue item's route; a row written
+// before it loads with an empty route.
+func TestMigrateV3ToV4(t *testing.T) {
+	dir := t.TempDir()
+	ctx := context.Background()
+	raw, err := sql.Open(driverName, "file:"+filepath.Join(dir, FileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, q := range []string{
+		schemaV1,
+		schemaV2,
+		schemaV3,
+		`INSERT INTO queue (id, created_at, channel, text, kind) VALUES (7, 100, 'tlg', 'h: event', 'event')`,
+		"PRAGMA user_version = 3",
+	} {
+		if _, err = raw.ExecContext(ctx, q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = raw.Close()
+
+	s, err := Open(ctx, dir)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = s.Close() }()
+	if v := pragma(t, s.db, "user_version"); v != "4" {
+		t.Errorf("user_version = %s, want 4", v)
+	}
+	st, err := s.Load(ctx)
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(st.Queue) != 1 || st.Queue[0].ID != 7 || st.Queue[0].Route != (route.Route{}) {
+		t.Errorf("queue = %+v, want the 003 row with an empty route", st.Queue)
 	}
 }

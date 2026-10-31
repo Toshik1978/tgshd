@@ -27,12 +27,12 @@ type ZTE interface {
 	ReadSms(ctx context.Context, del bool) ([]zte.Sms, error)
 }
 
-// NewWorker instantiate new SMS worker.
-func NewWorker(logger *zap.Logger, publisher Publisher, chatID int64, conn ZTE) *worker {
+// NewWorker instantiate new SMS worker, forwarding every message to dest.
+func NewWorker(logger *zap.Logger, publisher Publisher, dest route.Destination, conn ZTE) *worker {
 	return &worker{
 		logger:    logger,
 		publisher: publisher,
-		dest:      route.Destination{ChatID: chatID},
+		dest:      dest,
 		conn:      conn,
 	}
 }
