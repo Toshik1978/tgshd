@@ -213,7 +213,7 @@ func (c *consumer) handleCommand(ctx context.Context, handler Handler, tctx tele
 		}
 	}()
 
-	err := handler.Handle(ctx, origin, tctx.Text())
+	err := handler.Handle(ctx, origin, c.bareCommand(tctx.Text()))
 	if err != nil {
 		logger.
 			With(zap.Error(err)).
@@ -277,4 +277,26 @@ func (c *consumer) permitted(tctx telebot.Context) bool {
 		zap.Int64("chat_id", chatID), zap.Int64("sender_id", senderID))
 
 	return false
+}
+
+// bareCommand rewrites a leading "/name@<this bot>" to "/name", leaving the
+// rest of text (arguments and spacing) untouched. Any other text is returned
+// as is.
+func (c *consumer) bareCommand(text string) string {
+	trimmed := strings.TrimLeft(text, " \t\r\n")
+	var first, rest string
+	if i := strings.IndexAny(trimmed, " \t\r\n"); i >= 0 {
+		first, rest = trimmed[:i], trimmed[i:]
+	} else {
+		first, rest = trimmed, ""
+	}
+	if !strings.Contains(first, "@") {
+		return text
+	}
+	name, ok := route.CommandName(first, c.username())
+	if !ok {
+		return text
+	}
+
+	return text[:len(text)-len(trimmed)] + name + rest
 }

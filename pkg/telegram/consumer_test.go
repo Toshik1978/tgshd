@@ -30,12 +30,16 @@ func (f fakeContext) Message() *telebot.Message { return f.msg }
 func (f fakeContext) Chat() *telebot.Chat       { return f.msg.Chat }
 func (f fakeContext) Text() string              { return f.msg.Text }
 
-type fakeHandler struct{ calls int }
+type fakeHandler struct {
+	calls int
+	got   string
+}
 
 func (h *fakeHandler) Name() string  { return "ping" }
 func (h *fakeHandler) Enabled() bool { return true }
-func (h *fakeHandler) Handle(context.Context, route.Origin, string) error {
+func (h *fakeHandler) Handle(_ context.Context, _ route.Origin, cmd string) error {
 	h.calls++
+	h.got = cmd
 	return nil
 }
 
@@ -165,6 +169,35 @@ func TestHandleCommandsBotName(t *testing.T) {
 			}
 			if h.calls != tt.wantCalls {
 				t.Fatalf("handler calls = %d, want %d", h.calls, tt.wantCalls)
+			}
+		})
+	}
+}
+
+func TestHandleCommandStripsOwnBotName(t *testing.T) {
+	tests := []struct {
+		name string
+		text string
+		want string
+	}{
+		{"own suffix", "/ping@tgshd_test_bot x", "/ping x"},
+		{"own suffix keeps spacing", "/ping@TGSHD_test_bot   x  y", "/ping   x  y"},
+		{"own suffix no args", "/ping@tgshd_test_bot", "/ping"},
+		{"plain", "/ping x", "/ping x"},
+		{"other bot untouched", "/ping@other_bot x", "/ping@other_bot x"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			h := &fakeHandler{}
+			c, _ := newTestConsumer(h)
+			c.bot = &telebot.Bot{Me: &telebot.User{Username: "tgshd_test_bot"}}
+			chat := &telebot.Chat{ID: 100, Type: telebot.ChatChannel}
+			tctx := fakeContext{msg: &telebot.Message{Chat: chat, Sender: &telebot.User{ID: 5}, Text: tt.text}}
+			if err := c.handleCommand(context.Background(), h, tctx); err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if h.got != tt.want {
+				t.Fatalf("handler got %q, want %q", h.got, tt.want)
 			}
 		})
 	}
