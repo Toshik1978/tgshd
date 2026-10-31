@@ -74,7 +74,7 @@ replies become silent.
 
 **Independent Test**: send to a destination whose thread Telegram rejects; the message is resent once without the thread, keeping its sound; other errors are returned unchanged. (Missing and invalid settings are covered by T001 and T008; channel commands by T009.)
 
-- [ ] T013 [US3] Thread fall-back: add `ThreadRejected(err error) bool` (case-insensitive match of `message thread not found`, `TOPIC_CLOSED`, `TOPIC_DELETED` in the error text) and `SendWithFallback(ctx, d Destination, send func(context.Context, Destination) error, warn func(threadID int, err error)) error` ("only when d.ThreadID != 0 and ThreadRejected: retry once with ThreadID 0, Silent unchanged; any other error is returned as is") in pkg/telegram/route/fallback.go, and use it from pkg/telegram/publisher.go with a zap warning carrying the thread id (tests in pkg/telegram/route/fallback_test.go: each rejection text, other errors, no thread, second failure returned) (FR-008, R4)
+- [x] T013 [US3] Thread fall-back: add `ThreadRejected(err error) bool` (case-insensitive match of `message thread not found`, `TOPIC_CLOSED`, `TOPIC_DELETED` in the error text) and `SendWithFallback(ctx, d Destination, send func(context.Context, Destination) error, warn func(threadID int, err error)) error` ("only when d.ThreadID != 0 and ThreadRejected: retry once with ThreadID 0, Silent unchanged; any other error is returned as is") in pkg/telegram/route/fallback.go, and use it from pkg/telegram/publisher.go with a zap warning carrying the thread id (tests in pkg/telegram/route/fallback_test.go: each rejection text, other errors, no thread, second failure returned) (FR-008, R4)
 
 **Checkpoint**: all user stories work independently.
 
