@@ -33,6 +33,7 @@ type customScript interface{ CustomScript() }
 type consumer struct {
 	logger   *zap.Logger
 	bot      *telebot.Bot
+	setter   commandSetter
 	access   *route.AccessList
 	handlers []Handler
 	menu     []route.BotCommand
@@ -59,6 +60,7 @@ func NewConsumer(logger *zap.Logger, bot *telebot.Bot, access *route.AccessList,
 	return &consumer{
 		logger:   logger,
 		bot:      bot,
+		setter:   bot,
 		access:   access,
 		handlers: handlers,
 	}
@@ -190,6 +192,11 @@ func (c *consumer) connectAndPoll(ctx context.Context) {
 	}
 	c.polling = true
 	c.mu.Unlock()
+
+	// Publish the menu once per process. It is not tracked in done: a telebot
+	// call cannot be interrupted, so a hung call must not hold shutdown. The
+	// cancelled run context stops it before its next call.
+	go c.publishMenu(ctx)
 
 	c.bot.Start()
 }

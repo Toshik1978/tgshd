@@ -2,7 +2,12 @@ package telegram
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
@@ -270,3 +275,184 @@ func (disabledHandler) Commands() []route.BotCommand {
 }
 func (disabledHandler) Enabled() bool                                      { return false }
 func (disabledHandler) Handle(context.Context, route.Origin, string) error { return nil }
+
+// blockingSetter reports every DeleteCommands call on entered and, when block
+// is set, holds the call until release is closed.
+type blockingSetter struct {
+	entered chan struct{}
+	release chan struct{}
+	block   bool
+	deletes atomic.Int32
+	events  *eventLog
+}
+
+// eventLog records the order in which the fake Telegram and the setter are hit.
+type eventLog struct {
+	mu     sync.Mutex
+	events []string
+}
+
+func (l *eventLog) add(event string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	l.events = append(l.events, event)
+}
+
+func (l *eventLog) snapshot() []string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	return append([]string(nil), l.events...)
+}
+
+func newBlockingSetter(block bool) *blockingSetter {
+	return &blockingSetter{
+		entered: make(chan struct{}, 8), release: make(chan struct{}), block: block, events: &eventLog{},
+	}
+}
+
+func (s *blockingSetter) SetCommands(...any) error { return nil }
+
+func (s *blockingSetter) DeleteCommands(...any) error {
+	s.deletes.Add(1)
+	s.events.add("publish")
+
+	s.entered <- struct{}{}
+	if s.block {
+		<-s.release
+	}
+
+	return nil
+}
+
+// newOnlineConsumer builds a consumer whose bot talks to a local fake Telegram
+// that answers getMe and returns no updates.
+func newOnlineConsumer(t *testing.T, setter *blockingSetter) *consumer {
+	t.Helper()
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/bottoken/getMe" {
+			// Slow enough that a publish started before getMe answers would
+			// be logged first.
+			time.Sleep(20 * time.Millisecond)
+			setter.events.add("getMe")
+			_, _ = w.Write([]byte(`{"ok":true,"result":{"id":1,"is_bot":true,"username":"tgshd_bot"}}`))
+			return
+		}
+		select {
+		case <-r.Context().Done():
+		case <-time.After(50 * time.Millisecond):
+		}
+		_, _ = w.Write([]byte(`{"ok":true,"result":[]}`))
+	}))
+	t.Cleanup(srv.Close)
+
+	bot, err := telebot.NewBot(telebot.Settings{Token: "token", URL: srv.URL, Offline: true})
+	if err != nil {
+		t.Fatalf("new bot: %v", err)
+	}
+	c, _ := newTestConsumer(&fakeHandler{})
+	c.bot = bot
+	c.setter = setter
+
+	return c
+}
+
+func waitFor(t *testing.T, ch <-chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(5 * time.Second):
+		t.Fatalf("timed out waiting for %s", what)
+	}
+}
+
+func stopConsumer(t *testing.T, c *consumer) {
+	t.Helper()
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := c.Stop(ctx); err != nil {
+		t.Fatalf("stop: %v", err)
+	}
+}
+
+func TestNewConsumerDefaultsSetterToBot(t *testing.T) {
+	bot := &telebot.Bot{}
+	c := NewConsumer(zap.NewNop(), bot, route.NewAccessList(1, nil), nil)
+
+	if got, ok := c.setter.(*telebot.Bot); !ok || got != bot {
+		t.Fatalf("setter = %v, want the bot", c.setter)
+	}
+}
+
+func TestConnectPublishesMenuOnce(t *testing.T) {
+	s := newBlockingSetter(false)
+	c := newOnlineConsumer(t, s)
+
+	if err := c.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitFor(t, s.entered, "menu publish")
+	stopConsumer(t, c)
+
+	if got := s.deletes.Load(); got != 1 {
+		t.Fatalf("publishes = %d, want 1", got)
+	}
+}
+
+func TestConnectPublishesOnlyAfterGetMeAnswers(t *testing.T) {
+	s := newBlockingSetter(false)
+	c := newOnlineConsumer(t, s)
+
+	if err := c.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitFor(t, s.entered, "menu publish")
+	stopConsumer(t, c)
+
+	got := s.events.snapshot()
+	if len(got) != 2 || got[0] != "getMe" || got[1] != "publish" {
+		t.Fatalf("events = %v, want [getMe publish]", got)
+	}
+}
+
+func TestConnectCancelledBeforeConnectDoesNotPublish(t *testing.T) {
+	s := newBlockingSetter(false)
+	c := newOnlineConsumer(t, s)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	c.connectAndPoll(ctx)
+
+	if got := s.deletes.Load(); got != 0 {
+		t.Fatalf("menu was published %d times after cancellation", got)
+	}
+}
+
+func TestStopDoesNotWaitForBlockedPublish(t *testing.T) {
+	s := newBlockingSetter(true)
+	t.Cleanup(func() { close(s.release) })
+	c := newOnlineConsumer(t, s)
+
+	if err := c.Start(context.Background()); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitFor(t, s.entered, "menu publish")
+
+	stopped := make(chan error, 1)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+
+		stopped <- c.Stop(ctx)
+	}()
+	select {
+	case err := <-stopped:
+		if err != nil {
+			t.Fatalf("stop: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Stop is held by the blocked publish")
+	}
+}
