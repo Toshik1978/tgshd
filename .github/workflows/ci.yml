@@ -13,6 +13,9 @@ on:
   schedule:
     - cron: '52 4 * * 1'
 
+permissions:
+  contents: read
+
 jobs:
   lint:
     name: lint
@@ -43,6 +46,10 @@ jobs:
         uses: golangci/golangci-lint-action@v9
         with:
           version: latest
+
+      # Reachability-aware: fails only on advisories in code this module actually calls.
+      - name: Check for known vulnerabilities
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
 
   test:
     name: test
