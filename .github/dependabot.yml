@@ -1,46 +1,31 @@
 version: 2
 updates:
-  # Go modules
-  - package-ecosystem: gomod
+  - package-ecosystem: docker
     directory: "/"
     schedule:
       interval: monthly
-    open-pull-requests-limit: 10
     commit-message:
       prefix: build
       include: scope
-    # modernc.org/sqlite pins the exact modernc.org/libc it was generated
-    # against; a libc ahead of that pin can break the driver. libc moves only
-    # with a sqlite bump.
-    ignore:
-      - dependency-name: "modernc.org/libc"
+    open-pull-requests-limit: 10
     groups:
-      gomod:
+      docker:
         patterns:
           - "*"
         update-types:
           - minor
           - patch
-      # Security updates are a repository setting, not something this file can
-      # switch on; it only shapes their PRs. One advisory often lands on several
-      # packages of one stack at once, and separate PRs each conflict on the
-      # lockfile or fail CI on the others' advisories, so they are grouped into
-      # a single PR that can actually go green.
-      gomod-security:
-        applies-to: security-updates
-        patterns:
-          - "*"
-
+    cooldown:
+      default-days: 7
   # GitHub Actions used by the CI workflow
   - package-ecosystem: github-actions
     directory: "/"
     schedule:
       interval: monthly
-    open-pull-requests-limit: 10
     commit-message:
       prefix: ci
       include: scope
-
+    open-pull-requests-limit: 10
     # The actions listed below are pinned to a moving major tag (`@v2`, `@v7`),
     # not to an exact `x.y.z`. Upstream repoints those tags on each release, so
     # minor and patch updates arrive without a commit here and a PR proposing
@@ -64,18 +49,29 @@ updates:
     # the bad bump described above.
     ignore:
       - dependency-name: "actions/checkout"
-        update-types: ["version-update:semver-minor", "version-update:semver-patch"]
+        update-types:
+          - "version-update:semver-minor"
+          - "version-update:semver-patch"
       - dependency-name: "actions/github-script"
-        update-types: ["version-update:semver-minor", "version-update:semver-patch"]
+        update-types:
+          - "version-update:semver-minor"
+          - "version-update:semver-patch"
       - dependency-name: "actions/setup-go"
-        update-types: ["version-update:semver-minor", "version-update:semver-patch"]
+        update-types:
+          - "version-update:semver-minor"
+          - "version-update:semver-patch"
       - dependency-name: "go-task/setup-task"
-        update-types: ["version-update:semver-minor", "version-update:semver-patch"]
+        update-types:
+          - "version-update:semver-minor"
+          - "version-update:semver-patch"
       - dependency-name: "golangci/golangci-lint-action"
-        update-types: ["version-update:semver-minor", "version-update:semver-patch"]
+        update-types:
+          - "version-update:semver-minor"
+          - "version-update:semver-patch"
       - dependency-name: "marocchino/sticky-pull-request-comment"
-        update-types: ["version-update:semver-minor", "version-update:semver-patch"]
-
+        update-types:
+          - "version-update:semver-minor"
+          - "version-update:semver-patch"
     # Still covers minor/patch: those survive the ignore above only for the
     # exact-pinned action, and it should ride in the same grouped PR.
     groups:
@@ -86,3 +82,51 @@ updates:
           - major
           - minor
           - patch
+    cooldown:
+      default-days: 7
+  # Go modules
+  - package-ecosystem: gomod
+    directory: "/"
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: build
+      include: scope
+    open-pull-requests-limit: 10
+    # modernc.org/sqlite pins the exact modernc.org/libc it was generated
+    # against; a libc ahead of that pin can break the driver. libc moves only
+    # with a sqlite bump.
+    ignore:
+      - dependency-name: "modernc.org/libc"
+    groups:
+      gomod:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+      # Security updates are a repository setting, not something this file can
+      # switch on; it only shapes their PRs. One advisory often lands on several
+      # packages of one stack at once, and separate PRs each conflict on the
+      # lockfile or fail CI on the others' advisories, so they are grouped into
+      # a single PR that can actually go green.
+      gomod-security:
+        patterns:
+          - "*"
+        applies-to: security-updates
+    cooldown:
+      default-days: 7
+  - package-ecosystem: pre-commit
+    directory: "/"
+    schedule:
+      interval: monthly
+    commit-message:
+      prefix: build
+      include: scope
+    open-pull-requests-limit: 10
+    groups:
+      pre-commit:
+        patterns:
+          - "*"
+    cooldown:
+      default-days: 7
