@@ -1,0 +1,24 @@
+# gitleaks configuration: the default rules plus narrow allowlists for known
+# false positives (exact value, scoped to the files that hold it).
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "State-store key names (notify/..., health/...), not secrets"
+condition = "AND"
+paths = [
+  '''^pkg/health/notify/(checker|notify)\.go$''',
+  '''^pkg/health/runner/(maintenance|runner)\.go$''',
+]
+regexTarget = "secret"
+regexes = ['''^(notify|health)/[a-z]+/[a-z]+$''']
+
+[[allowlists]]
+description = "Fake modem probe token in tests"
+condition = "AND"
+paths = [
+  '''^cmd/health_sms_test\.go$''',
+  '''^pkg/health/check/modemprobe/modemprobe_test\.go$''',
+]
+regexTarget = "secret"
+regexes = ['''^0123456789ab$''']
