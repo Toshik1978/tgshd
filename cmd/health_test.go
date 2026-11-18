@@ -1925,7 +1925,15 @@ func TestGuardActuatorBoundsActionsByActionTimeout(t *testing.T) {
 func noDockerDaemon(t *testing.T) error {
 	t.Helper()
 
-	c, err := dockerclient.New(dockerclient.WithHost("unix://" + filepath.Join(t.TempDir(), "docker.sock")))
+	// Under /tmp, not t.TempDir(): macOS's per-user TMPDIR pushes the path past
+	// the 104-byte sun_path limit, and the dial fails as "too long" rather than
+	// as the connection failure under test.
+	dir, err := os.MkdirTemp("/tmp", "tgshd-") //nolint:usetesting // t.TempDir() is too long a socket path on macOS
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	c, err := dockerclient.New(dockerclient.WithHost("unix://" + filepath.Join(dir, "docker.sock")))
 	if err != nil {
 		t.Fatal(err)
 	}
