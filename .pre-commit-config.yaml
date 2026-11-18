@@ -1,12 +1,18 @@
 # Install with `pre-commit install`. That alone only wires the pre-commit
-# stage, which would leave the pre-push hooks dormant — declaring the hook
-# types here is what makes one command enough.
-#
-# No commit-msg hook: this repository uses plain imperative subjects, not
-# conventional-commit prefixes (see .claude/CLAUDE.md).
-default_install_hook_types: [pre-commit, pre-push]
+# stage, which would leave the commit-msg and pre-push hooks dormant —
+# declaring the hook types here is what makes one command enough.
+default_install_hook_types: [pre-commit, commit-msg, pre-push]
 
 repos:
+- repo: https://github.com/compilerla/conventional-pre-commit
+  rev: v4.5.0
+  hooks:
+    # Conventional Commits (constitution Principle VII). commit-lint.yml
+    # re-checks the same rule, for anyone who never ran `pre-commit install`.
+    - id: conventional-pre-commit
+      stages:
+        - commit-msg
+
 - repo: local
   hooks:
     # Each gate at the cheapest stage that still catches it. Cheap enough for

@@ -107,8 +107,9 @@ project constitution, `.specify/memory/constitution.md`, which wins on any confl
    testify or any other test dependency.
 3. **New third-party dependencies require approval.** State the package, what it
    solves, and why the standard library is insufficient before adding it.
-4. **Commit style.** Plain, capitalized imperative subjects (e.g. `Add gammu SMS
-   builder`). No conventional-commit prefixes. Work is committed directly on
+4. **Commit style.** [Conventional Commits](https://www.conventionalcommits.org/):
+   `type(scope): imperative subject` (e.g. `feat(sms): add gammu SMS builder`),
+   enforced by the commit-msg hook and in CI. Work is committed directly on
    `main` in this repo.
 5. **`CGO_ENABLED=0`.** The Docker image is distroless and static; do not
    introduce a CGO dependency.

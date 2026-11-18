@@ -72,12 +72,14 @@ Rationale: once published, data cannot be reliably withdrawn.
 
 ### VII. Commit and Workflow Discipline
 
-- Commit subjects MUST be plain, capitalized, imperative sentences (e.g. `Add gammu SMS
-  builder`) with no conventional-commit prefixes and no attribution lines.
+- Commit messages MUST follow Conventional Commits (`type(scope): subject`, imperative subject,
+  e.g. `feat(sms): add gammu SMS builder`) and carry no attribution lines. The commit-msg hook
+  and the Commit messages CI workflow enforce it.
 - Work is committed directly on `main`.
 - Pushing to the shared remote happens only on the maintainer's explicit request.
 
-Rationale: a linear, readable history on a single branch suits a single-maintainer project.
+Rationale: a linear, readable history on a single branch suits a single-maintainer project; typed
+subjects make that history scannable and match the maintainer's other repositories.
 
 ## Engineering Constraints
 
@@ -105,10 +107,10 @@ Rationale: a linear, readable history on a single branch suits a single-maintain
 - This constitution supersedes other practice documents. `.claude/CLAUDE.md` is the runtime
   guide for agents and developers and MUST stay consistent with it; on conflict the constitution
   wins and the guide is corrected.
-- Amendments are made with `/speckit-constitution`, committed with a plain imperative subject, and
+- Amendments are made with `/speckit-constitution`, committed as `docs(constitution): …`, and
   versioned semantically: MAJOR for removing or redefining a principle, MINOR for a new principle
   or materially expanded guidance, PATCH for clarifications.
 - Plan Constitution Checks, task reviews and `/speckit-converge` treat MUST statements here as
   binding; a MUST violation is a critical finding.
 
-**Version**: 1.0.0 | **Ratified**: 2026-10-16 | **Last Amended**: 2026-10-16
+**Version**: 2.0.0 | **Ratified**: 2026-10-16 | **Last Amended**: 2026-11-18
