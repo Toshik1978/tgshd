@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"syscall"
 	"testing"
@@ -112,6 +113,9 @@ func TestRunOpenError(t *testing.T) {
 }
 
 func TestRunCancelFIFO(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("closing a FIFO does not interrupt a blocked read off Linux; the reader only runs on Linux")
+	}
 	p := filepath.Join(t.TempDir(), "kmsg")
 	if err := syscall.Mkfifo(p, 0o600); err != nil {
 		t.Skipf("mkfifo: %v", err)
