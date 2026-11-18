@@ -5,7 +5,7 @@
 FROM --platform=$BUILDPLATFORM golang:1.27-alpine3.23 AS builder
 
 # libcap provides setcap, used below to grant the ICMP capability to the binary.
-RUN apk add --no-cache libcap
+RUN apk add --no-cache libcap-setcap=~2.78
 
 WORKDIR /app
 COPY go.mod go.sum ./
@@ -19,15 +19,14 @@ COPY pkg/ ./pkg/
 # for the platform buildx is currently targeting (TARGETOS/TARGETARCH are
 # injected automatically per --platform entry).
 ARG TARGETOS TARGETARCH
-RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
-    go build -ldflags="-w -s" -o /app/bin/tgshd ./cmd
-
 # Grant CAP_NET_RAW as a file capability so the daemon can open raw ICMP sockets
 # (privileged ping) while running as an unprivileged user. This is a plain xattr
 # write on the file, independent of the target arch, and is preserved by the
 # COPY into the runtime stage below. NET_RAW is in Docker's default capability
 # bounding set, so no extra --cap-add is required at runtime.
-RUN setcap cap_net_raw+ep /app/bin/tgshd
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH \
+    go build -ldflags="-w -s" -o /app/bin/tgshd ./cmd \
+ && setcap cap_net_raw+ep /app/bin/tgshd
 
 # Stage 2: Run target.
 # Distroless static already ships ca-certificates (needed for the Telegram and
