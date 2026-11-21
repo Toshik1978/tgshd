@@ -50,6 +50,12 @@ type Reading struct {
 	// it so the PROBLEM states the real start of the streak. The engine uses
 	// it only when it first tracks the condition, and ignores a future time.
 	Since time.Time
+	// Transient marks an Unknown reading that is expected to pass, such as a
+	// probe timeout under timeout_verdict unreadable. With a check threshold
+	// above 0 it is reported as a checker error only once the key has stayed
+	// unreadable for that threshold; a Good or Bad reading of the key ends
+	// the streak. Until then it is only logged.
+	Transient bool
 }
 
 // The plausible physical range of a temperature reading in °C, shared by the

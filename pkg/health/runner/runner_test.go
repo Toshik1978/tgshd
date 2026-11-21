@@ -571,6 +571,95 @@ func TestUnknownReadingsAreCheckerErrors(t *testing.T) {
 	}
 }
 
+// A transient unreadable reading (a probe timeout under timeout_verdict
+// unreadable) of a check with a threshold is only a checker error once it has
+// lasted the threshold; a judged reading ends the streak.
+func TestTransientUnknownWaitsForThreshold(t *testing.T) {
+	timeout := health.CheckResult{Readings: []health.Reading{{
+		Key: "command/port", Verdict: health.Unknown, Transient: true, Text: "command port: probe timed out after 20s",
+	}}}
+	c := newFakeCheck(nil, "command/port", timeout)
+	chk := checkOf(c)
+	chk.Threshold = 2 * time.Minute
+	f := newFixture(t, &fakeStore{}, chk)
+
+	f.tick(t) // streak starts
+	for range 3 {
+		f.next(t) // 1m30s
+	}
+	if got := f.tlg.texts(); len(got) != 0 {
+		t.Fatalf("telegram = %q, want nothing before the threshold", got)
+	}
+
+	f.next(t) // 2m: the threshold has passed
+	want := host + ": CHECKER ERROR: command/port: command port: probe timed out after 20s"
+	if got := f.tlg.texts(); !slices.Equal(got, []string{want}) {
+		t.Fatalf("telegram = %q, want %q", got, want)
+	}
+	if len(f.st.alerts) != 1 || f.st.alerts[0].Key != "command/port/unreadable" {
+		t.Fatalf("alert log = %+v, want one checker error keyed command/port/unreadable", f.st.alerts)
+	}
+
+	// A good reading ends the streak; a new timeout waits again.
+	c.set(health.CheckResult{Readings: []health.Reading{{Key: "command/port", Verdict: health.Good}}})
+	f.next(t)
+	c.set(timeout)
+	for range 4 {
+		f.next(t) // 1m30s of a new streak
+	}
+	if got := f.tlg.texts(); len(got) != 1 {
+		t.Fatalf("telegram = %q, want no new message within the new streak", got)
+	}
+}
+
+// A judged Bad reading also ends an unreadable streak.
+func TestTransientUnknownStreakEndsOnBad(t *testing.T) {
+	timeout := health.CheckResult{Readings: []health.Reading{{
+		Key: "command/port", Verdict: health.Unknown, Transient: true, Text: "timed out",
+	}}}
+	c := newFakeCheck(nil, "command/port", timeout)
+	chk := checkOf(c)
+	chk.Threshold = time.Hour
+	f := newFixture(t, &fakeStore{}, chk)
+
+	f.tick(t)
+	f.now = f.now.Add(50 * time.Minute)
+	c.set(health.CheckResult{Readings: []health.Reading{{Key: "command/port", Verdict: health.Bad, Text: "exit 1"}}})
+	f.tick(t)
+	c.set(timeout)
+	f.now = f.now.Add(20 * time.Minute)
+	f.tick(t)
+	if got := countContaining(f.tlg.texts(), "CHECKER ERROR"); got != 0 {
+		t.Fatalf("telegram = %q, want no checker error: the Bad reading restarted the streak", f.tlg.texts())
+	}
+}
+
+// With threshold 0 a transient unreadable reading is reported at once, and a
+// plain Unknown reading never waits, whatever the threshold.
+func TestUnknownReportedAtOnce(t *testing.T) {
+	cases := map[string]struct {
+		threshold time.Duration
+		transient bool
+	}{
+		"transient, threshold 0": {0, true},
+		"not transient":          {time.Hour, false},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			c := newFakeCheck(nil, "command/port", health.CheckResult{Readings: []health.Reading{{
+				Key: "command/port", Verdict: health.Unknown, Transient: tc.transient, Text: "timed out",
+			}}})
+			chk := checkOf(c)
+			chk.Threshold = tc.threshold
+			f := newFixture(t, &fakeStore{}, chk)
+			f.tick(t)
+			if got := countContaining(f.tlg.texts(), "CHECKER ERROR: command/port: timed out"); got != 1 {
+				t.Fatalf("telegram = %q, want the checker error at once", f.tlg.texts())
+			}
+		})
+	}
+}
+
 func TestDispatchModesEventsAndSamples(t *testing.T) {
 	c := newFakeCheck(nil, "disks", health.CheckResult{
 		Readings: []health.Reading{

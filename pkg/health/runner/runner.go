@@ -192,6 +192,10 @@ type Runner struct {
 	// scheduleRestored tells that stored times were merged; only touched by Do.
 	dailyLast, weeklyLast time.Time
 	scheduleRestored      bool
+	// unreadSince holds, per reading key, when a streak of transient Unknown
+	// readings began (see health.Reading.Transient); only touched by Do. It
+	// is not persisted: a restart starts the streak again.
+	unreadSince map[string]time.Time
 	// running is indexed like opts.Checks: a run is still in flight, possibly
 	// abandoned after its deadline.
 	running []atomic.Bool
@@ -270,6 +274,8 @@ func New(opts Options) *Runner {
 		lastRun: make([]time.Time, len(opts.Checks)),
 		running: make([]atomic.Bool, len(opts.Checks)),
 		ticking: make(chan struct{}, 1),
+
+		unreadSince: make(map[string]time.Time),
 	}
 	for i := range opts.Checks {
 		if opts.Checks[i].Name == notify.CheckNetwork {
@@ -879,12 +885,20 @@ func (r *Runner) apply(c *cycle, chk health.Check, res health.CheckResult) {
 	res.Readings = r.dropRetired(chk.Name, res.Readings)
 	r.failErr(c, chk.Name, res.Err)
 	for _, rd := range res.Readings {
-		if rd.Kind != health.State || rd.Verdict != health.Unknown {
+		if rd.Kind != health.State {
+			continue
+		}
+		if rd.Verdict != health.Unknown {
+			delete(r.unreadSince, rd.Key)
+
 			continue
 		}
 		text := rd.Text
 		if text == "" {
 			text = rd.Key + " could not be read"
+		}
+		if r.holdUnreadable(c.now, chk, rd, text) {
+			continue
 		}
 		c.failCheck(chk.Name, rd.Key+"/unreadable", text)
 	}
@@ -898,6 +912,29 @@ func (r *Runner) apply(c *cycle, chk health.Check, res health.CheckResult) {
 	for _, s := range res.Samples {
 		c.samples = append(c.samples, store.SampleRow{At: c.now, Metric: s.Metric, Value: s.Value})
 	}
+}
+
+// holdUnreadable reports whether a transient Unknown reading is held back
+// because its key has been unreadable for less than the check's threshold. A
+// held reading is only logged. A reading that is not transient, or a check
+// without a threshold, is never held.
+func (r *Runner) holdUnreadable(now time.Time, chk health.Check, rd health.Reading, text string) bool {
+	if !rd.Transient || chk.Threshold <= 0 {
+		return false
+	}
+	since, ok := r.unreadSince[rd.Key]
+	if !ok {
+		since = now
+		r.unreadSince[rd.Key] = now
+	}
+	if now.Sub(since) >= chk.Threshold {
+		return false
+	}
+	r.opts.Logger.Info("unreadable reading held back until the threshold",
+		zap.String("check", chk.Name), zap.String("key", rd.Key), zap.String("text", text),
+		zap.Time("since", since), zap.Duration("threshold", chk.Threshold))
+
+	return true
 }
 
 // failErr raises one checker error per distinct key: each health.CheckError in

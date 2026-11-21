@@ -646,10 +646,13 @@ func TestTimeoutUnreadable(t *testing.T) {
 
 	r.probe = timeoutProbe
 	res := ck.Run(context.Background())
-	if !errors.Is(res.Err, context.DeadlineExceeded) || len(res.Readings) != 1 {
+	// The Unknown reading alone stands for the timeout: the runner reports it
+	// once it has lasted the threshold, so no run error is raised beside it.
+	if res.Err != nil || len(res.Readings) != 1 {
 		t.Fatalf("res = %+v", res)
 	}
-	if got := res.Readings[0]; got.Verdict != health.Unknown || got.Key != "command/port-guard" || got.Text == "" {
+	if got := res.Readings[0]; got.Verdict != health.Unknown || !got.Transient ||
+		got.Key != "command/port-guard" || got.Text == "" {
 		t.Fatalf("reading = %+v", got)
 	}
 	after, _ := ck.Export()

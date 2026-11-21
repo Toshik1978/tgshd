@@ -245,7 +245,14 @@ takes its defaults, and a check whose section is absent does not run.
 Durations use Go syntax (`30s`, `15m`, `6h`) plus `d` for days (`8d`). Checker
 errors (problems of the monitor itself, such as an invalid entry or an
 unreadable sensor) go to Telegram, and are also emailed when `BOT_SMTP_ADDR`
-is set.
+is set, with no threshold. The one exception is a `command` probe that times
+out under `timeout_verdict: unreadable`: with a `threshold` above 0 it is only
+logged until the probe has kept timing out for that threshold, and then raises
+the checker error `command/<name>/unreadable`; a probe that finishes (pass or
+fail) starts the count again. With `threshold: 0` it is reported at once. The
+count is not kept across restarts. Real monitor faults (an invalid entry, a
+placeholder token, a refused auth under `auth_refusal: checker_error`) are
+always reported at once.
 
 **`general`** (daemon-wide):
 
@@ -283,7 +290,7 @@ is set.
 | `containers` | Docker container health | `5m` / `15m` | `exclude` (globs on the container name) |
 | `http` (list) | One endpoint per entry | `10m` / `10m` | `name`, `url`, `timeout` (`15s`, at most `20s`), `status` (`[200, 399]`), `connect_to` or `doh`, `header`, `follow_redirects` (`false`: a redirect is judged by its own status), `auth_refusal` (`down` or `checker_error`: what a 401/403 means), `depends_on`, `container` (also require this container healthy) |
 | `freshness` (list) | Age of a status stamp: a file's mtime or a Unix time in a file or at a URL | `15m` / `0` | `name`, `path` or `url` (exactly one), `content` (`epoch` or `mtime`), `max_age`, `future_tolerance` (`1h`), and for `url`: `timeout` (`15s`, at most `20s`) and `header` |
-| `command` (list) | A probe command you provide, with an optional fix | `5m` / `0` | `name`, `run` (argv, no shell), `timeout` (`20s`, at most `20s`), `expect_output` and `forbid_output` (Go RE2), `timeout_verdict` (`broken` or `unreadable`), `fix`, `report` |
+| `command` (list) | A probe command you provide, with an optional fix | `5m` / `0` | `name`, `run` (argv, no shell), `timeout` (`20s`, at most `20s`), `expect_output` and `forbid_output` (Go RE2), `timeout_verdict` (`broken`, or `unreadable`: a timeout raises a checker error only after it has lasted `threshold`), `fix`, `report` |
 | `modem_probe` | A weekly SMS round trip through the modem (needs `BOT_GAMMU_DSN`) | weekly | `phone_env`, `weekday` (`sunday`), `time` (`11:02`), `reply_within` (`30m`), `max_silence` (`8d`, longer than a week plus `reply_within`) |
 
 A `summary` section (`weekday`, default `monday`; `time`, default `09:00`)

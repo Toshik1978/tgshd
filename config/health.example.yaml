@@ -153,6 +153,11 @@ command:
     interval: 5m
     timeout: 20s                            # at most 20s; the probe and its fix each get it
     timeout_verdict: broken                 # broken (default) | unreadable: what a timed-out probe means
+    # broken: a timeout is a Bad reading (a PROBLEM after threshold), counting
+    # towards the fix. unreadable: a timeout is not judged and takes no fix
+    # strike; it is only logged until the probe has kept timing out for
+    # threshold, then raises the checker error command/<name>/unreadable (at
+    # once with threshold 0). A probe that finishes starts the count again.
     expect_output: "^ok"                    # optional regexp (Go RE2) the output must match
     forbid_output: "(?i)degraded|error"     # optional regexp the output must not match
     threshold: 0

@@ -222,13 +222,13 @@ func (c *Check) record(ctx context.Context, text string) health.CheckResult {
 }
 
 // unreadableTimeout is the result of a timeout under timeout_verdict
-// unreadable: an Unknown reading plus a checker error.
+// unreadable: a transient Unknown reading, which the runner reports as a
+// checker error once it has lasted the check's threshold.
 func (c *Check) unreadableTimeout(timeout, limit time.Duration) health.CheckResult {
 	text := fmt.Sprintf("command %s: %s", c.cfg.Name, timeoutText(timeout, limit))
 
 	return health.CheckResult{
-		Readings: []health.Reading{{Key: c.key(), Verdict: health.Unknown, Text: text}},
-		Err:      fmt.Errorf("%s: %w", text, context.DeadlineExceeded),
+		Readings: []health.Reading{{Key: c.key(), Verdict: health.Unknown, Transient: true, Text: text}},
 	}
 }
 
