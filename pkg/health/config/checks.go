@@ -43,6 +43,10 @@ type HTTP struct {
 
 	FollowRedirects bool        `yaml:"follow_redirects"`
 	AuthRefusal     AuthRefusal `yaml:"auth_refusal"`
+
+	// AuthRedirect is a host or *.host pattern: a redirect to a matching host
+	// is a refused credential. Empty disables it.
+	AuthRedirect string `yaml:"auth_redirect"`
 }
 
 // Freshness is one file-age check.

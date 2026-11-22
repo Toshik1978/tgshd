@@ -1740,3 +1740,164 @@ func TestBodyCancelledMidReadIsNotJudged(t *testing.T) {
 
 	wantUnjudged(t, mustNew(t, e, httpcheck.Options{}).Run(ctx), "canceled")
 }
+
+// authRedirectSetup starts an app server that answers with appHandler and a
+// login server that records its requests; the dialer routes the app and login
+// ports to them.
+func authRedirectSetup(t *testing.T, appHandler http.Handler) (*fakeDialer, *recorder) {
+	t.Helper()
+
+	login := &recorder{}
+	loginSrv := newHTTPServer(t, statusHandler(login, http.StatusOK))
+	appSrv := newHTTPServer(t, appHandler)
+
+	return &fakeDialer{byPort: map[string]string{
+		"8081": appSrv.Listener.Addr().String(),
+		"8082": loginSrv.Listener.Addr().String(),
+	}}, login
+}
+
+func redirectTo(location string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		http.Redirect(w, req, location, http.StatusFound)
+	})
+}
+
+func TestAuthRedirect(t *testing.T) {
+	t.Parallel()
+
+	const (
+		loginURL = "http://login.example.org:8082/sso?token=q-secret"
+		appURL   = "http://" + appHost + ":8081/"
+	)
+
+	tests := []struct {
+		name     string
+		app      http.Handler
+		pattern  string
+		mode     config.AuthRefusal
+		follow   bool
+		status   [2]int
+		wantBad  string // Bad reading text; empty when an auth checker error is expected
+		wantErr  string
+		loginHit int
+	}{
+		{
+			"unfollowed to login under down", redirectTo(loginURL), "login.example.org", config.AuthRefusalDown, false,
+			[2]int{200, 399},
+			"redirected to the login page at login.example.org:8082", "", 0,
+		},
+		{
+			"unfollowed to login under checker_error",
+			redirectTo(loginURL),
+			"*.example.org",
+			config.AuthRefusalCheckerError,
+			false,
+			[2]int{200, 399},
+			"",
+			"endpoint redirected to the login page at login.example.org:8082",
+			0,
+		},
+		{
+			"followed first hop is the login page",
+			redirectTo(loginURL),
+			"login.example.org",
+			config.AuthRefusalDown,
+			true,
+			[2]int{200, 399},
+			"redirected to the login page at login.example.org:8082",
+			"",
+			0,
+		},
+		{
+			"followed second hop is the login page", http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+				if req.URL.Path == "/" {
+					http.Redirect(w, req, "/next", http.StatusFound)
+
+					return
+				}
+
+				http.Redirect(w, req, loginURL, http.StatusFound)
+			}), "login.example.org", config.AuthRefusalCheckerError, true,
+			[2]int{200, 399},
+			"",
+			"endpoint redirected to the login page at login.example.org:8082", 0,
+		},
+		{
+			"other host judged by status", redirectTo(loginURL), "sso.example.org", config.AuthRefusalDown, false,
+			[2]int{200, 299},
+			"status 302, expected 200-299", "", 0,
+		},
+		{
+			"relative location is not refused",
+			redirectTo("/login"),
+			"login.example.org",
+			config.AuthRefusalDown,
+			false,
+			[2]int{200, 299},
+			"status 302, expected 200-299",
+			"",
+			0,
+		},
+		{
+			"no pattern ignores the login host", redirectTo(loginURL), "", config.AuthRefusalDown, false,
+			[2]int{200, 299},
+			"status 302, expected 200-299", "", 0,
+		},
+		{
+			"401 still refused", statusHandler(&recorder{}, http.StatusUnauthorized), "login.example.org",
+			config.AuthRefusalCheckerError, false,
+			[2]int{200, 399},
+			"", "endpoint refused the credentials (401)", 0,
+		},
+		{
+			"redirect without location is not refused",
+			statusHandler(&recorder{}, http.StatusFound),
+			"login.example.org",
+			config.AuthRefusalDown,
+			false,
+			[2]int{200, 299},
+			"status 302, expected 200-299",
+			"",
+			0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			d, login := authRedirectSetup(t, tt.app)
+			e := entry(appURL)
+			e.AuthRedirect = tt.pattern
+			e.AuthRefusal = tt.mode
+			e.FollowRedirects = tt.follow
+			e.Status = tt.status
+			e.ExpectBody = "never-matches" // the auth judgement precedes the body
+
+			res := mustNew(t, e, httpcheck.Options{Dialer: d}).Run(t.Context())
+
+			if tt.wantBad != "" {
+				r := wantVerdict(t, res, health.Bad, tt.wantBad)
+				if strings.Contains(r.Text, "sso") || strings.Contains(r.Text, "q-secret") {
+					t.Fatalf("text %q leaks the path or query", r.Text)
+				}
+			} else {
+				wantUnjudged(t, res, tt.wantErr)
+
+				ces := health.CheckErrors(res.Err)
+				if len(ces) != 1 || ces[0].Key(key) != key+"/auth" {
+					t.Fatalf("check errors = %+v, want one keyed %s/auth", ces, key)
+				}
+
+				if strings.Contains(res.Err.Error(), "sso") || strings.Contains(res.Err.Error(), "q-secret") {
+					t.Fatalf("err %q leaks the path or query", res.Err)
+				}
+			}
+
+			if login.calls() != 0 {
+				t.Fatalf("login server saw %d requests, want none", login.calls())
+			}
+		})
+	}
+}

@@ -839,6 +839,7 @@ http:
     header: {name: X-Key, value_env: KEY, placeholders: [sample-key]}
     expect_body: '"status":\s*"ok"'
     forbid_body: "(?i)maintenance"
+    auth_redirect: "*.login.example.net"
 freshness:
   - name: g
     url: "https://b.example.org/stamp"
@@ -852,7 +853,8 @@ command:
 	h := cfg.HTTP[0]
 	if !h.FollowRedirects || h.AuthRefusal != config.AuthRefusalCheckerError ||
 		h.Headers[0].Placeholders[0] != "sample-key" ||
-		h.ExpectBody != `"status":\s*"ok"` || h.ForbidBody != "(?i)maintenance" {
+		h.ExpectBody != `"status":\s*"ok"` || h.ForbidBody != "(?i)maintenance" ||
+		h.AuthRedirect != "*.login.example.net" {
 		t.Errorf("http = %+v", h)
 	}
 	g := cfg.Freshness[0]
@@ -1018,6 +1020,36 @@ func TestServiceKeyErrors(t *testing.T) {
 		},
 		{"expect_body regexp", "http: [{" + httpOK + ", expect_body: \"(\"}]", "http/a", "expect_body"},
 		{"forbid_body regexp", "http: [{" + httpOK + ", forbid_body: \"a(?=b)\"}]", "http/a", "forbid_body"},
+		{
+			"auth_redirect scheme",
+			"http: [{" + httpOK + ", auth_redirect: \"https://login.example.net\"}]",
+			"http/a",
+			"must be a host or *.host pattern",
+		},
+		{
+			"auth_redirect bare star",
+			"http: [{" + httpOK + ", auth_redirect: \"*\"}]",
+			"http/a",
+			"must be a host or *.host pattern",
+		},
+		{
+			"auth_redirect port",
+			"http: [{" + httpOK + ", auth_redirect: \"login.example.net:8443\"}]",
+			"http/a",
+			"must be a host or *.host pattern",
+		},
+		{
+			"auth_redirect own host",
+			"http: [{" + httpOK + ", auth_redirect: \"A.example.org\"}]",
+			"http/a",
+			"matches the url host itself",
+		},
+		{
+			"auth_redirect covers own host",
+			"http: [{" + httpOK + ", auth_redirect: \"*.example.org\"}]",
+			"http/a",
+			"matches the url host itself",
+		},
 		{
 			"timeout verdict",
 			"command: [{name: c, run: [/bin/true], timeout_verdict: down}]",

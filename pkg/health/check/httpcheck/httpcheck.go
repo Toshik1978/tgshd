@@ -13,6 +13,13 @@
 // 64 KiB must match expect_body and must not match forbid_body. The body is
 // read only when one of them is set and never appears in a reading.
 //
+// A refused credential is told from a down app: a 401 or 403 answer, or a
+// redirect to a host matching auth_redirect (the login page of a gateway in
+// front of the app). A redirect that is not followed is judged from its
+// Location; a followed one stops before the matching hop is requested. The
+// text names the host only, never the path or query. This auth judgement
+// precedes the status and the body.
+//
 // Verdicts: an answer inside the status range (and, when set, with an
 // acceptable body) is Good; a status outside it, a body that fails the
 // patterns or cannot be read, a transport failure (DNS, refused, timeout, TLS,
@@ -59,6 +66,17 @@ const kindAuth = "auth"
 
 // errTooManyRedirects stops a redirect chain longer than maxRedirects.
 var errTooManyRedirects = errors.New("more than 5 redirects")
+
+// errAuthRedirect stops a redirect that heads for the login page
+// (auth_redirect). It is wrapped in an authRedirectError naming the host.
+var errAuthRedirect = errors.New("redirected to the login page")
+
+// authRedirectError carries the host of the login page a redirect pointed at.
+type authRedirectError struct{ host string }
+
+func (e *authRedirectError) Error() string { return errAuthRedirect.Error() + " at " + e.host }
+
+func (e *authRedirectError) Unwrap() error { return errAuthRedirect }
 
 // ErrContainerNotFound is returned by a Containers source when the named
 // container does not exist. The check judges it down.
@@ -116,6 +134,9 @@ type Check struct {
 	// authCheckerError turns a 401 or 403 into a checker error
 	// (auth_refusal: checker_error) instead of a Bad reading.
 	authCheckerError bool
+	// authRedirect is the host pattern of a login page (auth_redirect); empty
+	// when the entry sets none.
+	authRedirect string
 }
 
 // outcome is the judgement of one aspect of the condition.
@@ -178,6 +199,7 @@ func New(entry config.HTTP, opts Options) (*Check, error) {
 		forbid:     forbid,
 
 		authCheckerError: entry.AuthRefusal == config.AuthRefusalCheckerError,
+		authRedirect:     entry.AuthRedirect,
 	}
 	c.client = newClient(d, opts.TLSConfig, c.checkRedirect)
 
@@ -221,6 +243,12 @@ func (c *Check) probe(ctx context.Context, headers http.Header) outcome {
 
 	resp, err := c.client.Do(req)
 	if err != nil {
+		// A refused credential is a definitive answer, not a transport failure:
+		// it must not reach failure (DoH fallback, cancel, DNS).
+		if are, ok := errors.AsType[*authRedirectError](err); ok {
+			return c.refusedLogin(are.host)
+		}
+
 		return failure(ctx, trace, err, within)
 	}
 
@@ -232,11 +260,43 @@ func (c *Check) probe(ctx context.Context, headers http.Header) outcome {
 		}}
 	}
 
+	if host, ok := c.loginHost(resp); ok {
+		return c.refusedLogin(host)
+	}
+
 	if lo, hi := c.status[0], c.status[1]; resp.StatusCode < lo || resp.StatusCode > hi {
 		return outcome{bad: true, text: fmt.Sprintf("status %d, expected %d-%d", resp.StatusCode, lo, hi)}
 	}
 
 	return c.judgeBody(ctx, trace, resp, within)
+}
+
+// loginHost reports the host of an unfollowed 3xx answer whose Location points
+// at the login page. A missing or unparsable Location is not a refused
+// credential; a relative one resolves against the request URL.
+func (c *Check) loginHost(resp *http.Response) (string, bool) {
+	if c.authRedirect == "" || resp.StatusCode < 300 || resp.StatusCode > 399 {
+		return "", false
+	}
+
+	loc, err := resp.Location()
+	if err != nil || !config.MatchHost(c.authRedirect, loc.Host) {
+		return "", false
+	}
+
+	return loc.Host, true
+}
+
+// refusedLogin is the outcome of a redirect to the login page at host (host
+// only, never the path or query): a checker error with auth_refusal:
+// checker_error, otherwise Bad.
+func (c *Check) refusedLogin(host string) outcome {
+	text := "redirected to the login page at " + host
+	if c.authCheckerError {
+		return outcome{err: health.CheckError{Kind: kindAuth, Err: fmt.Errorf("endpoint %s", text)}}
+	}
+
+	return outcome{bad: true, text: text}
 }
 
 // judgeBody judges the body of an answer whose status is acceptable. It reads
@@ -338,12 +398,17 @@ func (c *Check) checkContainer(ctx context.Context) outcome {
 }
 
 // checkRedirect stops at the first response unless redirects are followed.
-// When they are, it follows at most maxRedirects and keeps the secret headers
+// When they are, it refuses the hop to the login page (auth_redirect) before
+// it is requested, follows at most maxRedirects and keeps the secret headers
 // away from any hop whose scheme or host differs from the configured URL
 // (net/http only strips Authorization and cookies, and only across domains).
 func (c *Check) checkRedirect(req *http.Request, via []*http.Request) error {
 	if !c.follow {
 		return http.ErrUseLastResponse
+	}
+
+	if c.authRedirect != "" && config.MatchHost(c.authRedirect, req.URL.Host) {
+		return &authRedirectError{host: req.URL.Host}
 	}
 
 	if len(via) > maxRedirects {

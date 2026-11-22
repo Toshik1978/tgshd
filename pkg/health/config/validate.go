@@ -306,6 +306,7 @@ func validateHTTP(h *HTTP, node *yaml.Node, p *problems) {
 	validateHeaders(p, hasKey(node, "headers"), &h.Header, &h.Headers)
 	validateOutputPattern(p, "expect_body", h.ExpectBody)
 	validateOutputPattern(p, "forbid_body", h.ForbidBody)
+	validateAuthRedirect(p, h)
 
 	if h.DependsOn != "" {
 		kind, name, ok := strings.Cut(h.DependsOn, "/")
@@ -393,6 +394,24 @@ func headerToken(s string) bool {
 	}
 
 	return s != ""
+}
+
+// validateAuthRedirect checks the auth_redirect pattern: it must be a host or
+// *.host pattern that does not match the entry's own url host.
+func validateAuthRedirect(p *problems, h *HTTP) {
+	if h.AuthRedirect == "" {
+		return
+	}
+
+	if !validHostPattern(h.AuthRedirect) {
+		p.addf("auth_redirect %q must be a host or *.host pattern", h.AuthRedirect)
+
+		return
+	}
+
+	if u, err := url.Parse(h.URL); err == nil && MatchHost(h.AuthRedirect, u.Hostname()) {
+		p.addf("auth_redirect %q matches the url host itself", h.AuthRedirect)
+	}
 }
 
 func validateHTTPRouting(h *HTTP, p *problems) {
