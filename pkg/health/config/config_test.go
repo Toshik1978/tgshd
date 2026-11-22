@@ -835,6 +835,8 @@ http:
     follow_redirects: true
     auth_refusal: checker_error
     header: {name: X-Key, value_env: KEY, placeholders: [sample-key]}
+    expect_body: '"status":\s*"ok"'
+    forbid_body: "(?i)maintenance"
 freshness:
   - name: g
     url: "https://b.example.org/stamp"
@@ -847,7 +849,8 @@ command:
 `)
 	h := cfg.HTTP[0]
 	if !h.FollowRedirects || h.AuthRefusal != config.AuthRefusalCheckerError ||
-		h.Header.Placeholders[0] != "sample-key" {
+		h.Header.Placeholders[0] != "sample-key" ||
+		h.ExpectBody != `"status":\s*"ok"` || h.ForbidBody != "(?i)maintenance" {
 		t.Errorf("http = %+v", h)
 	}
 	g := cfg.Freshness[0]
@@ -928,6 +931,8 @@ func TestServiceKeyErrors(t *testing.T) {
 			"command/c",
 			"forbid_output",
 		},
+		{"expect_body regexp", "http: [{" + httpOK + ", expect_body: \"(\"}]", "http/a", "expect_body"},
+		{"forbid_body regexp", "http: [{" + httpOK + ", forbid_body: \"a(?=b)\"}]", "http/a", "forbid_body"},
 		{
 			"timeout verdict",
 			"command: [{name: c, run: [/bin/true], timeout_verdict: down}]",
@@ -942,6 +947,24 @@ func TestServiceKeyErrors(t *testing.T) {
 				t.Errorf("errs = %+v, want one for %s containing %q", errs, tt.entry, tt.reason)
 			}
 		})
+	}
+}
+
+// TestInvalidBodyPatternSparesOtherEntries: a bad expect_body or forbid_body
+// drops only its own entry; the others still load.
+func TestInvalidBodyPatternSparesOtherEntries(t *testing.T) {
+	cfg, errs := config.Parse([]byte(`http:
+  - {name: good, url: "https://a.example.org/", expect_body: ok, forbid_body: bad}
+  - {name: bad-expect, url: "https://b.example.org/", expect_body: "("}
+  - {name: bad-forbid, url: "https://c.example.org/", forbid_body: "("}
+  - {name: other, url: "https://d.example.org/"}
+`), "test.yaml")
+
+	if len(errs) != 2 || errs[0].Entry != "http/bad-expect" || errs[1].Entry != "http/bad-forbid" {
+		t.Fatalf("errs = %+v", errs)
+	}
+	if len(cfg.HTTP) != 2 || cfg.HTTP[0].Name != "good" || cfg.HTTP[1].Name != "other" {
+		t.Errorf("http = %+v", cfg.HTTP)
 	}
 }
 

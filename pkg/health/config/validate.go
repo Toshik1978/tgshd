@@ -304,6 +304,8 @@ func validateHTTP(h *HTTP, p *problems) {
 
 	p.oneOf("auth_refusal", string(h.AuthRefusal), string(AuthRefusalDown), string(AuthRefusalCheckerError))
 	validateHeader(p, h.Header)
+	validateOutputPattern(p, "expect_body", h.ExpectBody)
+	validateOutputPattern(p, "forbid_body", h.ForbidBody)
 
 	if h.DependsOn != "" {
 		kind, name, ok := strings.Cut(h.DependsOn, "/")

@@ -9,10 +9,15 @@
 // Redirects are not followed unless follow_redirects is set: the first
 // response is judged.
 //
-// Verdicts: an answer inside the status range is Good; a status outside it, a
-// transport failure (DNS, refused, timeout, TLS, too many redirects), a DoH
-// answer that the name does not exist or has no address, an unhealthy
-// container or one that does not exist is Bad. A missing or placeholder
+// An answer inside the status range can also be judged by its body: the first
+// 64 KiB must match expect_body and must not match forbid_body. The body is
+// read only when one of them is set and never appears in a reading.
+//
+// Verdicts: an answer inside the status range (and, when set, with an
+// acceptable body) is Good; a status outside it, a body that fails the
+// patterns or cannot be read, a transport failure (DNS, refused, timeout, TLS,
+// too many redirects), a DoH answer that the name does not exist or has no
+// address, an unhealthy container or one that does not exist is Bad. A missing or placeholder
 // secret, any other failed DoH resolution, a failed container lookup or a
 // cancelled run cannot be judged: the condition is omitted and CheckResult.Err
 // says why. With auth_refusal: checker_error a 401 or 403 answer is not judged
@@ -24,11 +29,13 @@ import (
 	"crypto/tls"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"net/netip"
 	"net/url"
 	"os"
+	"regexp"
 	"strings"
 	"syscall"
 	"time"
@@ -41,6 +48,8 @@ const (
 	// maxRedirects is the number of redirects followed before giving up.
 	maxRedirects = 5
 	userAgent    = "tgshd-health"
+	// maxBody is how much of the answer expect_body and forbid_body see.
+	maxBody = 64 << 10
 )
 
 // kindAuth is the checker-error kind of a refused credential
@@ -100,6 +109,9 @@ type Check struct {
 	// follow follows redirects (follow_redirects); otherwise the first
 	// response is judged.
 	follow bool
+	// expect and forbid judge the first maxBody bytes of the answer; nil when
+	// the entry sets no such pattern.
+	expect, forbid *regexp.Regexp
 	// authCheckerError turns a 401 or 403 into a checker error
 	// (auth_refusal: checker_error) instead of a Bad reading.
 	authCheckerError bool
@@ -130,6 +142,11 @@ func New(entry config.HTTP, opts Options) (*Check, error) {
 		return nil, fmt.Errorf("http/%s: %w", entry.Name, err)
 	}
 
+	expect, forbid, patErr := compileBodyPatterns(entry)
+	if patErr != nil {
+		return nil, fmt.Errorf("http/%s: %w", entry.Name, patErr)
+	}
+
 	timeout := entry.Timeout.Duration()
 
 	d := &dialer{base: opts.Dialer, host: u.Hostname(), connectTo: entry.ConnectTo, timeout: timeout}
@@ -156,6 +173,8 @@ func New(entry config.HTTP, opts Options) (*Check, error) {
 		containers: opts.Containers,
 		lookupEnv:  opts.LookupEnv,
 		follow:     entry.FollowRedirects,
+		expect:     expect,
+		forbid:     forbid,
 
 		authCheckerError: entry.AuthRefusal == config.AuthRefusalCheckerError,
 	}
@@ -206,7 +225,7 @@ func (c *Check) probe(ctx context.Context, header string) outcome {
 		return failure(ctx, trace, err, within)
 	}
 
-	_ = resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 
 	if c.authCheckerError && (resp.StatusCode == http.StatusUnauthorized || resp.StatusCode == http.StatusForbidden) {
 		return outcome{err: health.CheckError{
@@ -218,7 +237,53 @@ func (c *Check) probe(ctx context.Context, header string) outcome {
 		return outcome{bad: true, text: fmt.Sprintf("status %d, expected %d-%d", resp.StatusCode, lo, hi)}
 	}
 
-	return outcome{text: fmt.Sprintf("status %d", resp.StatusCode)}
+	return c.judgeBody(ctx, trace, resp, within)
+}
+
+// judgeBody judges the body of an answer whose status is acceptable. It reads
+// nothing unless expect_body or forbid_body is set, and no body text ever
+// reaches the outcome. A read that fails is classified like a failed request
+// (see failure): a run cancelled by the caller is not judged.
+func (c *Check) judgeBody(ctx context.Context, trace *dohTrace, resp *http.Response, within string) outcome {
+	good := outcome{text: fmt.Sprintf("status %d", resp.StatusCode)}
+
+	if c.expect == nil && c.forbid == nil {
+		return good
+	}
+
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBody))
+	if err != nil {
+		return failure(ctx, trace, err, within)
+	}
+
+	if c.expect != nil && !c.expect.Match(body) {
+		return outcome{bad: true, text: good.text + "; body does not match expect_body"}
+	}
+
+	if c.forbid != nil && c.forbid.Match(body) {
+		return outcome{bad: true, text: good.text + "; body matches forbid_body"}
+	}
+
+	return good
+}
+
+// compileBodyPatterns compiles expect_body and forbid_body. The config loader
+// validates them, so a failure here means a hand-built config. The error names
+// the key, never the url.
+func compileBodyPatterns(entry config.HTTP) (expect, forbid *regexp.Regexp, err error) {
+	if entry.ExpectBody != "" {
+		if expect, err = regexp.Compile(entry.ExpectBody); err != nil {
+			return nil, nil, fmt.Errorf("expect_body: %w", err)
+		}
+	}
+
+	if entry.ForbidBody != "" {
+		if forbid, err = regexp.Compile(entry.ForbidBody); err != nil {
+			return nil, nil, fmt.Errorf("forbid_body: %w", err)
+		}
+	}
+
+	return expect, forbid, nil
 }
 
 // failure classifies a failed request: a definitive negative DoH answer

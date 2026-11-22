@@ -33,6 +33,11 @@ type HTTP struct {
 	DependsOn string   `yaml:"depends_on"`
 	Container string   `yaml:"container"`
 
+	// ExpectBody must match / ForbidBody must not match the first 64 KiB of
+	// the body (Go RE2).
+	ExpectBody string `yaml:"expect_body"`
+	ForbidBody string `yaml:"forbid_body"`
+
 	FollowRedirects bool        `yaml:"follow_redirects"`
 	AuthRefusal     AuthRefusal `yaml:"auth_refusal"`
 }

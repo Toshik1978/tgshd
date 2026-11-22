@@ -1396,3 +1396,218 @@ func TestDoHUnreachableUnknown(t *testing.T) {
 		})
 	}
 }
+
+func bodyHandler(status int, body string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(status)
+		_, _ = w.Write([]byte(body))
+	})
+}
+
+func TestBodyJudgement(t *testing.T) {
+	t.Parallel()
+
+	const maxBody = 64 << 10
+
+	tests := []struct {
+		name    string
+		status  int
+		body    string
+		expect  string
+		forbid  string
+		want    health.Verdict
+		wantTxt string
+	}{
+		{"expect matches", 200, `{"status": "ok"}`, `"status":\s*"ok"`, "", health.Good, "status 200"},
+		{
+			"expect misses",
+			200,
+			`{"status": "fail"}`,
+			`"status":\s*"ok"`,
+			"",
+			health.Bad,
+			"status 200; body does not match expect_body",
+		},
+		{
+			"forbid matches",
+			200,
+			"Down for Maintenance",
+			"",
+			"(?i)maintenance",
+			health.Bad,
+			"status 200; body matches forbid_body",
+		},
+		{"forbid absent", 200, "all fine", "", "(?i)maintenance", health.Good, "status 200"},
+		{"both satisfied", 200, "ok here", "ok", "maintenance", health.Good, "status 200"},
+		{
+			"status out of range wins",
+			500,
+			`"status": "ok"`,
+			`"status":\s*"ok"`,
+			"",
+			health.Bad,
+			"status 500, expected 200-399",
+		},
+		{
+			"match only past the limit",
+			200,
+			strings.Repeat("a", maxBody) + "needle",
+			"needle",
+			"",
+			health.Bad,
+			"body does not match expect_body",
+		},
+		{
+			"forbid only past the limit",
+			200,
+			strings.Repeat("a", maxBody) + "needle",
+			"",
+			"needle",
+			health.Good,
+			"status 200",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+
+			srv := newHTTPServer(t, bodyHandler(tt.status, tt.body))
+			e := entry(srv.URL)
+			e.ExpectBody = tt.expect
+			e.ForbidBody = tt.forbid
+
+			r := wantVerdict(t, mustNew(t, e, httpcheck.Options{}).Run(t.Context()), tt.want, tt.wantTxt)
+			if strings.Contains(r.Text, tt.body) && tt.body != "" {
+				t.Fatalf("reading %q repeats the body", r.Text)
+			}
+		})
+	}
+}
+
+func TestBodyNeverInReading(t *testing.T) {
+	t.Parallel()
+
+	body := "password=" + secret
+	srv := newHTTPServer(t, bodyHandler(200, body))
+
+	for _, e := range []config.HTTP{
+		func() config.HTTP { e := entry(srv.URL); e.ExpectBody = "nomatch"; return e }(),
+		func() config.HTTP { e := entry(srv.URL); e.ForbidBody = "password"; return e }(),
+	} {
+		res := mustNew(t, e, httpcheck.Options{}).Run(t.Context())
+		if r := only(t, res); strings.Contains(r.Text, secret) || strings.Contains(r.Text, "password") {
+			t.Fatalf("reading %q leaks the body", r.Text)
+		}
+	}
+}
+
+func TestBodyCutMidRead(t *testing.T) {
+	t.Parallel()
+
+	srv := newHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Length", "1000")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("partial"))
+
+		rc := http.NewResponseController(w)
+		_ = rc.Flush()
+
+		if conn, _, err := rc.Hijack(); err == nil {
+			_ = conn.Close()
+		}
+	}))
+
+	e := entry(srv.URL)
+	e.ExpectBody = "partial"
+
+	wantVerdict(t, mustNew(t, e, httpcheck.Options{}).Run(t.Context()), health.Bad, "request failed")
+}
+
+func TestBodyNotReadWithoutPattern(t *testing.T) {
+	t.Parallel()
+
+	srv := newHTTPServer(t, bodyHandler(200, "anything"))
+
+	wantVerdict(t, mustNew(t, entry(srv.URL), httpcheck.Options{}).Run(t.Context()), health.Good, "status 200")
+}
+
+func TestNewRejectsBadBodyPattern(t *testing.T) {
+	t.Parallel()
+
+	for _, key := range []string{"expect_body", "forbid_body"} {
+		e := entry("https://app.example.org/health?token=" + secret)
+		if key == "expect_body" {
+			e.ExpectBody = "("
+		} else {
+			e.ForbidBody = "("
+		}
+
+		_, err := httpcheck.New(e, httpcheck.Options{})
+		if err == nil || !strings.Contains(err.Error(), key) || strings.Contains(err.Error(), secret) {
+			t.Fatalf("%s: err = %v, want it to name the key and not the url", key, err)
+		}
+	}
+}
+
+// stallingBodyHandler sends part of the body, flushes it and then waits for
+// the request to end (or for release).
+func stallingBodyHandler(started chan<- struct{}, release <-chan struct{}) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		w.Header().Set("Content-Length", "1000")
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("partial"))
+		_ = http.NewResponseController(w).Flush()
+
+		started <- struct{}{}
+
+		select {
+		case <-req.Context().Done():
+		case <-release:
+		}
+	})
+}
+
+func TestBodyTimeoutMidRead(t *testing.T) {
+	t.Parallel()
+
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+
+	srv := newHTTPServer(t, stallingBodyHandler(started, release))
+
+	e := entry(srv.URL)
+	e.Timeout = config.Duration(100 * time.Millisecond)
+	e.ExpectBody = "partial"
+
+	res := mustNew(t, e, httpcheck.Options{}).Run(t.Context())
+	if res.Err != nil {
+		t.Fatalf("err = %v, want none", res.Err)
+	}
+
+	wantVerdict(t, res, health.Bad, "no answer within 100ms")
+}
+
+func TestBodyCancelledMidReadIsNotJudged(t *testing.T) {
+	t.Parallel()
+
+	started := make(chan struct{}, 1)
+	release := make(chan struct{})
+	t.Cleanup(func() { close(release) })
+
+	srv := newHTTPServer(t, stallingBodyHandler(started, release))
+
+	e := entry(srv.URL)
+	e.ExpectBody = "partial"
+
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+
+	go func() {
+		<-started
+		cancel()
+	}()
+
+	wantUnjudged(t, mustNew(t, e, httpcheck.Options{}).Run(ctx), "canceled")
+}
