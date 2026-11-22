@@ -274,7 +274,8 @@ type config struct {
 	SMSPhone      string   `env:"BOT_SMS_PHONE"`
 	SMTP          mail.Config
 
-	// TelegramPoll false selects the send-only consumer.
+	// TelegramPoll is parsed only so a malformed BOT_TELEGRAM_POLL fails the
+	// start; telegramConsumer chooses the consumer from the raw value.
 	TelegramPoll bool `env:"BOT_TELEGRAM_POLL" envDefault:"true"`
 }
 
