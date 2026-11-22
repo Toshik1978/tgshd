@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"fmt"
 	"strings"
 	"testing"
 
@@ -9,6 +10,8 @@ import (
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest/observer"
 
+	"github.com/Toshik1978/tgshd/cmd/app"
+	"github.com/Toshik1978/tgshd/pkg/telegram"
 	"github.com/Toshik1978/tgshd/pkg/telegram/route"
 	"github.com/Toshik1978/tgshd/pkg/zte"
 )
@@ -97,5 +100,67 @@ func TestInvalidTopicWarnsWithoutOptionalFeatures(t *testing.T) {
 	}
 	if found != 1 {
 		t.Fatalf("got %d TELEGRAM_TOPIC_ALERTS warnings, want 1: %v", found, logs.All())
+	}
+}
+
+// TestTelegramPollSelectsConsumer: BOT_TELEGRAM_POLL=false wires the send-only
+// consumer, which takes no handlers, so the handler group is never built.
+func TestTelegramPollSelectsConsumer(t *testing.T) {
+	tests := []struct {
+		name     string
+		poll     string
+		wantSend bool
+	}{
+		{"false", "false", true},
+		{"unset", "", false},
+		{"true", "true", false},
+		{"unparsable keeps polling", "nope", false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv("TELEGRAM_TOKEN", "123:placeholder")
+			getenv := func(k string) string {
+				if k == "BOT_TELEGRAM_POLL" {
+					return tt.poll
+				}
+				return ""
+			}
+			if err := fx.ValidateApp(appOptions(getenv)...); err != nil {
+				t.Fatalf("graph invalid: %v", err)
+			}
+
+			var probeBuilt bool
+			probe := fx.Provide(fx.Annotate(
+				func() telegram.Handler { probeBuilt = true; return nil },
+				fx.ResultTags(`group:"command_handler"`),
+			))
+			var consumer app.TelegramConsumer
+			a := fx.New(append(appOptions(getenv), fx.NopLogger, probe, fx.Populate(&consumer))...)
+			if err := a.Err(); err != nil {
+				t.Fatalf("startup failed: %v", err)
+			}
+			isSend := strings.Contains(fmt.Sprintf("%T", consumer), "sendOnlyConsumer")
+			if isSend != tt.wantSend {
+				t.Fatalf("consumer = %T, send-only want %v", consumer, tt.wantSend)
+			}
+			if tt.wantSend && probeBuilt {
+				t.Fatal("handler group was constructed in send-only mode")
+			}
+			if !tt.wantSend && !probeBuilt {
+				t.Fatal("polling consumer did not take the handler group")
+			}
+		})
+	}
+}
+
+func TestNewConfigRejectsBadTelegramPoll(t *testing.T) {
+	t.Setenv("BOT_TELEGRAM_POLL", "nope")
+	if _, err := newConfig(); err == nil {
+		t.Fatal("newConfig accepted BOT_TELEGRAM_POLL=nope")
+	}
+	t.Setenv("BOT_TELEGRAM_POLL", "false")
+	cfg, err := newConfig()
+	if err != nil || cfg.TelegramPoll {
+		t.Fatalf("cfg=%+v err=%v, want TelegramPoll=false", cfg, err)
 	}
 }

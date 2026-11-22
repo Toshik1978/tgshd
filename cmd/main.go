@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/caarlos0/env/v11"
@@ -70,6 +71,7 @@ func main() {
 func appOptions(getenv func(string) string) []fx.Option {
 	options := []fx.Option{
 		configuration(),
+		telegramConsumer(getenv),
 		commandHandlers(),
 		fx.Provide(newApplication),
 		// Force construction of *Application so its lifecycle hook registers.
@@ -104,16 +106,28 @@ func configuration() fx.Option {
 		fx.Provide(
 			newTelegramBot,
 			newAccessList,
-			fx.Annotate(
-				telegram.NewConsumer,
-				fx.As(new(app.TelegramConsumer)),
-				fx.ParamTags(``, ``, ``, `group:"command_handler"`),
-			),
 			fx.Annotate(telegram.NewPublisher, fx.As(new(command.Publisher)), fx.As(new(sms.Publisher))),
 		),
 		// Parse the topic settings at every startup so a bad one always warns,
 		// even when no optional feature consumes route.Topics.
 		fx.Invoke(func(route.Topics) {}),
+	)
+}
+
+// telegramConsumer provides the Telegram consumer: the send-only one when
+// BOT_TELEGRAM_POLL parses to false, otherwise the polling one. An empty or
+// unparsable value keeps polling; newConfig reports the parse error.
+func telegramConsumer(getenv func(string) string) fx.Option {
+	if poll, err := strconv.ParseBool(getenv("BOT_TELEGRAM_POLL")); err == nil && !poll {
+		return fx.Provide(fx.Annotate(telegram.NewSendOnlyConsumer, fx.As(new(app.TelegramConsumer))))
+	}
+
+	return fx.Provide(
+		fx.Annotate(
+			telegram.NewConsumer,
+			fx.As(new(app.TelegramConsumer)),
+			fx.ParamTags(``, ``, ``, `group:"command_handler"`),
+		),
 	)
 }
 
@@ -259,6 +273,9 @@ type config struct {
 	HostName      string   `env:"BOT_HOST_NAME"`
 	SMSPhone      string   `env:"BOT_SMS_PHONE"`
 	SMTP          mail.Config
+
+	// TelegramPoll false selects the send-only consumer.
+	TelegramPoll bool `env:"BOT_TELEGRAM_POLL" envDefault:"true"`
 }
 
 // newConfig initializes configuration.
