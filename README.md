@@ -100,6 +100,7 @@ Configuration is read from the environment (a local `.env` is auto-loaded; see
 | `TELEGRAM_TOPIC_SMS` | Optional thread ID of the SMS topic |
 | `TELEGRAM_TOPIC_SYSTEM` | Optional thread ID of the system topic |
 | `TELEGRAM_UNKNOWN_SCRIPT` | Path to a script that lists its commands (one `name - description` line each, when run with no arguments) and executes them; see [Custom script commands](#custom-script-commands). It receives `TELEGRAM_THREAD_ID` when the command came from a topic |
+| `BOT_TELEGRAM_POLL` | Default `true`; any `strconv.ParseBool` value (`1`, `t`, `true`, `0`, `f`, `false`, ...). `false` is send-only: no `getUpdates`, no command menu, no commands, while alerts, summaries, topics, SMS and email still go out. A malformed value fails startup. See [Second instance on the same bot](#second-instance-on-the-same-bot) |
 | `BOT_PING_HOSTS` | Comma-separated hosts for `/ping` |
 | `BOT_NUT_IP` | NUT server address |
 | `BOT_NUT_NAME` | UPS name in NUT |
@@ -114,6 +115,14 @@ Configuration is read from the environment (a local `.env` is auto-loaded; see
 | `BOT_SMTP_FROM` / `BOT_SMTP_TO` | Envelope and header addresses; required with `BOT_SMTP_ADDR` |
 | `BOT_SMTP_USER` / `BOT_SMTP_PASS` | Optional SMTP PLAIN authentication |
 | `BOT_SMS_PHONE` | Operator phone number for SMS alerts; required for the `sms` and `tlg-or-sms` modes (needs gammu) |
+
+### Second instance on the same bot
+
+Telegram allows one `getUpdates` consumer per bot token. To run a second tgshd
+on another host with the same token (for its own alerts and summaries), set
+`BOT_TELEGRAM_POLL=false` there: it only sends, so it never competes with the
+instance that receives commands, and it leaves that instance's command menu
+untouched.
 
 ## Telegram topics
 
@@ -288,8 +297,8 @@ always reported at once.
 | `kernel` | EDAC memory error counters and the kernel log (read continuously) | `15m` / `0` | — |
 | `memory` | Available memory, swap, memory pressure, service growth and containers without a memory limit; its `guard` restarts a runaway service (see [Memory protection](#memory-protection)) | `1m` / `5m` | `warn_available_percent` (`15`), `warn_swap_percent` (`80`), `warn_pressure_percent` (`10`), `growth_window` (`1h`), `growth_warn` (`4GB`), `growth_exclude`, `audit_exclude`, `guard` |
 | `containers` | Docker container health | `5m` / `15m` | `exclude` (globs on the container name) |
-| `http` (list) | One endpoint per entry | `10m` / `10m` | `name`, `url`, `timeout` (`15s`, at most `20s`), `status` (`[200, 399]`), `connect_to` or `doh`, `header`, `follow_redirects` (`false`: a redirect is judged by its own status), `auth_refusal` (`down` or `checker_error`: what a 401/403 means), `depends_on`, `container` (also require this container healthy) |
-| `freshness` (list) | Age of a status stamp: a file's mtime or a Unix time in a file or at a URL | `15m` / `0` | `name`, `path` or `url` (exactly one), `content` (`epoch` or `mtime`), `max_age`, `future_tolerance` (`1h`), and for `url`: `timeout` (`15s`, at most `20s`) and `header` |
+| `http` (list) | One endpoint per entry | `10m` / `10m` | `name`, `url`, `timeout` (`15s`, at most `20s`), `status` (`[200, 399]`), `connect_to` or `doh`, `header` or `headers` (never both), `expect_body` and `forbid_body` (Go RE2 on the first 64 KiB of the body), `auth_redirect`, `follow_redirects` (`false`: a redirect is judged by its own status), `auth_refusal` (`down` or `checker_error`: what a refused credential means: a 401/403, or a redirect matching `auth_redirect`), `depends_on`, `container` (also require this container healthy) |
+| `freshness` (list) | Age of a status stamp: a file's mtime or a Unix time in a file or at a URL | `15m` / `0` | `name`, `path` or `url` (exactly one), `content` (`epoch` or `mtime`), `max_age`, `future_tolerance` (`1h`), and for `url`: `timeout` (`15s`, at most `20s`) and `header` or `headers` |
 | `command` (list) | A probe command you provide, with an optional fix | `5m` / `0` | `name`, `run` (argv, no shell), `timeout` (`20s`, at most `20s`), `expect_output` and `forbid_output` (Go RE2), `timeout_verdict` (`broken`, or `unreadable`: a timeout raises a checker error only after it has lasted `threshold`), `fix`, `report` |
 | `modem_probe` | A weekly SMS round trip through the modem (needs `BOT_GAMMU_DSN`) | weekly | `phone_env`, `weekday` (`sunday`), `time` (`11:02`), `reply_within` (`30m`), `max_silence` (`8d`, longer than a week plus `reply_within`) |
 
@@ -300,7 +309,21 @@ enables the weekly summary.
 placeholders}`. The value is read from the environment variable `value_env`
 and sent after `prefix`; a value containing one of the `placeholders`
 (case-insensitive) means the secret was never set and is reported as a checker
-error.
+error. **`headers`** is a list of such items, all sent, with names unique
+(case-insensitive); `header` is the one-item shorthand and is exclusive with
+`headers`. For `freshness`, `headers` needs `url`.
+
+**`expect_body`, `forbid_body`** (`http`): Go RE2 patterns tried on the first
+64 KiB of the body, judged only when the status is in range. A miss of
+`expect_body` or a match of `forbid_body` is a PROBLEM (`status 200; body does
+not match expect_body`). A body read cancelled by the run stays unjudged.
+
+**`auth_redirect`** (`http`): `host` or `*.host` (`*.` matches one or more
+labels, not the bare domain; case-insensitive; it must not match the URL host).
+A redirect to a matching host is a refused
+credential, not a down app: with `auth_refusal: down` the alert reads
+`redirected to the login page at <host>`; with `checker_error` it is the
+checker error `http/<name>/auth`. The shown host keeps a non-default port.
 
 **`depends_on`** (`http`): a condition `kind/name`, such as
 `network/connectivity`, `command/port-guard` or another `http/<name>`; the

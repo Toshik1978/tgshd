@@ -602,6 +602,14 @@ func TestExampleConfigParses(t *testing.T) {
 		t.Fatalf("unexpected errors: %+v", errs)
 	}
 
+	if len(cfg.HTTP) == 1 {
+		h := cfg.HTTP[0]
+		if len(h.Headers) != 2 || h.Header != nil || h.ExpectBody == "" || h.ForbidBody == "" ||
+			h.AuthRedirect == "" || h.AuthRefusal != "checker_error" {
+			t.Errorf("http entry lacks the 006 keys: %+v", h)
+		}
+	}
+
 	if cfg.Network == nil || cfg.UPS == nil || len(cfg.HTTP) != 1 || len(cfg.Command) != 1 || cfg.ModemProbe == nil {
 		t.Errorf("sections missing: %+v", cfg)
 	}
@@ -628,7 +636,8 @@ func TestExampleConfigDocumentsNewKeys(t *testing.T) {
 		"disks.spare_floor_percent", "disks.force_read_after", "disks.include_serials",
 		"disks.extra_counters", "disks.extra_counters_by_serial",
 		"temperatures.limits_by_serial", "temperatures.board_sensors",
-		"http[].follow_redirects", "http[].auth_refusal", "http[].header.placeholders",
+		"http[].follow_redirects", "http[].auth_refusal", "http[].headers[].placeholders",
+		"http[].expect_body", "http[].forbid_body", "http[].auth_redirect",
 		"freshness[].future_tolerance", "freshness[].url", "freshness[].timeout", "freshness[].header",
 		"command[].expect_output", "command[].forbid_output", "command[].timeout_verdict",
 	}

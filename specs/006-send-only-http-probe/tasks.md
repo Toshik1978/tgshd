@@ -88,7 +88,7 @@ redirects followed and not followed, under both `auth_refusal` values.
 
 ## Phase 5: Polish & Cross-Cutting Concerns
 
-- [ ] T011 Update config/health.example.yaml (an `http` entry showing `headers` with two items, `expect_body`, `forbid_body`, `auth_redirect` with `auth_refusal: checker_error`, and a note that `header` is a one-item shorthand exclusive with `headers`; the freshness URL example notes `headers`) and README.md (env table row for `BOT_TELEGRAM_POLL` per contracts/env.md with a short "Second instance on the same bot" paragraph; http-check key table rows for `headers`, `expect_body`, `forbid_body`, `auth_redirect`; freshness `headers`), using `example.org` hosts only; extend the existing example-config load test (pkg/health/config tests that load config/health.example.yaml) so the new keys are asserted to load without entry errors (FR-021)
+- [x] T011 Update config/health.example.yaml (an `http` entry showing `headers` with two items, `expect_body`, `forbid_body`, `auth_redirect` with `auth_refusal: checker_error`, and a note that `header` is a one-item shorthand exclusive with `headers`; the freshness URL example notes `headers`) and README.md (env table row for `BOT_TELEGRAM_POLL` per contracts/env.md with a short "Second instance on the same bot" paragraph; http-check key table rows for `headers`, `expect_body`, `forbid_body`, `auth_redirect`; freshness `headers`), using `example.org` hosts only; extend the existing example-config load test (pkg/health/config tests that load config/health.example.yaml) so the new keys are asserted to load without entry errors (FR-021)
 
 ---
 
