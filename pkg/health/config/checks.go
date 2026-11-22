@@ -29,7 +29,10 @@ type HTTP struct {
 	Status    [2]int   `yaml:"status"`
 	ConnectTo string   `yaml:"connect_to"`
 	DoH       string   `yaml:"doh"`
+	// Header is the legacy single header; Headers holds the list. Load folds
+	// Header into Headers and clears it, so consumers read Headers only.
 	Header    *Header  `yaml:"header"`
+	Headers   []Header `yaml:"headers"`
 	DependsOn string   `yaml:"depends_on"`
 	Container string   `yaml:"container"`
 
@@ -56,7 +59,9 @@ type Freshness struct {
 	// Timeout and Header apply to URL only; Timeout defaults to 15s.
 	URL     string   `yaml:"url"`
 	Timeout Duration `yaml:"timeout"`
+	// Header is folded into Headers at load, as for HTTP.
 	Header  *Header  `yaml:"header"`
+	Headers []Header `yaml:"headers"`
 }
 
 // Fix is the optional auto-remediation of a command check. After,

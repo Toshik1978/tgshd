@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
@@ -16,11 +17,11 @@ import (
 // kindUnreadable is the checker-error kind for a stamp that cannot be read.
 const kindUnreadable = "unreadable"
 
-// StampSource fetches a stamp over HTTP (a GET). A zero headerName sends no
-// header. status is the HTTP status of the answer; err is set when there was
+// StampSource fetches a stamp over HTTP (a GET), sending every header in
+// header (nil sends none). status is the HTTP status of the answer; err is set when there was
 // none. The existing Source stays the file interface.
 type StampSource interface {
-	Fetch(ctx context.Context, stampURL, headerName, headerValue string) (status int, body []byte, err error)
+	Fetch(ctx context.Context, stampURL string, header http.Header) (status int, body []byte, err error)
 }
 
 // Option customises a Check.
@@ -51,14 +52,9 @@ func (c *Check) location() string {
 // entry's timeout. Every failure is a CheckError, so no problem opens or
 // resolves on it.
 func (c *Check) httpStamp(ctx context.Context) (time.Time, error) {
-	value, err := httpcheck.HeaderSecret(c.cfg.Header, nil)
+	header, err := httpcheck.HeaderSecrets(c.cfg.Headers, nil)
 	if err != nil {
 		return time.Time{}, c.unreadable(err)
-	}
-
-	var name string
-	if c.cfg.Header != nil {
-		name = c.cfg.Header.Name
 	}
 
 	if c.stamps == nil {
@@ -68,7 +64,7 @@ func (c *Check) httpStamp(ctx context.Context) (time.Time, error) {
 	bounded, cancel, _ := health.Bound(ctx, c.cfg.Timeout.Duration())
 	defer cancel()
 
-	status, body, err := c.stamps.Fetch(bounded, c.cfg.URL, name, value)
+	status, body, err := c.stamps.Fetch(bounded, c.cfg.URL, header)
 	if err != nil {
 		// A *url.Error repeats the whole url; keep only its cause.
 		if ue, ok := errors.AsType[*url.Error](err); ok {

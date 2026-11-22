@@ -3,8 +3,8 @@
 //
 // The request can be routed to a fixed address (connect_to) or to an address
 // resolved through DNS-over-HTTPS (doh); either way TLS verification, SNI and
-// the Host header keep using the URL host. An optional header takes its value
-// from an environment variable, and an optional container must be healthy too.
+// the Host header keep using the URL host. Optional headers take their values
+// from environment variables, and an optional container must be healthy too.
 //
 // Redirects are not followed unless follow_redirects is set: the first
 // response is judged.
@@ -30,6 +30,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net"
 	"net/http"
 	"net/netip"
@@ -101,7 +102,7 @@ type Check struct {
 	url        string
 	timeout    time.Duration
 	status     [2]int
-	header     *config.Header
+	headers    []config.Header
 	container  string
 	containers Containers
 	lookupEnv  func(key string) (string, bool)
@@ -168,7 +169,7 @@ func New(entry config.HTTP, opts Options) (*Check, error) {
 		url:        entry.URL,
 		timeout:    timeout,
 		status:     entry.Status,
-		header:     entry.Header,
+		headers:    entry.Headers,
 		container:  entry.Container,
 		containers: opts.Containers,
 		lookupEnv:  opts.LookupEnv,
@@ -188,12 +189,12 @@ func (c *Check) Key() string { return c.key }
 
 // Run judges the endpoint (and its container, when configured) once.
 func (c *Check) Run(ctx context.Context) health.CheckResult {
-	header, err := c.headerValue()
+	headers, err := c.headerValues()
 	if err != nil {
 		return health.CheckResult{Err: err}
 	}
 
-	return c.result(c.probe(ctx, header), c.checkContainer(ctx))
+	return c.result(c.probe(ctx, headers), c.checkContainer(ctx))
 }
 
 // probe sends the request and judges the answer.
@@ -201,7 +202,7 @@ func (c *Check) Run(ctx context.Context) health.CheckResult {
 // The request gets the entry's timeout but ends before the run's deadline
 // (see health.Bound), so an endpoint that hangs past what is left of the run
 // is judged Bad too and the run is never abandoned with its reading.
-func (c *Check) probe(ctx context.Context, header string) outcome {
+func (c *Check) probe(ctx context.Context, headers http.Header) outcome {
 	reqCtx, cancel, limit := health.Bound(ctx, c.timeout)
 	defer cancel()
 	within := withinText(limit, c.timeout)
@@ -216,9 +217,7 @@ func (c *Check) probe(ctx context.Context, header string) outcome {
 
 	req.Header.Set("User-Agent", userAgent)
 
-	if c.header != nil {
-		req.Header.Set(c.header.Name, header)
-	}
+	maps.Copy(req.Header, headers)
 
 	resp, err := c.client.Do(req)
 	if err != nil {
@@ -339,7 +338,7 @@ func (c *Check) checkContainer(ctx context.Context) outcome {
 }
 
 // checkRedirect stops at the first response unless redirects are followed.
-// When they are, it follows at most maxRedirects and keeps the secret header
+// When they are, it follows at most maxRedirects and keeps the secret headers
 // away from any hop whose scheme or host differs from the configured URL
 // (net/http only strips Authorization and cookies, and only across domains).
 func (c *Check) checkRedirect(req *http.Request, via []*http.Request) error {
@@ -351,9 +350,10 @@ func (c *Check) checkRedirect(req *http.Request, via []*http.Request) error {
 		return errTooManyRedirects
 	}
 
-	if first := via[0].URL; c.header != nil &&
-		(req.URL.Scheme != first.Scheme || !strings.EqualFold(req.URL.Host, first.Host)) {
-		req.Header.Del(c.header.Name)
+	if first := via[0].URL; req.URL.Scheme != first.Scheme || !strings.EqualFold(req.URL.Host, first.Host) {
+		for i := range c.headers {
+			req.Header.Del(c.headers[i].Name)
+		}
 	}
 
 	return nil
@@ -409,8 +409,10 @@ func checkOptions(entry *config.HTTP, opts *Options) error {
 		return errors.New("container is set but no container source was provided")
 	}
 
-	if entry.Header != nil && hasControl(entry.Header.Prefix) {
-		return errors.New("header prefix contains a control character")
+	for i := range entry.Headers {
+		if hasControl(entry.Headers[i].Prefix) {
+			return errors.New("header prefix contains a control character")
+		}
 	}
 
 	return nil

@@ -897,7 +897,7 @@ func TestFreshnessURLEntryReadsItsStampOverHTTP(t *testing.T) {
 	hs := &healthSetup{Config: &hcfg.Config{Freshness: []hcfg.Freshness{{
 		Name: "dump", URL: srv.URL, Content: hcfg.ContentEpoch, MaxAge: hcfg.Duration(26 * time.Hour),
 		Timeout: hcfg.Duration(5 * time.Second), Common: commonOf(time.Minute, 0),
-		Header: &hcfg.Header{Name: "X-Token", ValueEnv: "TEST_STAMP_TOKEN"},
+		Headers: []hcfg.Header{{Name: "X-Token", ValueEnv: "TEST_STAMP_TOKEN"}},
 	}}}}
 	set := freshnessChecks(hs)
 

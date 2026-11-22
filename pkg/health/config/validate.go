@@ -291,7 +291,7 @@ func validateModemProbe(m *ModemProbe, p *problems) {
 	}
 }
 
-func validateHTTP(h *HTTP, p *problems) {
+func validateHTTP(h *HTTP, node *yaml.Node, p *problems) {
 	p.common(&h.Common)
 	p.checkTimeout("timeout", h.Timeout)
 	validateURL(p, "url", h.URL)
@@ -303,7 +303,7 @@ func validateHTTP(h *HTTP, p *problems) {
 	validateHTTPRouting(h, p)
 
 	p.oneOf("auth_refusal", string(h.AuthRefusal), string(AuthRefusalDown), string(AuthRefusalCheckerError))
-	validateHeader(p, h.Header)
+	validateHeaders(p, hasKey(node, "headers"), &h.Header, &h.Headers)
 	validateOutputPattern(p, "expect_body", h.ExpectBody)
 	validateOutputPattern(p, "forbid_body", h.ForbidBody)
 
@@ -323,25 +323,60 @@ func validateHTTP(h *HTTP, p *problems) {
 	}
 }
 
-func validateHeader(p *problems, h *Header) {
-	if h == nil {
+// validateHeaders checks the legacy header and the headers list of one entry
+// and folds the legacy form into the list, so consumers read headers only.
+// listSet says whether the entry sets headers itself, even to an empty list.
+func validateHeaders(p *problems, listSet bool, legacy **Header, list *[]Header) {
+	switch {
+	case *legacy != nil && listSet:
+		p.addf("header and headers are mutually exclusive")
+
+		return
+	case listSet && len(*list) == 0:
+		p.addf("headers must not be empty")
+
 		return
 	}
 
-	p.required("header.name", h.Name)
-	p.required("header.value_env", h.ValueEnv)
+	if *legacy != nil {
+		validateHeader(p, "header", *legacy)
+		*list = []Header{**legacy}
+		*legacy = nil
+
+		return
+	}
+
+	seen := make(map[string]bool, len(*list))
+
+	for i := range *list {
+		h := &(*list)[i]
+		label := fmt.Sprintf("headers[%d]", i)
+		validateHeader(p, label, h)
+
+		key := strings.ToLower(h.Name)
+		if h.Name != "" && seen[key] {
+			p.addf("%s.name %q repeats an earlier header", label, h.Name)
+		}
+
+		seen[key] = true
+	}
+}
+
+func validateHeader(p *problems, label string, h *Header) {
+	p.required(label+".name", h.Name)
+	p.required(label+".value_env", h.ValueEnv)
 
 	if h.Name != "" && !headerToken(h.Name) {
-		p.addf("header.name %q must be an HTTP header name (RFC 7230 token)", h.Name)
+		p.addf("%s.name %q must be an HTTP header name (RFC 7230 token)", label, h.Name)
 	}
 
 	// The value is not repeated: the prefix is part of the header value.
 	if strings.ContainsFunc(h.Prefix, func(r rune) bool { return r != '\t' && unicode.IsControl(r) }) {
-		p.addf("header.prefix contains a control character")
+		p.addf("%s.prefix contains a control character", label)
 	}
 
 	if slices.Contains(h.Placeholders, "") {
-		p.addf("header.placeholders must not contain empty entries")
+		p.addf("%s.placeholders must not contain empty entries", label)
 	}
 }
 
@@ -398,12 +433,12 @@ func validateFreshness(f *Freshness, node *yaml.Node, p *problems) {
 		p.addf("freshness needs exactly one of path or url")
 	}
 
-	validateFreshnessURL(f, hasKey(node, "timeout"), p)
+	validateFreshnessURL(f, hasKey(node, "timeout"), hasKey(node, "headers"), p)
 }
 
 // validateFreshnessURL checks the keys that only a URL stamp uses. timeoutSet
 // says whether the entry sets timeout itself, even to its default.
-func validateFreshnessURL(f *Freshness, timeoutSet bool, p *problems) {
+func validateFreshnessURL(f *Freshness, timeoutSet, headersSet bool, p *problems) {
 	if f.URL == "" {
 		if timeoutSet {
 			p.addf("timeout is only valid with url")
@@ -411,6 +446,10 @@ func validateFreshnessURL(f *Freshness, timeoutSet bool, p *problems) {
 
 		if f.Header != nil {
 			p.addf("header is only valid with url")
+		}
+
+		if headersSet {
+			p.addf("headers is only valid with url")
 		}
 
 		return
@@ -423,7 +462,7 @@ func validateFreshnessURL(f *Freshness, timeoutSet bool, p *problems) {
 	}
 
 	p.checkTimeout("timeout", f.Timeout)
-	validateHeader(p, f.Header)
+	validateHeaders(p, headersSet, &f.Header, &f.Headers)
 }
 
 func validateCommand(c *Command, p *problems) {

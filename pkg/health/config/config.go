@@ -142,7 +142,7 @@ func Parse(data []byte, file string) (*Config, []EntryError) {
 	cfg.Containers = section(r, top, "containers", defaultContainers(), validateContainers)
 	cfg.ModemProbe = section(r, top, "modem_probe", defaultModemProbe(), validateModemProbe)
 	cfg.Memory = section(r, top, "memory", defaultMemory(), validateMemory)
-	cfg.HTTP = list(r, top, "http", defaultHTTP, ignoreNode(validateHTTP))
+	cfg.HTTP = list(r, top, "http", defaultHTTP, validateHTTP)
 	cfg.Freshness = list(r, top, "freshness", defaultFreshness, validateFreshness)
 	cfg.Command = list(r, top, "command", defaultCommand, ignoreNode(validateCommand))
 

@@ -724,7 +724,7 @@ func TestHeaderFromEnv(t *testing.T) {
 	rec := &recorder{}
 	srv := newHTTPServer(t, statusHandler(rec, http.StatusOK))
 	e := entry(srv.URL)
-	e.Header = &config.Header{Name: "Authorization", ValueEnv: tokenEnv, Prefix: "Bearer "}
+	e.Headers = []config.Header{{Name: "Authorization", ValueEnv: tokenEnv, Prefix: "Bearer "}}
 
 	res := mustNew(t, e, httpcheck.Options{LookupEnv: envWith(tokenEnv, secret)}).Run(t.Context())
 	r := wantVerdict(t, res, health.Good, "status 200")
@@ -744,7 +744,7 @@ func TestHeaderSecretNeverInBadText(t *testing.T) {
 	rec := &recorder{}
 	srv := newHTTPServer(t, statusHandler(rec, http.StatusUnauthorized))
 	e := entry(srv.URL)
-	e.Header = &config.Header{Name: "Authorization", ValueEnv: tokenEnv, Prefix: "Bearer "}
+	e.Headers = []config.Header{{Name: "Authorization", ValueEnv: tokenEnv, Prefix: "Bearer "}}
 
 	r := wantVerdict(t, mustNew(t, e, httpcheck.Options{LookupEnv: envWith(tokenEnv, secret)}).Run(t.Context()),
 		health.Bad, "status 401")
@@ -784,7 +784,7 @@ func TestBadSecretIsCheckerError(t *testing.T) {
 			rec := &recorder{}
 			srv := newHTTPServer(t, statusHandler(rec, http.StatusOK))
 			e := entry(srv.URL)
-			e.Header = &config.Header{Name: "Authorization", ValueEnv: tokenEnv, Prefix: "Bearer "}
+			e.Headers = []config.Header{{Name: "Authorization", ValueEnv: tokenEnv, Prefix: "Bearer "}}
 
 			res := mustNew(t, e, httpcheck.Options{LookupEnv: tt.env}).Run(t.Context())
 			wantUnjudged(t, res, tt.want)
@@ -816,7 +816,7 @@ func TestRealLookingSecretsAreAccepted(t *testing.T) {
 			rec := &recorder{}
 			srv := newHTTPServer(t, statusHandler(rec, http.StatusOK))
 			e := entry(srv.URL)
-			e.Header = &config.Header{Name: "X-Api-Key", ValueEnv: tokenEnv}
+			e.Headers = []config.Header{{Name: "X-Api-Key", ValueEnv: tokenEnv}}
 
 			wantVerdict(t, mustNew(t, e, httpcheck.Options{LookupEnv: envWith(tokenEnv, v)}).Run(t.Context()),
 				health.Good, "status 200")
@@ -926,7 +926,10 @@ func TestNewRejectsIncompleteSetup(t *testing.T) {
 	withContainer.Container = "app"
 
 	badPrefix := entry("https://" + appHost + "/")
-	badPrefix.Header = &config.Header{Name: "Authorization", ValueEnv: tokenEnv, Prefix: "Bearer\n"}
+	badPrefix.Headers = []config.Header{
+		{Name: "Authorization", ValueEnv: tokenEnv, Prefix: "Bearer "},
+		{Name: "X-Api-Key", ValueEnv: "APP_KEY", Prefix: "Key\n"},
+	}
 
 	tests := []struct {
 		name string
@@ -977,7 +980,7 @@ func TestSecretHeaderNotForwardedToOtherHost(t *testing.T) {
 		}
 	}))
 	e := entry("http://" + appHost + "/")
-	e.Header = &config.Header{Name: "X-Api-Key", ValueEnv: tokenEnv}
+	e.Headers = []config.Header{{Name: "X-Api-Key", ValueEnv: tokenEnv}}
 	e.FollowRedirects = true
 
 	res := mustNew(t, e, httpcheck.Options{
@@ -1012,7 +1015,7 @@ func TestSecretHeaderNotForwardedOnDowngrade(t *testing.T) {
 		"80":  plain.Listener.Addr().String(),
 	}}
 	e := entry("https://" + appHost + "/")
-	e.Header = &config.Header{Name: "X-Api-Key", ValueEnv: tokenEnv}
+	e.Headers = []config.Header{{Name: "X-Api-Key", ValueEnv: tokenEnv}}
 	e.FollowRedirects = true
 
 	res := mustNew(t, e, httpcheck.Options{Dialer: d, TLSConfig: tlsCfg, LookupEnv: envWith(tokenEnv, secret)}).
@@ -1235,7 +1238,7 @@ func TestAuthRefusalCheckerError(t *testing.T) {
 			srv := newHTTPServer(t, statusHandler(rec, tt.status))
 			e := entry(srv.URL)
 			e.AuthRefusal = tt.mode
-			e.Header = &config.Header{Name: "Authorization", ValueEnv: tokenEnv, Prefix: "Bearer "}
+			e.Headers = []config.Header{{Name: "Authorization", ValueEnv: tokenEnv, Prefix: "Bearer "}}
 
 			res := mustNew(t, e, httpcheck.Options{LookupEnv: envWith(tokenEnv, secret)}).Run(t.Context())
 
@@ -1283,17 +1286,17 @@ func TestExtraPlaceholder(t *testing.T) {
 
 			h := config.Header{Name: "Authorization", ValueEnv: tokenEnv, Prefix: "Bearer ", Placeholders: markers}
 
-			got, err := httpcheck.HeaderSecret(&h, envWith(tokenEnv, tt.value))
+			got, err := httpcheck.HeaderSecrets([]config.Header{h}, envWith(tokenEnv, tt.value))
 			if tt.ok {
-				if err != nil || got != "Bearer "+tt.value {
-					t.Fatalf("HeaderSecret = %q, %v, want the prefixed value", got, err)
+				if err != nil || got.Get("Authorization") != "Bearer "+tt.value {
+					t.Fatalf("HeaderSecrets = %v, %v, want the prefixed value", got, err)
 				}
 
 				return
 			}
 
 			if !errors.Is(err, httpcheck.ErrSecret) || !strings.Contains(err.Error(), "placeholder") {
-				t.Fatalf("HeaderSecret err = %v, want ErrSecret naming a placeholder", err)
+				t.Fatalf("HeaderSecrets err = %v, want ErrSecret naming a placeholder", err)
 			}
 
 			if strings.Contains(err.Error(), tt.value) {
@@ -1304,7 +1307,7 @@ func TestExtraPlaceholder(t *testing.T) {
 			rec := &recorder{}
 			srv := newHTTPServer(t, statusHandler(rec, http.StatusOK))
 			e := entry(srv.URL)
-			e.Header = &h
+			e.Headers = []config.Header{h}
 
 			wantUnjudged(t, mustNew(t, e, httpcheck.Options{LookupEnv: envWith(tokenEnv, tt.value)}).Run(t.Context()),
 				"placeholder")
@@ -1316,11 +1319,137 @@ func TestExtraPlaceholder(t *testing.T) {
 	}
 }
 
-func TestHeaderSecretWithoutHeader(t *testing.T) {
+func TestHeaderSecretsWithoutHeaders(t *testing.T) {
 	t.Parallel()
 
-	if got, err := httpcheck.HeaderSecret(nil, noEnv); got != "" || err != nil {
-		t.Fatalf("HeaderSecret(nil) = %q, %v, want empty and no error", got, err)
+	for _, hs := range [][]config.Header{nil, {}} {
+		if got, err := httpcheck.HeaderSecrets(hs, noEnv); len(got) != 0 || err != nil {
+			t.Fatalf("HeaderSecrets(%v) = %v, %v, want empty and no error", hs, got, err)
+		}
+	}
+}
+
+func TestHeaderSecretsJoinsEveryFailure(t *testing.T) {
+	t.Parallel()
+
+	hs := []config.Header{
+		{Name: "X-One", ValueEnv: "ENV_ONE"},
+		{Name: "X-Two", ValueEnv: "ENV_TWO"},
+		{Name: "X-Three", ValueEnv: "ENV_THREE", Prefix: "Bearer "},
+	}
+
+	got, err := httpcheck.HeaderSecrets(hs, envWith("ENV_THREE", "changeme"))
+	if got != nil {
+		t.Fatalf("header = %v, want nil on error", got)
+	}
+
+	for _, want := range []string{
+		"environment variable ENV_ONE is not set",
+		"environment variable ENV_TWO is not set",
+		"environment variable ENV_THREE looks like a placeholder",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("err = %v, want it to contain %q", err, want)
+		}
+	}
+
+	if !errors.Is(err, httpcheck.ErrSecret) || strings.Contains(err.Error(), "changeme") {
+		t.Fatalf("err = %v, want ErrSecret without the value", err)
+	}
+}
+
+func TestTwoHeadersReachServer(t *testing.T) {
+	t.Parallel()
+
+	var seen http.Header
+
+	srv := newHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		seen = req.Header.Clone()
+		w.WriteHeader(http.StatusOK)
+	}))
+	e := entry(srv.URL)
+	e.Headers = []config.Header{
+		{Name: "Authorization", ValueEnv: tokenEnv, Prefix: "Bearer "},
+		{Name: "X-Api-Key", ValueEnv: "APP_KEY"},
+	}
+
+	env := map[string]string{tokenEnv: secret, "APP_KEY": "k3y-Value-42"}
+	lookup := func(k string) (string, bool) { v, ok := env[k]; return v, ok }
+
+	wantVerdict(t, mustNew(t, e, httpcheck.Options{LookupEnv: lookup}).Run(t.Context()), health.Good, "status 200")
+
+	if seen.Get("Authorization") != "Bearer "+secret || seen.Get("X-Api-Key") != "k3y-Value-42" {
+		t.Fatalf("server saw %v, want both headers", seen)
+	}
+}
+
+func TestTwoUnsetVariablesBothNamed(t *testing.T) {
+	t.Parallel()
+
+	rec := &recorder{}
+	srv := newHTTPServer(t, statusHandler(rec, http.StatusOK))
+	e := entry(srv.URL)
+	e.Headers = []config.Header{
+		{Name: "Authorization", ValueEnv: tokenEnv},
+		{Name: "X-Api-Key", ValueEnv: "APP_KEY"},
+	}
+
+	res := mustNew(t, e, httpcheck.Options{LookupEnv: noEnv}).Run(t.Context())
+	wantUnjudged(t, res, "environment variable "+tokenEnv+" is not set")
+	wantUnjudged(t, res, "environment variable APP_KEY is not set")
+
+	if rec.calls() != 0 {
+		t.Fatalf("server saw %d requests, want 0", rec.calls())
+	}
+}
+
+func TestAllHeadersStrippedOnCrossHostRedirect(t *testing.T) {
+	t.Parallel()
+
+	var (
+		mu   sync.Mutex
+		seen = map[string][]string{} // host -> "Authorization|X-Api-Key" per request
+	)
+
+	srv := newHTTPServer(t, http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		mu.Lock()
+		seen[req.Host] = append(seen[req.Host], req.Header.Get("Authorization")+"|"+req.Header.Get("X-Api-Key"))
+		mu.Unlock()
+
+		switch {
+		case req.Host == appHost && req.URL.Path == "/":
+			http.Redirect(w, req, "/same", http.StatusFound)
+		case req.Host == appHost:
+			http.Redirect(w, req, "http://other.example.org/landing", http.StatusFound)
+		default:
+			w.WriteHeader(http.StatusOK)
+		}
+	}))
+	e := entry("http://" + appHost + "/")
+	e.Headers = []config.Header{
+		{Name: "Authorization", ValueEnv: tokenEnv, Prefix: "Bearer "},
+		{Name: "X-Api-Key", ValueEnv: "APP_KEY"},
+	}
+	e.FollowRedirects = true
+
+	env := map[string]string{tokenEnv: secret, "APP_KEY": "k3y-Value-42"}
+	lookup := func(k string) (string, bool) { v, ok := env[k]; return v, ok }
+
+	res := mustNew(t, e, httpcheck.Options{
+		Dialer: &fakeDialer{target: srv.Listener.Addr().String()}, LookupEnv: lookup,
+	}).Run(t.Context())
+	wantVerdict(t, res, health.Good, "status 200")
+
+	mu.Lock()
+	defer mu.Unlock()
+
+	both := "Bearer " + secret + "|k3y-Value-42"
+	if got := seen[appHost]; !slices.Equal(got, []string{both, both}) {
+		t.Fatalf("URL host saw %q, want both headers twice", got)
+	}
+
+	if got := seen["other.example.org"]; !slices.Equal(got, []string{"|"}) {
+		t.Fatalf("other host saw %q, want no header", got)
 	}
 }
 

@@ -56,8 +56,10 @@ func TestLoadFull(t *testing.T) {
 		t.Fatalf("http = %+v", cfg.HTTP)
 	}
 	web := cfg.HTTP[0]
-	if web.ConnectTo != "192.0.2.5" || web.Header == nil || web.Header.ValueEnv != "APP_TOKEN" ||
-		web.Status != [2]int{200, 399} || web.DependsOn != "http/other-app" {
+	if web.ConnectTo != "192.0.2.5" || len(web.Headers) != 1 || web.Header != nil ||
+		web.Headers[0].ValueEnv != "APP_TOKEN" ||
+		web.Status != [2]int{200, 399} ||
+		web.DependsOn != "http/other-app" {
 		t.Errorf("web = %+v", web)
 	}
 	if other := cfg.HTTP[1]; other.DoH == "" || !other.NeedsInternet {
@@ -811,12 +813,12 @@ command:
   - {name: c, run: [/bin/true]}
 `)
 	h := cfg.HTTP[0]
-	if h.FollowRedirects || h.AuthRefusal != config.AuthRefusalDown || len(h.Header.Placeholders) != 0 {
+	if h.FollowRedirects || h.AuthRefusal != config.AuthRefusalDown || len(h.Headers[0].Placeholders) != 0 {
 		t.Errorf("http defaults = %+v", h)
 	}
 	f, g := cfg.Freshness[0], cfg.Freshness[1]
 	if f.FutureTolerance.Duration() != time.Hour || f.Timeout.Duration() != 15*time.Second || f.URL != "" ||
-		f.Header != nil {
+		f.Header != nil || f.Headers != nil {
 		t.Errorf("path freshness = %+v", f)
 	}
 	if g.FutureTolerance.Duration() != time.Hour || g.Timeout.Duration() != 15*time.Second {
@@ -849,17 +851,100 @@ command:
 `)
 	h := cfg.HTTP[0]
 	if !h.FollowRedirects || h.AuthRefusal != config.AuthRefusalCheckerError ||
-		h.Header.Placeholders[0] != "sample-key" ||
+		h.Headers[0].Placeholders[0] != "sample-key" ||
 		h.ExpectBody != `"status":\s*"ok"` || h.ForbidBody != "(?i)maintenance" {
 		t.Errorf("http = %+v", h)
 	}
 	g := cfg.Freshness[0]
-	if g.FutureTolerance != 0 || g.Timeout.Duration() != 20*time.Second || g.Header.Placeholders[0] != "sample-key" {
+	if g.FutureTolerance != 0 || g.Timeout.Duration() != 20*time.Second ||
+		g.Headers[0].Placeholders[0] != "sample-key" {
 		t.Errorf("freshness = %+v", g)
 	}
 	c := cfg.Command[0]
 	if c.ExpectOutput != "^ok" || c.ForbidOutput != "(?i)degraded" || c.TimeoutVerdict != config.TimeoutUnreadable {
 		t.Errorf("command = %+v", c)
+	}
+}
+
+func TestHeadersList(t *testing.T) {
+	cfg := mustParse(t, `
+http:
+  - name: a
+    url: "https://a.example.org/"
+    headers:
+      - {name: X-A, value_env: KEY_A}
+      - {name: X-B, value_env: KEY_B, prefix: "Bearer "}
+freshness:
+  - name: g
+    url: "https://b.example.org/stamp"
+    max_age: 1d
+    headers: [{name: X-A, value_env: KEY_A}]
+`)
+	h := cfg.HTTP[0]
+	if len(h.Headers) != 2 || h.Header != nil || h.Headers[1].Name != "X-B" || h.Headers[1].Prefix != "Bearer " {
+		t.Errorf("http = %+v", h)
+	}
+	if g := cfg.Freshness[0]; len(g.Headers) != 1 || g.Header != nil || g.Headers[0].ValueEnv != "KEY_A" {
+		t.Errorf("freshness = %+v", g)
+	}
+}
+
+func TestHeadersErrors(t *testing.T) {
+	const (
+		httpOK  = `name: a, url: "https://a.example.org/"`
+		freshOK = `name: f, max_age: 1d, url: "https://b.example.org/"`
+		hdr     = `{name: X-Key, value_env: KEY}`
+	)
+
+	tests := []struct {
+		name   string
+		doc    string
+		entry  string
+		reason string
+	}{
+		{
+			"http both", "http: [{" + httpOK + ", header: " + hdr + ", headers: [" + hdr + "]}]", "http/a",
+			"header and headers are mutually exclusive",
+		},
+		{
+			"freshness both", "freshness: [{" + freshOK + ", header: " + hdr + ", headers: [" + hdr + "]}]",
+			"freshness/f", "header and headers are mutually exclusive",
+		},
+		{"http empty", "http: [{" + httpOK + ", headers: []}]", "http/a", "headers must not be empty"},
+		{
+			"freshness empty", "freshness: [{" + freshOK + ", headers: []}]", "freshness/f",
+			"headers must not be empty",
+		},
+		{
+			"http duplicate",
+			"http: [{" + httpOK + ", headers: [{name: X-A, value_env: K}, {name: x-a, value_env: L}]}]",
+			"http/a",
+			`headers[1].name "x-a" repeats an earlier header`,
+		},
+		{
+			"http invalid name", "http: [{" + httpOK + ", headers: [" + hdr + ", {name: \"X Y\", value_env: K}]}]",
+			"http/a", "headers[1].name",
+		},
+		{"http missing env", "http: [{" + httpOK + ", headers: [{name: X}]}]", "http/a", "headers[0].value_env"},
+		{
+			"http prefix control", "http: [{" + httpOK + ", headers: [{name: X, value_env: K, prefix: \"a\\n\"}]}]",
+			"http/a", "headers[0].prefix",
+		},
+		{
+			"freshness without url", "freshness: [{name: f, max_age: 1d, path: /tmp/f, headers: [" + hdr + "]}]",
+			"freshness/f", "headers is only valid with url",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, errs := config.Parse([]byte(tt.doc), "health.yaml")
+			if len(errs) != 1 {
+				t.Fatalf("want 1 error, got %+v", errs)
+			}
+			if e := errs[0]; e.Entry != tt.entry || !strings.Contains(e.Reason, tt.reason) {
+				t.Errorf("got %+v, want entry %q reason containing %q", e, tt.entry, tt.reason)
+			}
+		})
 	}
 }
 

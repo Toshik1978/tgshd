@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net/http"
 	"net/url"
 	"strconv"
 	"strings"
@@ -21,15 +22,16 @@ type fakeStamp struct {
 	body   string
 	err    error
 
-	calls                        int
-	url, headerName, headerValue string
-	deadline                     time.Time
-	hasDeadline                  bool
+	calls       int
+	url         string
+	header      http.Header
+	deadline    time.Time
+	hasDeadline bool
 }
 
-func (f *fakeStamp) Fetch(ctx context.Context, stampURL, name, value string) (int, []byte, error) {
+func (f *fakeStamp) Fetch(ctx context.Context, stampURL string, header http.Header) (int, []byte, error) {
 	f.calls++
-	f.url, f.headerName, f.headerValue = stampURL, name, value
+	f.url, f.header = stampURL, header
 	f.deadline, f.hasDeadline = ctx.Deadline()
 
 	return f.status, []byte(f.body), f.err
@@ -132,34 +134,34 @@ func TestHTTPNoAnswerUnknown(t *testing.T) {
 }
 
 func TestStampHeaderSecret(t *testing.T) {
-	header := func() *config.Header {
-		return &config.Header{
+	header := func() []config.Header {
+		return []config.Header{{
 			Name: "Authorization", ValueEnv: "TEST_STAMP_TOKEN", Prefix: "Bearer ",
 			Placeholders: []string{"fill-me"},
-		}
+		}}
 	}
 	body := strconv.FormatInt(base().Add(-time.Hour).Unix(), 10)
 
 	t.Run("sent", func(t *testing.T) {
 		t.Setenv("TEST_STAMP_TOKEN", "s3cret-value")
 		cfg := urlEntry()
-		cfg.Header = header()
+		cfg.Headers = header()
 		src := &fakeStamp{status: 200, body: body}
 
 		res := runStamp(cfg, src, freshness.NewKVState(nil))
 		if res.Err != nil || len(res.Readings) != 1 {
 			t.Fatalf("result = %+v", res)
 		}
-		if src.headerName != "Authorization" || src.headerValue != "Bearer s3cret-value" {
-			t.Fatalf("header = %q: %q", src.headerName, src.headerValue)
+		if got := src.header.Get("Authorization"); got != "Bearer s3cret-value" {
+			t.Fatalf("Authorization = %q", got)
 		}
 	})
 
 	t.Run("no header", func(t *testing.T) {
 		src := &fakeStamp{status: 200, body: body}
 		runStamp(urlEntry(), src, freshness.NewKVState(nil))
-		if src.headerName != "" || src.headerValue != "" {
-			t.Fatalf("header = %q: %q", src.headerName, src.headerValue)
+		if len(src.header) != 0 {
+			t.Fatalf("header = %v, want none", src.header)
 		}
 	})
 
@@ -167,7 +169,7 @@ func TestStampHeaderSecret(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			t.Setenv("TEST_STAMP_TOKEN", value)
 			cfg := urlEntry()
-			cfg.Header = header()
+			cfg.Headers = header()
 			src := &fakeStamp{status: 200, body: body}
 
 			res := runStamp(cfg, src, freshness.NewKVState(nil))
@@ -186,6 +188,43 @@ func TestStampHeaderSecret(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestStampSeveralHeaders(t *testing.T) {
+	body := strconv.FormatInt(base().Add(-time.Hour).Unix(), 10)
+	first := config.Header{Name: "Authorization", ValueEnv: "TEST_STAMP_TOKEN", Prefix: "Bearer "}
+
+	t.Run("two headers", func(t *testing.T) {
+		t.Setenv("TEST_STAMP_TOKEN", "s3cret-value")
+		t.Setenv("TEST_STAMP_ID", "client-id")
+		cfg := urlEntry()
+		cfg.Headers = []config.Header{first, {Name: "X-Client-Id", ValueEnv: "TEST_STAMP_ID"}}
+		src := &fakeStamp{status: 200, body: body}
+
+		res := runStamp(cfg, src, freshness.NewKVState(nil))
+		if res.Err != nil || len(res.Readings) != 1 {
+			t.Fatalf("result = %+v", res)
+		}
+		if src.header.Get("Authorization") != "Bearer s3cret-value" || src.header.Get("X-Client-Id") != "client-id" {
+			t.Fatalf("headers = %v", src.header)
+		}
+	})
+
+	t.Run("second secret unusable names the variable", func(t *testing.T) {
+		t.Setenv("TEST_STAMP_TOKEN", "s3cret-value")
+		cfg := urlEntry()
+		cfg.Headers = []config.Header{first, {Name: "X-Client-Id", ValueEnv: "TEST_STAMP_MISSING"}}
+		src := &fakeStamp{status: 200, body: body}
+
+		res := runStamp(cfg, src, freshness.NewKVState(nil))
+		var ce health.CheckError
+		if !errors.As(res.Err, &ce) || !strings.Contains(ce.Err.Error(), "TEST_STAMP_MISSING") {
+			t.Fatalf("err = %v, want a checker error naming the variable", res.Err)
+		}
+		if src.calls != 0 || strings.Contains(ce.Err.Error(), "s3cret-value") {
+			t.Fatalf("calls = %d, err = %v", src.calls, ce.Err)
+		}
+	})
 }
 
 // TestHTTPStampBoundedByEntryTimeout proves the fetch deadline follows the

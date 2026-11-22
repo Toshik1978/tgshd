@@ -3,6 +3,7 @@ package httpcheck
 import (
 	"errors"
 	"fmt"
+	"net/http"
 	"os"
 	"strings"
 	"unicode"
@@ -14,28 +15,49 @@ import (
 // placeholder. Its messages name the environment variable, never the value.
 var ErrSecret = errors.New("header secret unusable")
 
-// headerValue returns the configured header value (prefix + secret), or an
-// error wrapping ErrSecret when the secret cannot be used.
-func (c *Check) headerValue() (string, error) {
-	return HeaderSecret(c.header, c.lookupEnv)
+// headerValues returns the configured headers (prefix + secret), or an error
+// joining one ErrSecret error per header whose secret cannot be used.
+func (c *Check) headerValues() (http.Header, error) {
+	return HeaderSecrets(c.headers, c.lookupEnv)
 }
 
-// HeaderSecret returns the value of the header h (its prefix + the secret
-// read through lookupEnv, os.LookupEnv when nil), or "" when h is nil. A
-// secret that is not set, empty, holds a control character or looks like a
-// placeholder (a built-in stand-in or one of h.Placeholders, matched
-// case-insensitively anywhere in the value) yields an error wrapping
-// ErrSecret that names the environment variable, never the value. The http
-// and freshness checks share it.
-func HeaderSecret(h *config.Header, lookupEnv func(key string) (string, bool)) (string, error) {
-	if h == nil {
-		return "", nil
-	}
-
+// HeaderSecrets returns the headers hs, each valued prefix + the secret read
+// through lookupEnv (os.LookupEnv when nil); no headers give an empty
+// http.Header. A secret that is not set, empty, holds a control character or
+// looks like a placeholder (a built-in stand-in or one of its Placeholders,
+// matched case-insensitively anywhere in the value) contributes an error
+// wrapping ErrSecret that names the environment variable, never the value;
+// the errors of all unusable headers are joined and no header is returned.
+// The http and freshness checks share it.
+func HeaderSecrets(hs []config.Header, lookupEnv func(key string) (string, bool)) (http.Header, error) {
 	if lookupEnv == nil {
 		lookupEnv = os.LookupEnv
 	}
 
+	out := make(http.Header, len(hs))
+
+	var errs []error
+
+	for i := range hs {
+		value, err := headerSecret(&hs[i], lookupEnv)
+		if err != nil {
+			errs = append(errs, err)
+
+			continue
+		}
+
+		out.Set(hs[i].Name, value)
+	}
+
+	if err := errors.Join(errs...); err != nil {
+		return nil, err
+	}
+
+	return out, nil
+}
+
+// headerSecret judges one header: its value, or an error wrapping ErrSecret.
+func headerSecret(h *config.Header, lookupEnv func(key string) (string, bool)) (string, error) {
 	env := h.ValueEnv
 
 	v, ok := lookupEnv(env)

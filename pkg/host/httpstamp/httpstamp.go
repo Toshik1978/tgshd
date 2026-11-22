@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
 	neturl "net/url"
 )
@@ -31,18 +32,16 @@ func New(transport http.RoundTripper) *Client {
 	}}
 }
 
-// Fetch does a GET of url, sending headerName: headerValue when headerName is
-// not empty. It returns the response status and at most MaxBody bytes of the
+// Fetch does a GET of url, sending every header in header (nil sends none). It
+// returns the response status and at most MaxBody bytes of the
 // body, whatever the status; a redirect is returned as it is, not followed.
-func (c *Client) Fetch(ctx context.Context, url, headerName, headerValue string) (int, []byte, error) {
+func (c *Client) Fetch(ctx context.Context, url string, header http.Header) (int, []byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, http.NoBody)
 	if err != nil {
 		return 0, nil, fmt.Errorf("build stamp request: %w", withoutURL(err))
 	}
 
-	if headerName != "" {
-		req.Header.Set(headerName, headerValue)
-	}
+	maps.Copy(req.Header, header)
 
 	resp, err := c.http.Do(req)
 	if err != nil {
