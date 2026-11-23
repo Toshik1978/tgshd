@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"os/exec"
 	"path"
 	"slices"
@@ -470,8 +471,9 @@ func (g *memoryGuard) refreshNames(ctx context.Context) {
 
 // nameRefresher refreshes the container id→name map from the Docker list,
 // off the guard's decision path, and warns once while the list keeps
-// failing. The guard runs one every tick; the memory check runs one on each
-// of its runs too.
+// failing. A host whose Docker socket does not exist and never listed has no
+// containers to name, so that is logged at debug instead. The guard runs one
+// every tick; the memory check runs one on each of its runs too.
 type nameRefresher struct {
 	names  *containerNames
 	lister containerLister
@@ -480,6 +482,9 @@ type nameRefresher struct {
 
 	mu      sync.Mutex
 	failing bool
+	// listed is set once a list succeeded: a socket that disappears after
+	// that is a Docker gone missing, not a host without one.
+	listed bool
 }
 
 // refresh lists the containers now; a failed list keeps the last map.
@@ -493,10 +498,15 @@ func (r *nameRefresher) refresh(ctx context.Context) {
 	defer r.mu.Unlock()
 
 	if err != nil && !r.failing {
-		r.log.Warn(r.who+" cannot list containers; new containers are not named (nor guarded) until it can",
+		log := r.log.Warn
+		if !r.listed && errors.Is(err, fs.ErrNotExist) {
+			log = r.log.Debug
+		}
+		log(r.who+" cannot list containers; new containers are not named (nor guarded) until it can",
 			zap.Error(err))
 	}
 	r.failing = err != nil
+	r.listed = r.listed || err == nil
 }
 
 // containerNames maps container ids to names. It is replaced whole and read
